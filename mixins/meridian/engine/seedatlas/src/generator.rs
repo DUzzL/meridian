@@ -5,6 +5,21 @@ use crate::biome_noise::{
     BiomeNoise, EndNoise, NetherNoise, Range, SAMPLE_NO_SHIFT, map_voronoi_plane,
     voronoi_access_3d, voronoi_sha, voronoi_src_range,
 };
+use crate::biomes::{NETHER_WASTES, NONE, THE_END};
+use crate::layers::{LayerStack, map_voronoi114_end};
+use crate::mc::*;
+
+// TEMP shim: `BiomeNoise::new(seed, large, mc)` is being added in
+// `biome_noise.rs` by another change; until it lands this forwards to the
+// current constructor.
+fn biome_noise_new(seed: u64, large: bool, _mc: i32) -> BiomeNoise {
+    BiomeNoise::new(seed, large)
+}
+
+// TEMP shim: `EndNoise::new(seed, mc)`, see above.
+fn end_noise_new(seed: u64, _mc: i32) -> EndNoise {
+    EndNoise::new(seed)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Dimension {
@@ -27,8 +42,14 @@ impl Dimension {
 #[derive(Clone, Debug)]
 #[allow(clippy::large_enum_variant)]
 enum Noise {
+    /// 1.18 and later.
     Overworld(Box<BiomeNoise>),
+    /// 1.0 to 1.17: the layer stack.
+    Layers(Box<LayerStack>),
+    /// 1.16 and later.
     Nether(NetherNoise),
+    /// The Nether before 1.16: nether wastes only.
+    NetherWastes,
     End(EndNoise),
 }
 
@@ -40,6 +61,9 @@ pub struct Generator {
     pub large_biomes: bool,
     pub dimension: Dimension,
     pub sha: u64,
+    /// The custom entry layer (`g->entry`) of the layered generator
+    /// (scale 0 in `layer_for_scale`), used by `finders`.
+    pub entry: Option<usize>,
     noise: Noise,
 }
 
@@ -52,17 +76,87 @@ impl Generator {
     /// `setupGenerator` + `applySeed` for version `mc`.
     pub fn versioned(seed: u64, dimension: Dimension, mc: i32, large_biomes: bool) -> Self {
         let noise = match dimension {
-            Dimension::Overworld => Noise::Overworld(Box::new(BiomeNoise::new(seed, large_biomes))),
-            Dimension::Nether => Noise::Nether(NetherNoise::new(seed)),
-            Dimension::End => Noise::End(EndNoise::new(seed)),
+            Dimension::Overworld => {
+                if mc <= MC_1_17 {
+                    let mut ls = LayerStack::new(mc, large_biomes);
+                    let e = ls.entry_1;
+                    ls.set_layer_seed(e, seed);
+                    Noise::Layers(Box::new(ls))
+                } else {
+                    Noise::Overworld(Box::new(biome_noise_new(seed, large_biomes, mc)))
+                }
+            }
+            Dimension::Nether => {
+                if mc >= MC_1_16_1 {
+                    Noise::Nether(NetherNoise::new(seed))
+                } else {
+                    Noise::NetherWastes
+                }
+            }
+            Dimension::End => Noise::End(end_noise_new(seed, mc)),
+        };
+        let sha = if mc >= MC_1_15 {
+            match &noise {
+                Noise::Layers(ls) if mc <= MC_1_17 => ls.layers[ls.entry_1].start_salt,
+                _ => voronoi_sha(seed),
+            }
+        } else {
+            0
         };
         Self {
             mc,
             seed,
             large_biomes,
             dimension,
-            sha: voronoi_sha(seed),
+            sha,
+            entry: None,
             noise,
+        }
+    }
+
+    /// The layer stack of the layered overworld (1.0 to 1.17).
+    pub fn layer_stack(&self) -> Option<&LayerStack> {
+        match &self.noise {
+            Noise::Layers(ls) => Some(ls),
+            _ => None,
+        }
+    }
+
+    /// The layer stack, mutable (to swap map functions as `finders.c`
+    /// does).
+    pub fn layer_stack_mut(&mut self) -> Option<&mut LayerStack> {
+        match &mut self.noise {
+            Noise::Layers(ls) => Some(ls),
+            _ => None,
+        }
+    }
+
+    /// `layered_scale` of the glue: the scale the generator produces
+    /// directly for `sample_step` (layered overworlds only have 1:4, 1:16,
+    /// 1:64 and 1:256).
+    pub fn layered_scale(&self, sample_step: i32) -> i32 {
+        if self.dimension != Dimension::Overworld || self.mc >= MC_1_18 || sample_step < 4 {
+            return sample_step;
+        }
+        let mut scale = 256;
+        while scale > sample_step {
+            scale /= 4;
+        }
+        scale
+    }
+
+    /// `getLayerForScale`: the index of the layer that generates `scale`
+    /// (0, 1, 4, 16, 64 or 256), if any.
+    pub fn layer_for_scale(&self, scale: i32) -> Option<usize> {
+        let ls = self.layer_stack()?;
+        match scale {
+            0 => self.entry,
+            1 => Some(ls.entry_1),
+            4 => Some(ls.entry_4),
+            16 => Some(ls.entry_16),
+            64 => Some(ls.entry_64),
+            256 => Some(ls.entry_256),
+            _ => None,
         }
     }
 
@@ -100,6 +194,27 @@ impl Generator {
         }
         let siz = r.sx as usize * r.sy as usize * r.sz as usize;
         match &self.noise {
+            Noise::Layers(ls) => {
+                let Some(entry) = self.layer_for_scale(r.scale) else {
+                    return vec![NONE; siz];
+                };
+                let n2d = r.sx as usize * r.sz as usize;
+                let len = siz + (ls.min_layer_cache_size(entry, r.sx, r.sz) - n2d);
+                let mut cache = vec![0; len];
+                if ls.gen_area(entry, &mut cache, r.x, r.z, r.sx, r.sz) != 0 {
+                    return vec![NONE; siz];
+                }
+                // the overworld has no vertical noise: expanding 2D into 3D
+                for k in 1..r.sy as usize {
+                    cache.copy_within(0..n2d, k * n2d);
+                }
+                cache.truncate(siz);
+                cache
+            }
+            Noise::NetherWastes => {
+                // up to 1.15 the Nether is nether wastes only
+                vec![NETHER_WASTES; siz]
+            }
             Noise::Overworld(bn) => {
                 if r.scale == 1 {
                     let s = voronoi_src_range(r);
@@ -169,7 +284,7 @@ impl Generator {
                     out
                 }
             }
-            Noise::End(en) => gen_end(en, r, self.sha),
+            Noise::End(en) => gen_end(en, r, self.sha, self.mc),
         }
     }
 }
@@ -196,11 +311,26 @@ fn gen_overworld_3d(bn: &BiomeNoise, r: Range, opt: bool) -> Vec<i32> {
     out
 }
 
-/// `genEndScaled` for 26.3.
-fn gen_end(en: &EndNoise, r: Range, sha: u64) -> Vec<i32> {
+/// `genEndScaled`.
+fn gen_end(en: &EndNoise, r: Range, sha: u64, mc: i32) -> Vec<i32> {
     let plane = r.sx as usize * r.sz as usize;
     let mut out = vec![0i32; plane * r.sy as usize];
+    if mc <= MC_1_8 {
+        out.fill(THE_END);
+        return out;
+    }
     match r.scale {
+        1 if mc <= MC_1_14 => {
+            // up to 1.14 voronoi noise is planar
+            let s = voronoi_src_range(r);
+            let src = s.sx as usize * s.sz as usize;
+            let mut buf = vec![0i32; (src + plane).max(plane * r.sy as usize)];
+            en.map(&mut buf, s.x, s.z, s.sx, s.sz);
+            map_voronoi114_end(&mut buf, r.x, r.z, r.sx, r.sz);
+            buf.truncate(plane);
+            buf.resize(plane * r.sy as usize, 0);
+            out = buf;
+        }
         1 => {
             let s = voronoi_src_range(r);
             let mut src = vec![0i32; s.sx as usize * s.sz as usize];
@@ -236,7 +366,7 @@ fn gen_end(en: &EndNoise, r: Range, sha: u64) -> Vec<i32> {
                     let o = (j * r.sx + i) as usize;
                     out[o] = if rsq <= 16384 {
                         THE_END
-                    } else if (rsq as u32 as i32) < 0 {
+                    } else if mc > MC_1_13 && (rsq as u32 as i32) < 0 {
                         END_BARRENS
                     } else {
                         let h = en.height_noise(hx as i32, hz as i32, 4);
