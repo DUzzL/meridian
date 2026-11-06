@@ -1149,6 +1149,9 @@ impl Hooks for Meridian {
         }
         let host: &dyn Host = host;
         self.with_state(host, |s| {
+            s.update_seeds();
+            s.seed_svc.poll();
+            s.poll_nearest();
             let map_host = HorizonHost {
                 host,
                 dimension: s.dimension.as_deref(),
@@ -1185,9 +1188,6 @@ impl Hooks for Meridian {
                 let layer = s.cave.update(&cave, allowed, bridge::under_roof(), p.position[1] + 1.62, Instant::now());
                 s.engine.set_layer(layer);
             }
-            s.update_seeds();
-            s.seed_svc.poll();
-            s.poll_nearest();
             let budget =
                 Duration::from_micros(s.config.current().performance.frame_budget_us as u64);
             s.engine.tick(&map_host, budget);
@@ -1825,7 +1825,7 @@ impl Meridian {
                                 icons.push(gpu_map::IconQuad { icon: ICON_COMPLETED, rect: [rect[0] + size - b * 0.8, rect[1] + size - b * 0.8, b, b], alpha });
                             }
                             if inside(rect, mouse) {
-                                s.hovered_marker = Some(HoveredMarker { id: m.id, name: m.name, dimension: dim, x: h.x, z: h.z, key: key.clone() });
+                                s.hovered_marker = Some(HoveredMarker { name: m.name, x: h.x, z: h.z, key: key.clone() });
                                 let mut first = m.name.to_owned();
                                 if h.flags & meridian_seedatlas::atlas::RESULT_APPROXIMATE != 0 {
                                     first.push_str(" (approx.)");
@@ -2176,9 +2176,7 @@ impl Meridian {
 /// A Seed Atlas marker the cursor is over.
 #[derive(Clone, Debug)]
 struct HoveredMarker {
-    id: &'static str,
     name: &'static str,
-    dimension: meridian_seedatlas::Dimension,
     x: i32,
     z: i32,
     key: Option<meridian_core::completed::StructureKey>,
@@ -2267,6 +2265,14 @@ impl State {
             }
             if !table.is_empty() {
                 self.seed_svc.set_looks(std::sync::Arc::new(GameLooks { table, fallback: meridian_core::seedatlas_look::VanillaLooks }));
+                self.seed_svc.set_terrain_sources(
+                    std::sync::Arc::new(|seed, large, ox, oz, step, w, h| {
+                        terrain_sampler::sample_overworld(seed, large, ox, oz, step, w, h, &|| true).map(|g| {
+                            meridian_core::seedatlas_look::SurfaceGrid { heights: g.heights, floors: g.floors, colors: g.colors }
+                        })
+                    }),
+                    std::sync::Arc::new(terrain_sampler::nether_cave_mask),
+                );
                 self.looks_ready = true;
             }
         }

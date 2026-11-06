@@ -476,7 +476,21 @@ const MAX_TILES: usize = 1200;
 struct TileLook {
     terrain: bool,
     looks: Arc<dyn BiomeLooks>,
+    /// Highlighted biomes (empty: no highlighting).
+    highlight: Arc<Vec<bool>>,
+    surface: Option<Arc<SurfaceSampler>>,
+    cave_mask: Option<Arc<CaveMasker>>,
 }
+
+/// The game's vanilla base terrain for detailed Overworld tiles: seed, large
+/// biomes, origin x/z, step, width, height (the Fabric version's
+/// `OverworldTerrainSampler.sample`).
+pub type SurfaceSampler = dyn Fn(i64, bool, i32, i32, i32, usize, usize) -> Option<seedatlas_look::SurfaceGrid>
+    + Send
+    + Sync;
+/// The Nether's carved air as a bit mask, two words a sample: seed, origin
+/// x/z, step, width, height (`NetherCaveMask.area`).
+pub type CaveMasker = dyn Fn(i64, i32, i32, i32, usize, usize) -> Vec<u64> + Send + Sync;
 
 /// Work sent to the threads: the generation it belongs to, the seed's
 /// generators, the marker kinds wanted, the tile look and the job.
@@ -525,6 +539,9 @@ impl Default for SeedService {
             look: TileLook {
                 terrain: true,
                 looks: Arc::new(VanillaLooks),
+                highlight: Arc::new(Vec::new()),
+                surface: None,
+                cave_mask: None,
             },
             clock: 0,
             jobs: None,
@@ -553,15 +570,30 @@ fn tile_pixels(atlas: &Atlas, look: &TileLook, job: Job) -> Vec<u32> {
     let ids = atlas
         .biome_area(dimension, x0, z0, y, step, n, n)
         .unwrap_or_default();
-    let argb: Vec<u32> = ids
+    let mut argb: Vec<u32> = ids
         .iter()
-        .map(|&id| meridian_seedatlas::biomes::color(id))
+        .map(|&id| meridian_seedatlas::biomes::color_in(atlas.mc, id))
         .collect();
     let size = n as usize;
-    let terrain_style = look.terrain && atlas.has_terrain();
+    seedatlas_look::apply_highlight(&mut argb, &ids, &look.highlight);
+    let terrain_style = look.terrain && atlas.has_terrain() && look.highlight.is_empty();
     if !terrain_style || ids.len() != size * size {
         return argb;
     }
+    // Detailed Overworld tiles: the game's vanilla base terrain, with a
+    // one-sample halo (the Fabric version's refinement pass).
+    let surface = match (&look.surface, dimension) {
+        (Some(sample), Dimension::Overworld) if step <= 4 => sample(
+            atlas.seed,
+            atlas.large_biomes,
+            x0 - step,
+            z0 - step,
+            step,
+            size + 2,
+            size + 2,
+        ),
+        _ => None,
+    };
     // Meridian computes a tile in one pass, so every tile is the refinement pass.
     let request = seedatlas_look::heights_request(
         dimension,
@@ -569,15 +601,23 @@ fn tile_pixels(atlas: &Atlas, look: &TileLook, job: Job) -> Vec<u32> {
         terrain_style,
         false,
         true,
-        false,
+        surface.is_some(),
         atlas.has_terrain(),
     );
     let (hx, hz, hn) = (x0 - step, z0 - step, n + 2);
     let heights = match request {
         HeightsRequest::None => None,
         HeightsRequest::Heights => atlas.height_area(dimension, hx, hz, step, hn, hn).ok(),
-        // Carved masks are not available here: the plain floor.
-        HeightsRequest::NetherFloor => atlas.nether_floor_area(hx, hz, y, step, hn, hn).ok(),
+        // Carving masks take long per coarse tile: only up to step 4.
+        HeightsRequest::NetherFloor => match &look.cave_mask {
+            Some(mask) if step <= 4 => {
+                let carved = mask(atlas.seed, hx, hz, step, hn as usize, hn as usize);
+                atlas
+                    .nether_floor_area_carved(hx, hz, y, step, hn, hn, &carved)
+                    .ok()
+            }
+            _ => atlas.nether_floor_area(hx, hz, y, step, hn, hn).ok(),
+        },
     };
     seedatlas_look::style_tile(&TileInput {
         looks: look.looks.as_ref(),
@@ -593,8 +633,8 @@ fn tile_pixels(atlas: &Atlas, look: &TileLook, job: Job) -> Vec<u32> {
         ids: &ids,
         argb: &argb,
         heights: heights.as_deref(),
-        surface: None,
-        highlight: &[],
+        surface: surface.as_ref(),
+        highlight: &look.highlight,
     })
 }
 
@@ -691,6 +731,13 @@ impl SeedService {
             self.look.terrain = s.terrain_look;
             self.invalidate();
         }
+        let ids: std::collections::BTreeSet<i32> =
+            s.highlighted_biomes.iter().map(|&b| i32::from(b)).collect();
+        let mask = seedatlas_look::highlight_mask(s.biome_highlight, &ids);
+        if *self.look.highlight != mask {
+            self.look.highlight = Arc::new(mask);
+            self.invalidate();
+        }
         let workers = if s.worker_threads == 0 {
             std::thread::available_parallelism()
                 .map_or(2, |n| n.get().saturating_sub(2).clamp(1, 4))
@@ -737,6 +784,18 @@ impl SeedService {
     /// tiles computed with the old data are dropped.
     pub fn set_looks(&mut self, looks: Arc<dyn BiomeLooks>) {
         self.look.looks = looks;
+        self.invalidate();
+    }
+
+    /// Sets the game's terrain sources for detailed tiles (the vanilla
+    /// surface and the Nether cave carvers).
+    pub fn set_terrain_sources(
+        &mut self,
+        surface: Arc<SurfaceSampler>,
+        cave_mask: Arc<CaveMasker>,
+    ) {
+        self.look.surface = Some(surface);
+        self.look.cave_mask = Some(cave_mask);
         self.invalidate();
     }
 
