@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 mod gpu;
+mod gpu_map;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -18,7 +19,8 @@ use horizon_client::mod_api::{
     ClientLevelUnloadEvent, ClientResourcesReloadedEvent, ClientStoppingEvent, CommandEvent,
     CommandsEvent, Flow, FrameEvent, Hooks, Host, HudBatch, HudEvent, KeyEvent, ModsEvent,
     NativeMod, RenderHooks, ScreenCharTypedPreEvent, ScreenClosingEvent,
-    ScreenKeyPressedPreEvent, ScreenMouseButtonPressedPreEvent, ScreenMouseScrolledPreEvent,
+    ScreenKeyPressedPreEvent, ScreenMouseButtonPressedPreEvent, ScreenMouseButtonReleasedPreEvent,
+    ScreenMouseDraggedPreEvent, ScreenMouseScrolledPreEvent, GuiLayerPreEvent, RenderHandEvent,
     MenuBackgroundEvent, ScreenRenderPostEvent, Text, TintSource, WorldLifecycleEvent, WorldPhase, WorldPrimitivesEvent,
 };
 use meridian_core::MapEngine;
@@ -31,6 +33,7 @@ use meridian_core::screens::{Action, Editor, Env, List, Screen, SettingsScreen};
 use meridian_core::persist::MapPaths;
 use meridian_core::radar;
 use meridian_core::waypoint::{self, Kind, Waypoint, WaypointBook};
+use meridian_core::worldmap::{MapAction, MenuItem, Overlay, WorldMap};
 use meridian_host::{
     BiomeAppearance, BlockAppearance, ChunkPos, ChunkSnapshot, ColumnSample, DimensionId,
     HostEvent, MapHost, PlayerState, ReadMode, Tint, WorldContext, WorldSource,
@@ -150,6 +153,14 @@ struct State {
     death_recorded: bool,
     /// Cave mode: automatic under a roof, or manual.
     cave: meridian_core::cave::CaveControl,
+    /// The world map's view (kept between openings) and its footsteps.
+    map: WorldMap,
+    /// The world map is the screen showing.
+    map_open: bool,
+    /// Open the world map from the next hook that may (`key`).
+    open_map: bool,
+    /// A screen opened from the map goes back to it when it closes.
+    return_to_map: bool,
 }
 
 /// Work a screen asked for that needs the game's write access.
@@ -413,6 +424,10 @@ impl Meridian {
                 pending: Vec::new(),
                 cave: Default::default(),
                 death_recorded: false,
+                map: WorldMap::new([0.0; 3]),
+                map_open: false,
+                open_map: false,
+                return_to_map: false,
             }
         });
         f(state)
@@ -439,6 +454,15 @@ fn paint(host: &dyn Host, batch: &mut HudBatch, ops: &[DrawOp]) {
             DrawOp::Fill { rect, argb } => host.fill(batch, *rect, *argb),
             DrawOp::Quad { points, argb } => host.quad(batch, *points, *argb),
             DrawOp::NineSlice { sprite, rect, argb } => host.gui_nine_slice(batch, sprite, *rect, *argb),
+            DrawOp::Plate { x, y, text, align, scale, pad, argb } => {
+                let w = host.text_width(text) * scale;
+                let x = match align {
+                    Align::Left => *x,
+                    Align::Center => x - w / 2.0,
+                    Align::Right => x - w,
+                };
+                host.fill(batch, [x - pad, y - pad, w + 2.0 * pad, 8.0 * scale + 2.0 * pad], *argb);
+            }
             DrawOp::Text { x, y, text, argb, align, scale } => {
                 let w = host.text_width(text) * scale;
                 let x = match align {
@@ -502,6 +526,13 @@ impl Meridian {
                             }
                         }
                         "waypoint.menu" => s.open_screen = Some(Screen::List(List::default())),
+                        "worldmap.open" if s.config.current().world_map.enabled => {
+                            if let Some(p) = &player {
+                                s.map.recenter(p.position);
+                            }
+                            s.map.menu = None;
+                            s.open_map = true;
+                        }
                         "settings" => s.open_screen = Some(Screen::Settings(SettingsScreen::default())),
                         "waypoint.next_set" => {
                             if let Some((book, dim)) = s.book_here() {
@@ -652,7 +683,11 @@ impl Hooks for Meridian {
 
     fn screen_render_post(&self, host: &dyn Host, event: &mut ScreenRenderPostEvent<'_>) {
         if event.screen.id == "mod" {
-            self.draw_screen(host, event.batch);
+            if self.map_open(host) {
+                self.draw_map(host, event.batch);
+            } else {
+                self.draw_screen(host, event.batch);
+            }
         }
         if event.screen.id == "dead" {
             self.record_death(host);
@@ -665,7 +700,48 @@ impl Hooks for Meridian {
         }
         let at = host.cursor();
         let right = event.button == 1;
+        if self.map_open(host) {
+            self.map_input(host, |s, view, map_data| {
+                if right {
+                    let w = s.map.to_world(at, view.gui, view.unit);
+                    let height = s.engine.sampler().column(w[0].floor() as i32, w[1].floor() as i32).map(|c| c.height);
+                    let waypoints = map_data.waypoints.iter().collect::<Vec<_>>();
+                    s.map.right_click(at, view.gui, view.unit, height, &waypoints);
+                } else {
+                    s.map.press(at);
+                }
+                MapAction::None
+            });
+            return Flow::Cancel;
+        }
         self.with_screen(host, |screen, env| ((), screen.click(at, right, env)));
+        Flow::Cancel
+    }
+
+    fn screen_mouse_button_released_pre(&self, host: &dyn Host, event: &mut ScreenMouseButtonReleasedPreEvent<'_>) -> Flow {
+        if host.mod_screen() != Some(MOD_ID) || !self.map_open(host) {
+            return Flow::Continue;
+        }
+        let at = host.cursor();
+        if event.button == 0 {
+            self.map_input(host, |s, view, _| s.map.release(at, view.gui, view.unit));
+        }
+        Flow::Cancel
+    }
+
+    fn screen_mouse_dragged_pre(&self, host: &dyn Host, event: &mut ScreenMouseDraggedPreEvent<'_>) -> Flow {
+        if host.mod_screen() != Some(MOD_ID) || !self.map_open(host) {
+            return Flow::Continue;
+        }
+        if event.button == 0 {
+            let delta = event.delta;
+            self.map_input(host, |s, view, _| {
+                if s.map.press.is_some() {
+                    s.map.drag(delta, view.unit);
+                }
+                MapAction::None
+            });
+        }
         Flow::Cancel
     }
 
@@ -687,6 +763,10 @@ impl Hooks for Meridian {
             return Flow::Continue;
         }
         let key = event.key.to_owned();
+        if self.map_open(host) {
+            self.map_key(host, &key);
+            return Flow::Cancel;
+        }
         self.with_screen(host, |screen, env| ((), screen.key(&key, env)));
         Flow::Cancel
     }
@@ -696,6 +776,14 @@ impl Hooks for Meridian {
             return Flow::Continue;
         }
         let lines = event.scroll[1] as f32;
+        if self.map_open(host) {
+            let at = host.cursor();
+            self.map_input(host, |s, view, _| {
+                s.map.scroll(lines as f64, at, view.gui, view.unit);
+                MapAction::None
+            });
+            return Flow::Cancel;
+        }
         self.with_screen(host, |screen, _| {
             screen.scroll(lines);
             ((), Action::None)
@@ -703,9 +791,18 @@ impl Hooks for Meridian {
         Flow::Cancel
     }
 
+    fn gui_layer_pre(&self, host: &mut dyn Host, _event: &mut GuiLayerPreEvent<'_>) -> Flow {
+        // The world map covers the HUD, as an opaque screen would.
+        if host.mod_screen() == Some(MOD_ID) && self.map_open(&*host) { Flow::Cancel } else { Flow::Continue }
+    }
+
+    fn render_hand(&self, host: &dyn Host, _event: &mut RenderHandEvent<'_>) -> Flow {
+        if host.mod_screen() == Some(MOD_ID) && self.map_open(host) { Flow::Cancel } else { Flow::Continue }
+    }
+
     fn menu_background(&self, host: &dyn Host, event: &mut MenuBackgroundEvent<'_>) {
         // Our screens blur the world behind them as the game's menus do.
-        if host.mod_screen() == Some(MOD_ID) && event.radius.is_none() {
+        if host.mod_screen() == Some(MOD_ID) && event.radius.is_none() && !self.map_open(host) {
             let blur = host.client_state().map_or(5.0, |c| c.menu_blur);
             *event.radius = Some(blur.max(1.0));
         }
@@ -713,7 +810,13 @@ impl Hooks for Meridian {
 
     fn screen_closing(&self, host: &dyn Host, event: &mut ScreenClosingEvent<'_>) {
         if event.screen.id == "mod" && host.mod_screen() == Some(MOD_ID) {
-            self.with_state(host, |s| s.screen = None);
+            self.with_state(host, |s| {
+                s.screen = None;
+                s.map_open = false;
+                s.return_to_map = false;
+                s.map.press = None;
+            });
+            gpu_map::set_frame(None);
         }
     }
 
@@ -737,11 +840,16 @@ impl Hooks for Meridian {
         if let Some(text) = notice {
             host.client_action_bar(Text::literal(text), false);
         }
-        let open = self.with_state(&*host, |s| s.open_screen.take());
+        let (open, open_map) = self.with_state(&*host, |s| (s.open_screen.take(), std::mem::take(&mut s.open_map)));
         if let Some(screen) = open
             && host.mod_screen_open(MOD_ID)
         {
             self.with_state(&*host, |s| s.screen = Some(screen));
+        } else if open_map && host.mod_screen_open(MOD_ID) {
+            self.with_state(&*host, |s| {
+                s.screen = None;
+                s.map_open = true;
+            });
         }
     }
 
@@ -867,8 +975,20 @@ impl Hooks for Meridian {
         for p in pending {
             match p {
                 Pending::CloseScreen => {
-                    host.mod_screen_close(MOD_ID);
-                    self.with_state(&*host, |s| s.screen = None);
+                    let back = self.with_state(&*host, |s| std::mem::take(&mut s.return_to_map));
+                    if back {
+                        self.with_state(&*host, |s| {
+                            s.screen = None;
+                            s.map_open = true;
+                        });
+                    } else {
+                        host.mod_screen_close(MOD_ID);
+                        self.with_state(&*host, |s| {
+                            s.screen = None;
+                            s.map_open = false;
+                        });
+                        gpu_map::set_frame(None);
+                    }
                 }
                 Pending::Chat(line) => {
                     if let Err(e) = host.send_chat(&line) {
@@ -900,6 +1020,7 @@ impl Hooks for Meridian {
             }
             let player = map_host.player();
             if let Some(p) = &player {
+                s.map.step(p.position);
                 // Keep the regions around the player in memory.
                 let here = RegionPos::of_block(p.position[0] as i32, p.position[2] as i32);
                 s.engine
@@ -980,6 +1101,11 @@ impl Hooks for Meridian {
             if host.playing() {
                 // Alive again: the next death gets its own deathpoint.
                 s.death_recorded = false;
+            }
+            if s.map_open {
+                // The world map covers the screen; nothing of the HUD shows.
+                gpu::set_frame(None);
+                return;
             }
             let map_host = HorizonHost { host, dimension: s.dimension.as_deref() };
             let Some(player) = map_host.player() else { return };
@@ -1093,21 +1219,7 @@ fn minimap_ops(
     let radar = &s.config.current().radar;
     bridge::want_entities(radar.enabled);
     if radar.enabled {
-        let entities: Vec<radar::Entity> = bridge::entities()
-            .into_iter()
-            .map(|e| radar::Entity {
-                id: e.id,
-                class: match e.class {
-                    bridge::EntityClass::Player => radar::Class::Player,
-                    bridge::EntityClass::Hostile => radar::Class::Hostile,
-                    bridge::EntityClass::Friendly => radar::Class::Friendly,
-                    bridge::EntityClass::Item => radar::Class::Item,
-                    bridge::EntityClass::Other => radar::Class::Other,
-                },
-                pos: e.pos,
-                invisible: e.invisible,
-            })
-            .collect();
+        let entities = radar_entities();
         ops.extend(radar::dots(&layout, player.position, player.yaw, &entities, radar));
     }
     let wp = &s.config.current().waypoints;
@@ -1307,5 +1419,251 @@ impl Meridian {
             }
             s.save_book();
         });
+    }
+}
+
+/// The bridge's entities as the radar's.
+fn radar_entities() -> Vec<radar::Entity> {
+    bridge::entities()
+        .into_iter()
+        .map(|e| radar::Entity {
+            id: e.id,
+            class: match e.class {
+                bridge::EntityClass::Player => radar::Class::Player,
+                bridge::EntityClass::Hostile => radar::Class::Hostile,
+                bridge::EntityClass::Friendly => radar::Class::Friendly,
+                bridge::EntityClass::Item => radar::Class::Item,
+                bridge::EntityClass::Other => radar::Class::Other,
+            },
+            pos: e.pos,
+            invisible: e.invisible,
+        })
+        .collect()
+}
+
+/// The map screen's size: GUI pixels and GUI pixels per minimap unit.
+#[derive(Clone, Copy, Debug)]
+struct MapView {
+    gui: [f32; 2],
+    unit: f32,
+}
+
+/// What map input needs from the state besides the view: the current
+/// dimension's waypoints (copied, so the view can change meanwhile).
+struct MapData {
+    waypoints: Vec<Waypoint>,
+}
+
+/// Regions requested around the map's centre at most (either way); the
+/// rest of a far zoomed-out view shows from the GPU's cache.
+const MAP_REQUEST_RADIUS: i32 = 7;
+/// Regions drawn either way of the centre at most.
+const MAP_DRAW_RADIUS: i32 = 48;
+
+impl Meridian {
+    fn map_open(&self, host: &dyn Host) -> bool {
+        self.with_state(host, |s| s.map_open)
+    }
+
+    fn map_view(host: &dyn Host) -> MapView {
+        let gui = host.client_state().map_or([0.0, 0.0], |c| c.gui_size);
+        let gui_scale = bridge::window_size().map_or(2.0, |w| w[1] as f32 / gui[1].max(1.0));
+        MapView { gui, unit: minimap::unit(gui[1], gui_scale) }
+    }
+
+    /// Runs map input with the state, then carries out what it asks for.
+    fn map_input(&self, host: &dyn Host, f: impl FnOnce(&mut State, MapView, &MapData) -> MapAction) {
+        let view = Self::map_view(host);
+        self.with_state(host, |s| {
+            let waypoints = match (&s.dimension, &s.book) {
+                (Some(dim), Some((_, book))) => book
+                    .dimension(dim)
+                    .map(|d| d.visible(s.config.current().waypoints.all_sets).into_iter().cloned().collect())
+                    .unwrap_or_default(),
+                _ => Vec::new(),
+            };
+            let data = MapData { waypoints };
+            let action = f(s, view, &data);
+            s.map_action(action);
+        });
+    }
+
+    /// A key on the map screen: our bindings first, then panning.
+    fn map_key(&self, host: &dyn Host, key: &str) {
+        let chosen = |id: &str, default: &str| host.mod_key(MOD_ID, id, default);
+        let hits: Vec<&'static str> = bindings_for_key(key, chosen).map(|b| b.id).collect();
+        let at = host.cursor();
+        let player = HorizonHost { host, dimension: None }.player();
+        self.with_state(host, |s| {
+            let view = Self::map_view(host);
+            let center = [view.gui[0] / 2.0, view.gui[1] / 2.0];
+            for id in &hits {
+                match *id {
+                    "worldmap.open" => s.pending.push(Pending::CloseScreen),
+                    "worldmap.zoom_in" | "minimap.zoom_in" => s.map.scroll(1.0, center, view.gui, view.unit),
+                    "worldmap.zoom_out" | "minimap.zoom_out" => s.map.scroll(-1.0, center, view.gui, view.unit),
+                    "waypoint.new" => {
+                        let w = s.map.to_world(at, view.gui, view.unit);
+                        let (x, z) = (w[0].floor() as i32, w[1].floor() as i32);
+                        let y = s.engine.sampler().column(x, z).map_or(64, |c| c.height as i32 + 1);
+                        s.map_action(MapAction::Menu(MenuItem::CreateWaypoint([x, y, z])));
+                    }
+                    _ => {}
+                }
+            }
+            if hits.is_empty() {
+                let step = 64.0 / s.map.scale(view.unit) as f32;
+                let delta = match key {
+                    "key.keyboard.left" | "key.keyboard.a" => Some([step, 0.0]),
+                    "key.keyboard.right" | "key.keyboard.d" => Some([-step, 0.0]),
+                    "key.keyboard.up" | "key.keyboard.w" => Some([0.0, step]),
+                    "key.keyboard.down" | "key.keyboard.s" => Some([0.0, -step]),
+                    _ => None,
+                };
+                if let Some([dx, dz]) = delta {
+                    s.map.center[0] -= dx as f64;
+                    s.map.center[1] -= dz as f64;
+                }
+                if key == "key.keyboard.space"
+                    && let Some(p) = &player
+                {
+                    s.map.recenter(p.position);
+                }
+            }
+        });
+    }
+
+    /// The map screen: terrain on the GPU, everything else over it.
+    fn draw_map(&self, host: &dyn Host, batch: &mut HudBatch) {
+        let view = Self::map_view(host);
+        if view.gui[0] <= 0.0 {
+            return;
+        }
+        let mouse = host.cursor();
+        let player = HorizonHost { host, dimension: None }.player();
+        let ops = self.with_state(host, |s| {
+            let Some(player) = player else { return Vec::new() };
+            let (gui, u) = (view.gui, view.unit);
+            let (min, max) = s.map.visible_regions(gui, u);
+            let mid = RegionPos::of_block(s.map.center[0].floor() as i32, s.map.center[1].floor() as i32);
+            let clamp = |p: RegionPos, r: i32| {
+                RegionPos::new(p.x.clamp(mid.x - r, mid.x + r), p.z.clamp(mid.z - r, mid.z + r))
+            };
+            s.engine.request_area(clamp(min, MAP_REQUEST_RADIUS), clamp(max, MAP_REQUEST_RADIUS));
+            let (dmin, dmax) = (clamp(min, MAP_DRAW_RADIUS), clamp(max, MAP_DRAW_RADIUS));
+            let mut regions = Vec::new();
+            for x in dmin.x..=dmax.x {
+                for z in dmin.z..=dmax.z {
+                    let pos = RegionPos::new(x, z);
+                    let (bx, bz) = pos.min_block();
+                    let a = s.map.to_screen([bx as f64, bz as f64], gui, u);
+                    let b = s.map.to_screen([(bx + 512) as f64, (bz + 512) as f64], gui, u);
+                    let region = s.engine.region(pos);
+                    regions.push(gpu_map::RegionQuad {
+                        pos: [x, z],
+                        rect: [a[0], a[1], b[0], b[1]],
+                        pixels: region.and_then(|r| r.shared_pixels()),
+                        revision: region.map_or(0, |r| r.revision),
+                    });
+                }
+            }
+            let world = {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                format!("{:?}", s.engine.context()).hash(&mut h);
+                s.engine.layer().hash(&mut h);
+                h.finish()
+            };
+            gpu_map::set_frame(Some(gpu_map::WorldMapFrame { gui, world, regions, at: Instant::now() }));
+            let hovered = s.map.to_world(mouse, gui, u);
+            let (hx, hz) = (hovered[0].floor() as i32, hovered[1].floor() as i32);
+            let sampler = s.engine.sampler();
+            let hovered_height = sampler.column(hx, hz).map(|c| c.height);
+            let hovered_biome = sampler.biome(hx, hz);
+            let settings = s.config.current();
+            let radar_on = settings.radar.enabled;
+            bridge::want_entities(radar_on);
+            let entities: Vec<radar::Entity> = if radar_on {
+                radar_entities().into_iter().filter(|e| radar::shown(e, &settings.radar)).collect()
+            } else {
+                Vec::new()
+            };
+            let waypoints: Vec<&Waypoint> = match (&s.dimension, &s.book) {
+                (Some(dim), Some((_, book))) if settings.waypoints.on_minimap => {
+                    book.dimension(dim).map(|d| d.visible(settings.waypoints.all_sets)).unwrap_or_default()
+                }
+                _ => Vec::new(),
+            };
+            let wm = &settings.world_map;
+            s.map.overlay(&Overlay {
+                gui,
+                unit: u,
+                mouse,
+                player: player.position,
+                yaw: player.yaw,
+                hovered_height,
+                hovered_biome,
+                waypoints: &waypoints,
+                entities: &entities,
+                show_coordinates: wm.show_coordinates,
+                show_zoom: wm.show_zoom,
+                show_biome: wm.show_hovered_biome,
+                show_footsteps: wm.footsteps,
+                cave_layer: s.engine.layer(),
+            })
+        });
+        paint(host, batch, &ops);
+    }
+}
+
+impl State {
+    /// Carries out what the map asked for.
+    fn map_action(&mut self, action: MapAction) {
+        let MapAction::Menu(item) = action else { return };
+        let tp = self.config.current().waypoints.teleport_format.clone();
+        let Some((book, dim)) = self.book_here() else { return };
+        let find = |book: &WaypointBook, id| book.dimension(&dim).and_then(|d| d.find(id).cloned());
+        match item {
+            MenuItem::Header(_) => {}
+            MenuItem::CreateWaypoint(pos) => {
+                let mut editor = Editor::new(book.dimension_mut(&dim), waypoint::now(), false);
+                editor.x = pos[0].to_string();
+                editor.y = pos[1].to_string();
+                editor.z = pos[2].to_string();
+                self.open_from_map(Screen::Editor(editor));
+            }
+            MenuItem::TeleportHere(pos) => {
+                let w = Waypoint::new("Here", pos, 0);
+                self.pending.push(Pending::CloseScreen);
+                self.pending.push(Pending::Chat(waypoint::command(&tp, &w, &dim)));
+            }
+            MenuItem::ShareLocation(pos) => {
+                let w = Waypoint::new("Location", pos, 0);
+                self.pending.push(Pending::Chat(waypoint::share_text(&w, &dim)));
+            }
+            MenuItem::EditWaypoint(id) => {
+                if let Some(w) = find(book, id) {
+                    let set = book.dimension(&dim).map_or_else(String::new, |d| d.current_set.clone());
+                    self.open_from_map(Screen::Editor(Editor::edit(&w, &set, false)));
+                }
+            }
+            MenuItem::TeleportToWaypoint(id) => {
+                if let Some(w) = find(book, id) {
+                    self.pending.push(Pending::CloseScreen);
+                    self.pending.push(Pending::Chat(waypoint::command(&tp, &w, &dim)));
+                }
+            }
+            MenuItem::DeleteWaypoint(id) => {
+                book.dimension_mut(&dim).remove(id);
+                book.dirty = true;
+            }
+        }
+    }
+
+    /// Shows `screen` in place of the map; closing it comes back.
+    fn open_from_map(&mut self, screen: Screen) {
+        self.screen = Some(screen);
+        self.map_open = false;
+        self.return_to_map = true;
     }
 }

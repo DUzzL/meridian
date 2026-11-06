@@ -57,6 +57,17 @@ pub enum DrawOp {
         /// GUI pixels per font pixel.
         scale: f32,
     },
+    /// A dark plate sized to a text drawn at (`x`, `y`) with `align` and
+    /// `scale` (the host knows the font's widths), `pad` GUI pixels around.
+    Plate {
+        x: f32,
+        y: f32,
+        text: String,
+        align: Align,
+        scale: f32,
+        pad: f32,
+        argb: u32,
+    },
     /// One of the game's own GUI sprites (`widget/button`), stretched
     /// nine-slice into `rect`.
     NineSlice {

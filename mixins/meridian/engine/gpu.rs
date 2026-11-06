@@ -131,11 +131,12 @@ struct Gpu {
 #[derive(Default)]
 pub struct MapRenderer {
     gpu: Mutex<Option<Gpu>>,
+    world_map: crate::gpu_map::WorldMapRenderer,
 }
 
 /// Texel format so the map's sRGB colours come out as the HUD's do: an
 /// sRGB view decodes them for linear (sRGB or float) targets.
-fn texel_format(target: wgpu::TextureFormat) -> wgpu::TextureFormat {
+pub(crate) fn texel_format(target: wgpu::TextureFormat) -> wgpu::TextureFormat {
     let gamma_target = matches!(
         target,
         wgpu::TextureFormat::Rgba8Unorm | wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Rgb10a2Unorm
@@ -267,6 +268,9 @@ impl Gpu {
 
 impl RenderHooks for MapRenderer {
     fn world_drawn(&self, event: &mut WorldDrawnEvent<'_, '_>) {
+        if self.world_map.draw(event) {
+            return;
+        }
         let Some(frame) = FRAME.lock().clone() else { return };
         if frame.at.elapsed() > std::time::Duration::from_millis(200) {
             return;

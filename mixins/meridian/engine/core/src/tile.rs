@@ -15,7 +15,7 @@ use meridian_host::{
 
 use crate::color::{self, accurate_color, vanilla_color};
 
-/// One column of a tile, 14 bytes.
+/// One column of a tile, 15 bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct TileColumn {
     /// Flat colour in the accurate style (overlays such as glass blended in).
@@ -31,7 +31,12 @@ pub struct TileColumn {
     pub light: u8,
     /// No block to draw: the column is empty (void, unloaded part).
     pub empty: bool,
+    /// Index into the tile's biome palette; [`NO_BIOME`] when unknown.
+    pub biome: u8,
 }
+
+/// A column whose biome is unknown (files from before biomes were kept).
+pub const NO_BIOME: u8 = u8::MAX;
 
 impl TileColumn {
     pub fn block_light(&self) -> u8 {
@@ -49,6 +54,8 @@ pub struct ChunkTile {
     pub pos: ChunkPos,
     /// 256 columns, x fastest.
     pub columns: Box<[TileColumn; CHUNK_COLUMNS]>,
+    /// Biome ids the columns' `biome` indexes (at most 255).
+    pub biomes: Vec<String>,
 }
 
 impl ChunkTile {
@@ -58,14 +65,22 @@ impl ChunkTile {
             columns: Box::new(
                 [TileColumn {
                     empty: true,
+                    biome: NO_BIOME,
                     ..Default::default()
                 }; CHUNK_COLUMNS],
             ),
+            biomes: Vec::new(),
         }
     }
 
     pub fn column(&self, x: usize, z: usize) -> &TileColumn {
         &self.columns[z * 16 + x]
+    }
+
+    /// The biome id of a column, if known.
+    pub fn biome(&self, x: usize, z: usize) -> Option<&str> {
+        let i = self.column(x, z).biome;
+        self.biomes.get(i as usize).map(String::as_str)
     }
 }
 
@@ -156,6 +171,13 @@ impl ColorTable {
 /// instead of panicking.
 pub fn build_tile(chunk: &PreparedChunk) -> ChunkTile {
     let mut tile = ChunkTile::empty(chunk.snapshot.pos);
+    tile.biomes = chunk
+        .snapshot
+        .biomes
+        .iter()
+        .take(NO_BIOME as usize)
+        .cloned()
+        .collect();
     let air = BlockAppearance {
         invisible: true,
         ..Default::default()
@@ -173,6 +195,9 @@ pub fn build_tile(chunk: &PreparedChunk) -> ChunkTile {
         let ground = block(col.block);
         let out = &mut tile.columns[i];
         out.height = col.height;
+        if (col.biome as usize) < tile.biomes.len() {
+            out.biome = col.biome as u8;
+        }
         out.light = (col.block_light.min(15) << 4) | col.sky_light.min(15);
         if ground.invisible && col.fluid.is_none() {
             out.empty = true;

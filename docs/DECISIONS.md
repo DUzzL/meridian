@@ -227,3 +227,27 @@ Die Darstellung folgt den Standard-Kategorien der Referenz (O2):
 - Filter pro Klasse, Umkehren per Taste.
 
 Symbole bzw. Köpfe statt Punkten (RAD-03) und Namen folgen.
+
+## D-023: Weltkarte als eigener Screen mit GPU-Regionstexturen
+
+M öffnet die Weltkarte als Meridian-Screen (`core/src/worldmap.rs`, Adapter `gpu_map.rs`).
+
+- Gelände: `RenderHooks::world_drawn` zeichnet jede sichtbare Region als Quad. Die Textur hat je nach Bildschirmgröße der Region 512, 128 oder 32 Texel (Mittelwert der erkundeten Pixel). Pro Frame werden höchstens 6 Texturen hochgeladen, die nächsten zuerst. Bis zu 256 MB bleiben im Cache, auch für Regionen, die nicht mehr im Speicher sind. So zeigt eine weit herausgezoomte Karte Gesehenes, ohne es neu zu laden.
+- Geladen werden höchstens 15×15 Regionen um die Kartenmitte, gezeichnet höchstens 97×97.
+- HUD und Hand blendet Meridian unter der Karte aus (`gui_layer_pre`, `render_hand`), statt die Karte als HUD-Bild zu malen. Keine Menü-Unschärfe.
+- Maße nach Referenzaufnahme r07 in Minimap-Einheiten:
+  - Zoom: 3,0x ≈ 1,9 Einheiten pro Block, Mausrad ×1,2 pro Raste um den Cursor.
+  - Texte: 2,3 Einheiten pro Schriftpixel, auf dunklen Plaketten. Oben stehen die Koordinaten des Blocks unter dem Cursor und sein Biom, unten der Zoom.
+  - Kompass oben rechts, Zoomknöpfe rechts auf 31 % und 39 % der Höhe.
+  - Roter Spielerpfeil, Wegpunkte als Schild mit Initiale, Entities als Punkte, Fußspuren.
+- Bedienung:
+  - Ziehen verschiebt, Pfeiltasten/WASD verschieben, Leertaste zentriert auf den Spieler, M schließt.
+  - B legt am Cursor einen Wegpunkt an.
+  - Rechtsklick öffnet ein Menü: Koordinaten, Wegpunkt erstellen, hierher teleportieren, Position teilen; auf einem Wegpunkt zusätzlich bearbeiten, hinteleportieren, löschen. Vom Menü geöffnete Screens kehren zur Karte zurück.
+
+## D-024: Biome pro Spalte im Regionsformat (Version 2)
+
+Die Karte zeigt das Biom unter dem Cursor. Dafür speichert jede Kachel eine Biom-Palette (höchstens 255 Namen) und jede Spalte einen Index (Spalte jetzt 15 Byte).
+
+- `.mrg` Version 2 schreibt die Palette vor die Spalten jeder Kachel.
+- Version-1-Dateien werden weiter gelesen: Ihr Biom ist unbekannt, bis der Chunk neu erfasst wird.

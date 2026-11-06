@@ -32,6 +32,7 @@ pub mod tile;
 pub mod ui;
 pub mod waypoint;
 pub mod worker;
+pub mod worldmap;
 
 pub use engine::{MapEngine, TickReport};
 pub use meridian_host as host;

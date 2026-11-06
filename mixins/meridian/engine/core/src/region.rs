@@ -33,7 +33,7 @@ pub struct Region {
     pub pos: RegionPos,
     tiles: Vec<Option<Box<ChunkTile>>>,
     /// ARGB, row-major, 512 × 512; empty until first drawn.
-    pixels: Vec<u32>,
+    pixels: std::sync::Arc<Vec<u32>>,
     dirty: ChunkMask,
     /// Tiles changed since the region was last saved.
     pub unsaved: bool,
@@ -54,7 +54,7 @@ impl Region {
         Self {
             pos,
             tiles: vec![None; REGION_CHUNK_COUNT],
-            pixels: Vec::new(),
+            pixels: std::sync::Arc::new(Vec::new()),
             dirty: ChunkMask::default(),
             unsaved: false,
             revision: 0,
@@ -128,6 +128,13 @@ impl Region {
         &self.pixels
     }
 
+    /// The pixels as a shared buffer, for a renderer on another thread;
+    /// `None` before the first draw. Drawing again copies the buffer only
+    /// while someone still holds it.
+    pub fn shared_pixels(&self) -> Option<std::sync::Arc<Vec<u32>>> {
+        (!self.pixels.is_empty()).then(|| self.pixels.clone())
+    }
+
     /// Surface height at a column of this region (local 0..512).
     pub fn height_at(&self, x: i32, z: i32) -> Option<i16> {
         let chunk = ChunkPos::new(
@@ -166,7 +173,7 @@ impl Region {
             return 0;
         }
         if self.pixels.is_empty() {
-            self.pixels = vec![UNEXPLORED; REGION_PIXELS];
+            self.pixels = std::sync::Arc::new(vec![UNEXPLORED; REGION_PIXELS]);
         }
         let todo: Vec<usize> = self.dirty.iter().take(max_chunks).collect();
         for &index in &todo {
@@ -182,6 +189,7 @@ impl Region {
         let (bx, bz) = chunk.min_block();
         let (rx, rz) = self.pos.min_block();
         let (ox, oz) = (bx - rx, bz - rz);
+        let mut out = [UNEXPLORED; 256];
         for z in 0..CHUNK_SIZE {
             for x in 0..CHUNK_SIZE {
                 let (lx, lz) = (ox + x, oz + z);
@@ -202,8 +210,15 @@ impl Region {
                         shade(col, north, west, shading)
                     }
                 };
-                self.pixels[(lz * REGION_BLOCKS + lx) as usize] = pixel;
+                out[(z * CHUNK_SIZE + x) as usize] = pixel;
             }
+        }
+        let pixels = std::sync::Arc::make_mut(&mut self.pixels);
+        for z in 0..CHUNK_SIZE {
+            let row = ((oz + z) * REGION_BLOCKS + ox) as usize;
+            let src = (z * CHUNK_SIZE) as usize;
+            pixels[row..row + CHUNK_SIZE as usize]
+                .copy_from_slice(&out[src..src + CHUNK_SIZE as usize]);
         }
     }
 }
