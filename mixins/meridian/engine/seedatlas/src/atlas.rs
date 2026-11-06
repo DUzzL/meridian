@@ -218,42 +218,16 @@ impl Atlas {
 
 // ----------------------------------------------------------- structures --
 
-use crate::endcity::{EndSurface, end_city_has_ship};
+use crate::endcity::{end_city_has_ship, end_city_terrain};
+use crate::finders::strongholds;
 use crate::noise::DoublePerlin;
 use crate::rng::Xoroshiro;
 use crate::structures::{
     config, end_islands, fixed_end_gateways, is_slime_chunk, kind, structure_pos,
 };
+use crate::surface::{DIM_END, SurfaceNoise};
+use crate::viability::variant;
 use crate::viability::viable_structure_pos;
-
-// TEMP shim: forwards to the engine files that do not take the version yet.
-fn variant(
-    structure: i32,
-    _mc: i32,
-    seed: u64,
-    x: i32,
-    z: i32,
-    biome: i32,
-) -> Option<crate::viability::Variant> {
-    crate::viability::variant(structure, seed, x, z, biome)
-}
-
-// TEMP shim.
-fn strongholds(seed: u64, _mc: i32, g: Option<&Generator>) -> Vec<crate::finders::Stronghold> {
-    crate::finders::strongholds(seed, g)
-}
-
-// TEMP shim.
-fn end_city_terrain(
-    _mc: i32,
-    seed: u64,
-    en: &crate::biome_noise::EndNoise,
-    sn: &EndSurface,
-    x: i32,
-    z: i32,
-) -> i32 {
-    crate::endcity::end_city_terrain(seed, en, sn, x, z)
-}
 
 /// Marker kinds beyond the engine's structures (the Fabric interface's).
 pub mod marker {
@@ -632,8 +606,8 @@ impl Atlas {
         Ok(out)
     }
 
-    fn end_surface(&self) -> EndSurface {
-        EndSurface::new(self.seed as u64)
+    fn end_surface(&self) -> SurfaceNoise {
+        SurfaceNoise::new(DIM_END, self.seed as u64)
     }
 
     /// `sax_scan_strongholds`: strongholds in the box, relocated by biome
