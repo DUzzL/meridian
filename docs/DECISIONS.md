@@ -101,3 +101,60 @@ Chunk-Ereignisse (E1) und das Lesen von Chunks samt Blockfarben (E2) fehlen noch
 - `HorizonHost::read_chunk` liefert `None`.
 - Engine, Speicherung, Tasten, Einstellungen und Welt-/Dimensionswechsel laufen bereits.
 - Die Übergangs-Mixins für E1/E2 kommen in Phase 3. Sie brauchen den Pin `horizon_revision`, der bereits auf die installierte Nightly gesetzt ist.
+
+## D-014: `core/` und `host/` liegen im `[api]`-Ordner (ersetzt Teile von D-008)
+
+Der Launcher kopiert nur den `[api]`-Ordner (`engine/`) nach `native-api/<id>` und trägt Pfad-Pakete selbst in den Lockfile ein (`launcher/src/native_mods/api.rs`). Pfad-Abhängigkeiten nach außerhalb (`../core`) würden im Launcher-Build ins Leere zeigen.
+
+Deshalb gilt jetzt:
+
+- `mixins/meridian/engine/{core,host}`,
+- `engine/Cargo.toml` verweist mit `path = "core"` bzw. `path = "host"` darauf,
+- der Repo-Workspace listet beide Crates und schließt `engine` aus.
+
+## D-015: Übergangs-Bridge für E1/E2 als Mixin-Module
+
+Die Bridge besteht aus zwei Modulen und drei HEAD-Injektionen (`mixins/meridian/bridge/`):
+
+- `world::meridian_changes` im Render-Crate: Injektionen in `World::set` und `World::edit_runs` melden geschriebene Chunks, mit einem Atomic-Schalter, solange Meridian aus ist.
+- `game::meridian_bridge` im Spiel: Die Injektion in `native_frame` meldet einmal pro Frame
+  - Laden und Entladen aus den Membership-Deltas der `ChunkMap`,
+  - Änderungen,
+  - angefragte Chunk-Snapshots (Scan wie Horizons Minimap, Budget 1,5 ms/Frame),
+  - Block- und Biom-Aussehen und das Biom am Spieler.
+- Der Adapter linkt gegen `horizon_client` und erreicht die Bridge als `horizon_client::game::meridian_bridge`.
+- Nur einfache Daten kreuzen die Grenze, `VERSION` sichert das Format ab.
+
+Folge für die Host-Schnittstelle: Chunks werden **angefragt** (`request_chunk`) und **abgeholt** (`take_chunks`), ein Frame später. Die Engine verfolgt offene Anfragen, fragt nach 200 Ticks neu und gibt nach 3 Versuchen auf, bis zum nächsten Lade- oder Änderungsereignis.
+
+`tools/check-adapter.sh` wendet die Mixins mit der horizon-mixins-Revision des Launchers an und kompiliert dagegen. Eigenheiten, die das Skript berücksichtigt:
+
+- `git archive`-Export ohne Symlinks,
+- `.horizon-revision` im Export,
+- frischer Stage-Ordner auf macOS,
+- `[api]` wird vor horizon-mixins entfernt,
+- Module dürfen keine `//!`-Kommentare enthalten.
+
+## D-016: Minimap vorerst aus HUD-Flächen statt Textur
+
+Der einzige Bild-Slot für Mods (`mod_image`) ist im Quellcode nicht einmal definiert (siehe PROGRESS) und würde von allen Mods geteilt. Bis E3 (dynamische Texturen) gilt deshalb:
+
+- Die Minimap wird als Raster aus `fill`-Rechtecken gezeichnet, höchstens 160 Zellen pro Seite.
+- Jede Zelle tastet die Welt an ihrer gedrehten Position ab; gleichfarbige Nachbarn einer Zeile werden zusammengefasst.
+- Die runde Form entsteht durch ausgelassene Zellen.
+
+Das funktioniert nur mit stabilen APIs, ist aber auf etwa 1 Zelle pro GUI-Pixel begrenzt. Für die Vollbildkarte (Phase 4) reicht das nicht, dort wird E3 nötig (Übergangs-Mixin oder Upstream).
+
+## D-017: Texturfarben vorläufig
+
+Die mittlere Texturfarbe pro Block ist noch nicht verfügbar: Die Sprite-Arrays liegen auf der GPU. Bis Phase 4 gilt:
+
+- „Genau“ nutzt für eingefärbte Blöcke Grau × Biom-Tint (Tint-Quelle aus Horizons `block_sprites`, Oberseite),
+- für alle anderen Blöcke die Kartenfarbe.
+
+Die beiden Farbstile unterscheiden sich daher vorerst kaum.
+
+## D-018: Todespunkte nur im Singleplayer, Wegpunkt-Editor folgt
+
+- `player_died` ist ein Server-Hook und liefert nur im Singleplayer den eigenen Tod. Für Multiplayer kommt eine Erkennung über den Todesbildschirm.
+- **B** legt vorerst wie **Num +** sofort einen Wegpunkt an. Editor und Liste als eigene Screens folgen im nächsten Schritt.

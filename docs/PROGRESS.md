@@ -86,3 +86,49 @@
 
 - Speicher: eine voll erkundete Region braucht etwa 3,6 MB Tiles + 1 MB Pixel. Bei 300 geladenen Regionen sind das im Extremfall rund 1,4 GB. Eine Messung und gegebenenfalls ein Speicherbudget zusätzlich zum Regionslimit folgen in Phase 6.
 - Ob der Launcher Pfad-Abhängigkeiten zwischen Crates im Bundle (`engine` → `../core`) akzeptiert, ist dokumentiert, aber noch nicht praktisch getestet. Rückfalloption: `core`/`host` per `#[path]` als Module in `engine` einbinden.
+
+## Phase 3: Minimap + Wegpunkte (in Arbeit)
+
+**Fertig und im Spiel geprüft** (Horizon `66f3981`, mit dem Launcher gebaut, Testwelt per `horizon-ctl`, Screenshots)
+
+- Übergangs-Bridge E1/E2 (D-015): Chunk-Ereignisse und Chunk-Lesen am Client funktionieren. Regionsdateien werden geschrieben.
+- Launcher-Build: `horizon-launcher native-build mixins/meridian --instance horizon --trust-native-code`. Der erste Build dauert 5 min, inkrementelle Builds etwa 5 s. Die Pfad-Crates im `[api]`-Ordner werden akzeptiert (D-014).
+- Minimap im HUD:
+  - Gelände aus der Engine,
+  - dreht mit dem Spieler (die Himmelsrichtungen stimmen),
+  - quadratisch oder rund, Zoomstufen, Vergrößern mit Z (halten oder umschalten),
+  - Spielerpfeil, Rahmen,
+  - Koordinaten und Biomname darunter,
+  - versteckt bei F1 und unter Screens.
+- Singleplayer- und Server-Erkennung: Singleplayer läuft in Horizon über die Adresse „local“. Der Weltordner kommt deshalb vom integrierten Server (`world_lifecycle`).
+- Wegpunkte:
+  - Modell, Sets, global/lokal, deaktiviert, temporär,
+  - Todespunkte (alte behalten oder löschen, erreichte löschen),
+  - Speicherung pro Welt in `waypoints.json`.
+- Tasten:
+  - Num + und B: Wegpunkt an der Position anlegen,
+  - nächstes Set, alle Sets anzeigen,
+  - Wegpunkte in der Welt bzw. auf der Minimap ein/aus.
+- `/meridian waypoint add|remove|tp|share|list [Name]`; Teleport über das einstellbare Befehlsformat.
+- Teilen: geteilte Wegpunkte aus dem Chat werden als temporäre Wegpunkte übernommen.
+- Anzeige in der Welt: Name und Distanz durch Wände, Beam (ab 8 Blöcken Abstand). Auf der Minimap: farbiges Kästchen mit Kürzel, am Rand festgehalten.
+
+**Build und Tests**
+
+- `cargo test --workspace --locked`: 75 Tests grün (73 Kern, 2 Host); Clippy sauber.
+- `tools/check-adapter.sh`: Mixins angewendet und Adapter kompiliert.
+
+**Offen in Phase 3**
+
+- Wegpunkt-Editor (B) und Wegpunktliste (U) als eigene Screens (`mod_screen_open` + `screen_render_post`).
+- Einstellungs-Screen (Y): Bis dahin gelten die Werte aus `config/meridian.toml`.
+- Höhlenmodus (CV-01..04): Bridge und Engine können `CaveFrom` schon lesen, Erkennung und Umschaltung fehlen.
+- Entity-Radar (RAD-*): braucht E4 (Entity-Typen, Singleplayer). Entweder kommt dafür ein weiteres Bridge-Stück oder ein Upstream-Hook.
+- Restliche Infoanzeigen (Licht, Zeit, Winkel, Dimension, Wetter), Chunkgitter, Schleimchunks, Licht-Overlay.
+- Todespunkte im Multiplayer: nur über den Todesbildschirm erkennbar.
+- Die Minimap kann F3 nicht erkennen (`corner_shown` ist kein Host-Helfer) und überlappt Horizons Toasts oben rechts.
+
+**Bekannte Probleme**
+
+- Die Farbstile „genau“ und „Vanilla“ unterscheiden sich kaum (D-017).
+- Die Minimap besteht aus Flächen statt einer Textur (D-016); bei sehr großer Karte gibt es gröbere Zellen.
