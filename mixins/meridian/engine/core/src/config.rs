@@ -396,7 +396,27 @@ pub struct SeedAtlasSettings {
     pub biome_opacity: u8,
     /// Structure markers (off by default, as in the Fabric version).
     pub structures: bool,
+    /// Legacy switch of the Fabric version up to config version 7; it reads
+    /// as a completed opacity of 0 (see [`SeedAtlasSettings::completed_opacity_pct`]).
     pub hide_completed: bool,
+    /// Completed structure markers in percent: 0 hides them, 100 draws them
+    /// like every other marker.
+    pub completed_opacity: u8,
+    /// Marker size in percent of the default band: 50, 75, 100, 150, 200 or 250.
+    pub marker_size: u16,
+    /// Draws only the highlighted biomes in focus.
+    pub biome_highlight: bool,
+    /// The engine biome ids to highlight (0..=255).
+    pub highlighted_biomes: std::collections::BTreeSet<u8>,
+    /// Also draws the seed map over explored terrain.
+    pub overlay_explored: bool,
+    /// Minecraft version chosen per world or server (`persist::source_key`);
+    /// a missing context follows the game ("auto", 26.3 in Horizon).
+    pub game_versions: std::collections::BTreeMap<String, String>,
+    /// The open world or server's key, so the settings screen can show its
+    /// version. Not stored; the adapter sets it when the world changes.
+    #[serde(skip)]
+    pub context_key: String,
     /// Blocks per biome sample at full zoom: 1, 2, 4, 8 or 16.
     pub biome_resolution: u8,
     /// Background threads; 0 picks from the CPU count.
@@ -422,6 +442,13 @@ impl Default for SeedAtlasSettings {
             biome_opacity: 255,
             structures: false,
             hide_completed: false,
+            completed_opacity: 100,
+            marker_size: 150,
+            biome_highlight: false,
+            highlighted_biomes: std::collections::BTreeSet::new(),
+            overlay_explored: false,
+            game_versions: std::collections::BTreeMap::new(),
+            context_key: String::new(),
             biome_resolution: 1,
             worker_threads: 0,
             prefetch_radius: 1,
@@ -431,6 +458,35 @@ impl Default for SeedAtlasSettings {
             end_y: 128,
             markers: std::collections::BTreeMap::new(),
         }
+    }
+}
+
+impl SeedAtlasSettings {
+    /// The completed markers' opacity in percent, 0 when the legacy hide
+    /// switch is on.
+    pub fn completed_opacity_pct(&self) -> u8 {
+        if self.hide_completed {
+            0
+        } else {
+            self.completed_opacity.min(100)
+        }
+    }
+
+    /// Completed markers at 0 % are not drawn, hovered or clicked.
+    pub fn completed_hidden(&self) -> bool {
+        self.completed_opacity_pct() == 0
+    }
+
+    /// The marker size as a factor of the default band.
+    pub fn marker_size_factor(&self) -> f32 {
+        f32::from(self.marker_size) / 100.0
+    }
+
+    /// The version chosen for the open context (`None`: follows the game).
+    pub fn game_version(&self) -> Option<&str> {
+        self.game_versions
+            .get(&self.context_key)
+            .map(String::as_str)
     }
 }
 

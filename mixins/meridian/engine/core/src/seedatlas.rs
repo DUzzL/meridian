@@ -39,53 +39,164 @@ pub fn parse_seed(input: &str) -> Option<i64> {
 pub struct SeedEntry {
     pub input: String,
     pub seed: i64,
+    /// The world type when the seed was entered. Kept for older files; the
+    /// effective setting is the current "World type" option (see
+    /// `seedatlas_state::resolve_seed`).
     pub large_biomes: bool,
 }
 
-/// Seeds by world or server (`persist::source_key`), in `seeds.toml`.
+/// The seed of the Nether or the End when it differs from the base seed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SeedValue {
+    pub input: String,
+    pub seed: i64,
+}
+
+/// Everything needed to generate one dimension: the seed, the world type
+/// and the Minecraft version (`meridian_seedatlas::mc`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SeedSpec {
+    pub seed: i64,
+    pub large_biomes: bool,
+    pub mc: i32,
+}
+
+/// The index of a dimension in per-dimension arrays: Overworld, Nether, End.
+pub fn dim_index(d: Dimension) -> usize {
+    match d {
+        Dimension::Overworld => 0,
+        Dimension::Nether => 1,
+        Dimension::End => 2,
+    }
+}
+
+/// Seeds by world or server (`persist::source_key`), in `seeds.toml`: the
+/// base seed (`[seeds.<key>]`, the format of older releases) and the
+/// optional own seeds of the Nether and the End (`[nether.<key>]`,
+/// `[end.<key>]`). The base seed applies to every dimension without one.
 #[derive(Debug, Default)]
 pub struct SeedBook {
     path: PathBuf,
     entries: BTreeMap<String, SeedEntry>,
+    nether: BTreeMap<String, SeedValue>,
+    end: BTreeMap<String, SeedValue>,
+    /// Contexts whose world seed must not be picked up again after
+    /// `clear`, until the context changes. Not stored.
+    suppressed: HashSet<String>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
 struct SeedFile {
     #[serde(default)]
     seeds: BTreeMap<String, SeedEntry>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    nether: BTreeMap<String, SeedValue>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    end: BTreeMap<String, SeedValue>,
 }
 
 impl SeedBook {
     pub fn load(data_dir: &Path) -> Self {
         let path = data_dir.join("seeds.toml");
-        let entries = std::fs::read_to_string(&path)
+        let file = std::fs::read_to_string(&path)
             .ok()
             .and_then(|t| toml::from_str::<SeedFile>(&t).ok())
-            .map(|f| f.seeds)
             .unwrap_or_default();
-        Self { path, entries }
+        Self {
+            path,
+            entries: file.seeds,
+            nether: file.nether,
+            end: file.end,
+            suppressed: HashSet::new(),
+        }
     }
 
+    /// The base seed of a context.
     pub fn get(&self, key: &str) -> Option<&SeedEntry> {
         self.entries.get(key)
     }
 
+    /// Sets the base seed (and picks up the world's own seed again).
     pub fn set(&mut self, key: &str, entry: SeedEntry) {
         self.entries.insert(key.to_owned(), entry);
+        self.suppressed.remove(key);
         self.save();
     }
 
+    /// Removes the seeds of a context, the Nether's and End's own included;
+    /// whether there were any.
     pub fn clear(&mut self, key: &str) -> bool {
-        let had = self.entries.remove(key).is_some();
+        let had = self.entries.remove(key).is_some()
+            | self.nether.remove(key).is_some()
+            | self.end.remove(key).is_some();
         if had {
             self.save();
         }
         had
     }
 
+    /// True when the context has a base seed or an own seed.
+    pub fn has_any(&self, key: &str) -> bool {
+        self.entries.contains_key(key)
+            || self.nether.contains_key(key)
+            || self.end.contains_key(key)
+    }
+
+    /// The own seed of the Nether or the End (never of the Overworld).
+    pub fn dimension_seed(&self, key: &str, d: Dimension) -> Option<&SeedValue> {
+        match d {
+            Dimension::Overworld => None,
+            Dimension::Nether => self.nether.get(key),
+            Dimension::End => self.end.get(key),
+        }
+    }
+
+    /// Gives the Nether or the End its own seed; the Overworld uses the
+    /// base seed, so this refuses it.
+    pub fn set_dimension_seed(&mut self, key: &str, d: Dimension, value: SeedValue) -> bool {
+        let map = match d {
+            Dimension::Overworld => return false,
+            Dimension::Nether => &mut self.nether,
+            Dimension::End => &mut self.end,
+        };
+        map.insert(key.to_owned(), value);
+        self.save();
+        true
+    }
+
+    /// Removes the own seed of the Nether or the End; whether there was one.
+    pub fn clear_dimension_seed(&mut self, key: &str, d: Dimension) -> bool {
+        let had = match d {
+            Dimension::Overworld => false,
+            Dimension::Nether => self.nether.remove(key).is_some(),
+            Dimension::End => self.end.remove(key).is_some(),
+        };
+        if had {
+            self.save();
+        }
+        had
+    }
+
+    /// Stops the world's own seed from being used for a context.
+    pub fn suppress_detected(&mut self, key: &str) {
+        self.suppressed.insert(key.to_owned());
+    }
+
+    /// Whether the world's own seed is ignored for a context.
+    pub fn detected_suppressed(&self, key: &str) -> bool {
+        self.suppressed.contains(key)
+    }
+
+    /// Forgets suppressions of other contexts when the open one changes.
+    pub fn context_changed(&mut self, key: &str) {
+        self.suppressed.retain(|k| k == key);
+    }
+
     fn save(&self) {
         let file = SeedFile {
             seeds: self.entries.clone(),
+            nether: self.nether.clone(),
+            end: self.end.clone(),
         };
         match toml::to_string_pretty(&file) {
             Ok(text) => {
@@ -303,7 +414,7 @@ pub fn dimension_of(id: &str) -> Option<Dimension> {
     }
 }
 
-fn dimension_of_kind(structure: i32) -> Dimension {
+pub fn dimension_of_kind(structure: i32) -> Dimension {
     match structure {
         marker::END_SHIP => Dimension::End,
         marker::STRONGHOLD | marker::SPAWN | marker::SLIME_CHUNK | marker::ORE_VEIN => {
@@ -364,7 +475,10 @@ const MAX_TILES: usize = 1200;
 type Work = (u64, Arc<Atlas>, Vec<i32>, Job);
 
 pub struct SeedService {
-    atlas: Option<Arc<Atlas>>,
+    /// The generators per dimension (Overworld, Nether, End); equal seeds
+    /// share one.
+    atlases: [Option<Arc<Atlas>>; 3],
+    specs: [Option<SeedSpec>; 3],
     generation: u64,
     kinds: Vec<i32>,
     tiles: HashMap<Job, (Tile, u64)>,
@@ -380,7 +494,7 @@ pub struct SeedService {
 impl std::fmt::Debug for SeedService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SeedService")
-            .field("seed", &self.atlas.as_ref().map(|a| a.seed))
+            .field("seeds", &self.specs.map(|s| s.map(|s| s.seed)))
             .field("tiles", &self.tiles.len())
             .field("markers", &self.markers.len())
             .field("pending", &self.pending.len())
@@ -392,7 +506,8 @@ impl Default for SeedService {
     fn default() -> Self {
         let (done_tx, done) = mpsc::channel();
         Self {
-            atlas: None,
+            atlases: [None, None, None],
+            specs: [None; 3],
             generation: 0,
             kinds: Vec::new(),
             tiles: HashMap::new(),
@@ -459,9 +574,21 @@ fn run(atlas: &Atlas, kinds: &[i32], job: Job) -> Done {
 }
 
 impl SeedService {
-    /// Sets the seed (or none) and the settings the work depends on; a
-    /// change drops everything computed.
+    /// Sets one seed for every dimension (or none) and the settings the
+    /// work depends on, generating the newest version.
     pub fn configure(&mut self, seed: Option<(i64, bool)>, s: &SeedAtlasSettings) {
+        let spec = seed.map(|(seed, large_biomes)| SeedSpec {
+            seed,
+            large_biomes,
+            mc: meridian_seedatlas::mc::MC_NEWEST,
+        });
+        self.configure_dimensions([spec; 3], s);
+    }
+
+    /// Sets what each dimension (Overworld, Nether, End; see [`dim_index`])
+    /// generates from, and the settings the work depends on; a change drops
+    /// what was computed.
+    pub fn configure_dimensions(&mut self, specs: [Option<SeedSpec>; 3], s: &SeedAtlasSettings) {
         let kinds: Vec<i32> = if s.structures {
             MARKERS
                 .iter()
@@ -471,13 +598,24 @@ impl SeedService {
         } else {
             Vec::new()
         };
-        let same_seed = match (&self.atlas, seed) {
-            (Some(a), Some((seed, large))) => a.seed == seed && a.large_biomes == large,
-            (None, None) => true,
-            _ => false,
-        };
-        if !same_seed {
-            self.atlas = seed.map(|(seed, large)| Arc::new(Atlas::new(seed, large)));
+        if specs != self.specs {
+            let old_specs = self.specs;
+            let old = std::mem::take(&mut self.atlases);
+            for i in 0..3 {
+                let Some(spec) = specs[i] else { continue };
+                let shared = (0..i)
+                    .find(|&j| specs[j] == Some(spec))
+                    .and_then(|j| self.atlases[j].clone())
+                    .or_else(|| {
+                        (0..3)
+                            .find(|&j| old_specs[j] == Some(spec))
+                            .and_then(|j| old[j].clone())
+                    });
+                self.atlases[i] = Some(shared.unwrap_or_else(|| {
+                    Arc::new(Atlas::versioned(spec.seed, spec.large_biomes, spec.mc))
+                }));
+            }
+            self.specs = specs;
             self.generation += 1;
             self.tiles.clear();
             self.markers.clear();
@@ -529,11 +667,22 @@ impl SeedService {
     }
 
     pub fn active(&self) -> bool {
-        self.atlas.is_some()
+        self.atlases.iter().any(Option::is_some)
     }
 
+    /// The Overworld's generators (its seed is the base seed).
     pub fn atlas(&self) -> Option<&Arc<Atlas>> {
-        self.atlas.as_ref()
+        self.atlases[0].as_ref()
+    }
+
+    /// The generators of one dimension, with the seed that generates it.
+    pub fn atlas_for(&self, dimension: Dimension) -> Option<&Arc<Atlas>> {
+        self.atlases[dim_index(dimension)].as_ref()
+    }
+
+    /// What one dimension generates from.
+    pub fn spec_for(&self, dimension: Dimension) -> Option<SeedSpec> {
+        self.specs[dim_index(dimension)]
     }
 
     /// Collects finished work.
@@ -576,7 +725,8 @@ impl SeedService {
     }
 
     fn submit(&mut self, job: Job) {
-        let (Some(atlas), Some(tx)) = (&self.atlas, &self.jobs) else {
+        let (Some(atlas), Some(tx)) = (&self.atlases[dim_index(job_dimension(&job))], &self.jobs)
+        else {
             return;
         };
         // A bounded queue: what scrolled out of view is not computed late.
@@ -618,11 +768,18 @@ impl SeedService {
 
     /// The biome at a block, computed now (for the hover tooltip).
     pub fn biome_at(&self, dimension: Dimension, x: i32, y: i32, z: i32) -> Option<i32> {
-        self.atlas.as_ref().map(|a| a.biome_at(dimension, x, y, z))
+        self.atlas_for(dimension)
+            .map(|a| a.biome_at(dimension, x, y, z))
     }
 
     pub fn pending(&self) -> usize {
         self.pending.len()
+    }
+}
+
+fn job_dimension(job: &Job) -> Dimension {
+    match job {
+        Job::Tile { dimension, .. } | Job::Markers { dimension, .. } => *dimension,
     }
 }
 

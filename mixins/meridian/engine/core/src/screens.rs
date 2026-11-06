@@ -10,6 +10,10 @@ use crate::config::{
     BlockColors, ClockInfo, Corner, LightInfo, MinimapShape, MinimapSize, Settings, Slopes,
 };
 use crate::minimap::Align;
+use crate::seedatlas_state::{
+    MARKER_SIZE_STEPS, completed_opacity_label, cycle_game_version, game_version_name,
+    next_marker_size, world_type_label,
+};
 use crate::ui::{self, Widget};
 use crate::waypoint::{self, COLORS, DimensionWaypoints, Kind, Waypoint};
 
@@ -1300,7 +1304,61 @@ fn seed_atlas_options() -> Vec<Opt> {
                 s.seed_atlas.biome_opacity = ((next * 255 + 50) / 100) as u8;
             },
         },
+        toggle!("Overlay explored", SeedAtlas, seed_atlas.overlay_explored),
+        toggle!("Biome highlighting", SeedAtlas, seed_atlas.biome_highlight),
         toggle!("Structures", SeedAtlas, seed_atlas.structures),
+        Opt {
+            label: "Completed",
+            group: SeedAtlas,
+            value: |s| completed_opacity_label(s.seed_atlas.completed_opacity_pct()),
+            step: |s, b| {
+                // 0 % (hidden) to 100 % in steps of 10; the legacy hide
+                // switch is folded in.
+                let pct = i32::from(s.seed_atlas.completed_opacity_pct());
+                let next = if b {
+                    (pct - 10).rem_euclid(110)
+                } else {
+                    (pct + 10) % 110
+                };
+                s.seed_atlas.hide_completed = false;
+                s.seed_atlas.completed_opacity = next.min(100) as u8;
+            },
+        },
+        Opt {
+            label: "Marker size",
+            group: SeedAtlas,
+            value: |s| format!("{}%", s.seed_atlas.marker_size),
+            step: |s, b| {
+                s.seed_atlas.marker_size = if b {
+                    let i = MARKER_SIZE_STEPS
+                        .iter()
+                        .position(|&v| v == s.seed_atlas.marker_size)
+                        .unwrap_or(3);
+                    MARKER_SIZE_STEPS[(i + MARKER_SIZE_STEPS.len() - 1) % MARKER_SIZE_STEPS.len()]
+                } else {
+                    next_marker_size(s.seed_atlas.marker_size)
+                };
+            },
+        },
+        Opt {
+            label: "World",
+            group: SeedAtlas,
+            value: |s| {
+                format!(
+                    "{}, {}",
+                    world_type_label(s.seed_atlas.large_biomes),
+                    game_version_name(&s.seed_atlas, &s.seed_atlas.context_key)
+                )
+            },
+            // A click changes the version of the open world or server; the
+            // world type has its own option.
+            step: |s, b| {
+                if !s.seed_atlas.context_key.is_empty() {
+                    let key = s.seed_atlas.context_key.clone();
+                    cycle_game_version(&mut s.seed_atlas, &key, b);
+                }
+            },
+        },
         Opt {
             label: "Biome resolution",
             group: SeedAtlas,
@@ -1621,5 +1679,54 @@ mod tests {
             (o.step)(&mut s, true);
             assert_eq!((o.value)(&s), start, "{}", o.label);
         }
+    }
+
+    #[test]
+    fn seed_atlas_options_match_the_fabric_labels() {
+        let opts = options();
+        let find = |label: &str| opts.iter().find(|o| o.label == label).unwrap();
+        let mut s = Settings::default();
+        assert_eq!((find("Completed").value)(&s), "100%");
+        assert_eq!((find("Marker size").value)(&s), "150%");
+        assert_eq!((find("Overlay explored").value)(&s), "OFF");
+        assert_eq!((find("Biome highlighting").value)(&s), "OFF");
+        assert_eq!((find("World").value)(&s), "Normal, Auto (26.3)");
+
+        // Completed steps down to Hidden and wraps to 100 %.
+        let completed = find("Completed");
+        (completed.step)(&mut s, true);
+        assert_eq!((completed.value)(&s), "90%");
+        s.seed_atlas.completed_opacity = 10;
+        (completed.step)(&mut s, true);
+        assert_eq!((completed.value)(&s), "Hidden");
+        assert!(s.seed_atlas.completed_hidden());
+        (completed.step)(&mut s, false);
+        assert_eq!((completed.value)(&s), "10%");
+        // The legacy hide switch reads as hidden and is folded in.
+        s.seed_atlas.hide_completed = true;
+        assert_eq!((completed.value)(&s), "Hidden");
+        (completed.step)(&mut s, false);
+        assert!(!s.seed_atlas.hide_completed);
+
+        // Marker size walks the Fabric steps both ways.
+        let size = find("Marker size");
+        (size.step)(&mut s, false);
+        assert_eq!((size.value)(&s), "200%");
+        (size.step)(&mut s, true);
+        (size.step)(&mut s, true);
+        assert_eq!((size.value)(&s), "100%");
+
+        // The world option shows the type and the version of the open
+        // world, and changes that version.
+        s.seed_atlas.large_biomes = true;
+        s.seed_atlas.context_key = "sp-w".into();
+        let world = find("World");
+        (world.step)(&mut s, false);
+        assert_eq!((world.value)(&s), "Large Biomes, 26.3");
+        (world.step)(&mut s, false);
+        assert_eq!((world.value)(&s), "Large Biomes, 26.2");
+        (world.step)(&mut s, true);
+        (world.step)(&mut s, true);
+        assert_eq!((world.value)(&s), "Large Biomes, Auto (26.3)");
     }
 }
