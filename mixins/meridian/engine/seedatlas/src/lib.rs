@@ -20,6 +20,7 @@ pub mod mc;
 pub mod noise;
 pub mod rng;
 pub mod structures;
+pub mod terrain;
 pub mod viability;
 
 pub use atlas::{Atlas, AtlasError};

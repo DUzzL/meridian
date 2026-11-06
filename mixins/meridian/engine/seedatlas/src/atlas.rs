@@ -26,6 +26,8 @@ pub struct Atlas {
     overworld: Generator,
     nether: Generator,
     end: Generator,
+    /// The terrain noise of the glue (1.18 and later).
+    terrain: Option<crate::terrain::Terrain>,
 }
 
 impl Atlas {
@@ -44,6 +46,7 @@ impl Atlas {
             overworld: Generator::versioned(s, Dimension::Overworld, mc, large_biomes),
             nether: Generator::versioned(s, Dimension::Nether, mc, large_biomes),
             end: Generator::versioned(s, Dimension::End, mc, large_biomes),
+            terrain: (mc >= crate::terrain::TERRAIN_MC).then(|| crate::terrain::Terrain::new(s)),
         }
     }
 
@@ -627,7 +630,13 @@ impl Atlas {
 // ------------------------------------------------- terrain (ABI 6, 1.18+) --
 
 impl Atlas {
-    /// `sax_height_area_sampled`. TODO(port).
+    /// `sax_context_has_terrain`.
+    pub fn has_terrain(&self) -> bool {
+        self.mc >= crate::terrain::TERRAIN_MC
+    }
+
+    /// `sax_height_area_sampled`: terrain heights of the Overworld and the
+    /// End (0 is void there).
     #[allow(clippy::too_many_arguments)]
     pub fn height_area(
         &self,
@@ -638,11 +647,11 @@ impl Atlas {
         w: i32,
         h: i32,
     ) -> Result<Vec<f32>, AtlasError> {
-        let _ = (dimension, ox, oz, step, w, h);
-        Err(AtlasError::Unsupported)
+        let bn = self.overworld.overworld().expect("the Overworld generator");
+        crate::terrain::height_area(self.terrain.as_ref(), bn, dimension, ox, oz, step, w, h)
     }
 
-    /// `sax_nether_floor_area_sampled`. TODO(port).
+    /// `sax_nether_floor_area_sampled`.
     #[allow(clippy::too_many_arguments)]
     pub fn nether_floor_area(
         &self,
@@ -653,12 +662,11 @@ impl Atlas {
         w: i32,
         h: i32,
     ) -> Result<Vec<f32>, AtlasError> {
-        let _ = (ox, oz, y, step, w, h);
-        Err(AtlasError::Unsupported)
+        self.nether_floor(ox, oz, y, step, w, h, None)
     }
 
     /// `sax_nether_floor_area_carved_sampled`: two mask words a sample, bit
-    /// y marks carved air. TODO(port).
+    /// y marks carved air.
     #[allow(clippy::too_many_arguments)]
     pub fn nether_floor_area_carved(
         &self,
@@ -670,7 +678,20 @@ impl Atlas {
         h: i32,
         carved: &[u64],
     ) -> Result<Vec<f32>, AtlasError> {
-        let _ = (ox, oz, y, step, w, h, carved);
-        Err(AtlasError::Unsupported)
+        self.nether_floor(ox, oz, y, step, w, h, Some(carved))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn nether_floor(
+        &self,
+        ox: i32,
+        oz: i32,
+        y: i32,
+        step: i32,
+        w: i32,
+        h: i32,
+        carved: Option<&[u64]>,
+    ) -> Result<Vec<f32>, AtlasError> {
+        crate::terrain::nether_floor_area(self.terrain.as_ref(), ox, oz, y, step, w, h, carved)
     }
 }
