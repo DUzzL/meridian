@@ -28,7 +28,7 @@ Begründung:
 
 ## D-004: Trait-Mod statt reiner Mixins
 
-Wo Katalog-Hooks reichen, nutzt der Adapter die Trait-Mod-API (`"hooks": N`, kein Revision-Pin). Mixins kommen nur für Lücken zum Einsatz (siehe O-001).
+Wo Katalog-Hooks reichen, nutzt der Adapter die Trait-Mod-API (`"hooks": N`, kein Revision-Pin). Mixins kommen nur für Lücken zum Einsatz (siehe D-005).
 
 ## D-005: Umgang mit fehlenden Client-APIs (entschieden 2026-11-06)
 
