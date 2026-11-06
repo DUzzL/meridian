@@ -1,6 +1,6 @@
 # Fortschritt
 
-## Phase 0: Recherche Horizon (abgeschlossen, wartet auf Rückmeldung)
+## Phase 0: Recherche Horizon (abgeschlossen)
 
 **Fertig**
 
@@ -9,11 +9,11 @@
   - welche Client-Hooks existieren,
   - welche Lücken bestehen, mit Erweiterungsvorschlägen E1–E6 für spätere PRs an Horizon.
 - Horizon ist **nicht** rein serverseitig. Phase 0 endet deshalb nicht mit einem Stopp wegen fehlendem Client.
-- `docs/DECISIONS.md`: Architektur (D-003), Umgebung (D-001, D-002) und drei offene Fragen (O-001 bis O-003).
+- `docs/DECISIONS.md`: Architektur (D-003), Umgebung (D-001, D-002), Übergangs-Mixins plus Upstream-PRs (D-005), GPLv3 (D-006), Name Meridian (D-007).
 
-**Offen / blockiert**
+**Offen**
 
-- O-001 Strategie für fehlende APIs, O-002 Lizenz, O-003 Name: Rückfrage an den Auftraggeber.
+- Nächster Schritt: Phase 1 (Feature- und Hotkey-Inventar).
 - Noch kein Code, daher weder Build noch Tests. Beides beginnt in Phase 2.
 
 **Bekannte Probleme**

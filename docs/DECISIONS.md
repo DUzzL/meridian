@@ -30,7 +30,7 @@ Begründung:
 
 Wo Katalog-Hooks reichen, nutzt der Adapter die Trait-Mod-API (`"hooks": N`, kein Revision-Pin). Mixins kommen nur für Lücken zum Einsatz (siehe O-001).
 
-## O-001 (offen): Umgang mit fehlenden Client-APIs
+## D-005: Umgang mit fehlenden Client-APIs (entschieden 2026-11-06)
 
 Zur Wahl stehen:
 
@@ -38,17 +38,17 @@ Zur Wahl stehen:
 - **(b)** nur stabile Hooks mit langsamen Fallbacks,
 - **(c)** zuerst die Upstream-PRs.
 
-Empfehlung: (a).
+**Entschieden: (a).** Übergangs-Mixins im Horizon-Adapter, gepinnt auf einen Nightly; parallel Upstream-PRs E1–E4 vorbereiten.
 
-## O-002 (offen): Lizenz des neuen Repos
+## D-006: Lizenz GPLv3 (entschieden 2026-11-06)
 
 Seed Atlas (`seed-atlas-xaero`) steht unter GPLv3. Seine Engine stammt aus `DUzzL/Seed-Atlas`, abgeleitet von cubiomes (MIT) und cubiomes-viewer (GPLv3).
 
 - Ein Port der GPL-Teile macht das neue Repo zu GPLv3.
 - Horizon (MIT) ist damit kompatibel.
 
-Empfehlung: GPLv3 für das gesamte Repo.
+**Entschieden: GPLv3** für das gesamte Repo.
 
-## O-003 (offen): Name der Mod
+## D-007: Name Meridian (entschieden 2026-11-06)
 
-Vorschlag: **Meridian** (Minimap + Weltkarte), ohne Bezug zu Xaero. Alternativen: *Waymark*, *Cartographer's Lens*.
+**Entschieden: Meridian** (Minimap + Weltkarte), ohne Bezug zu Xaero.
