@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 /// Bumped when the shapes below change, so a trait mod can refuse a bridge
 /// it doesn't understand.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 /// Main-thread time per frame for chunk reads.
 const READ_BUDGET: Duration = Duration::from_micros(1500);
 
@@ -88,6 +88,10 @@ struct Shared {
     biomes: HashMap<String, BiomeLook>,
     /// The biome at the player's feet, refreshed each frame.
     player_biome: Option<String>,
+    /// The window in physical pixels, refreshed each frame.
+    window: Option<[u32; 2]>,
+    /// The prepared game resources (`assets/minecraft/textures/...`).
+    resources: Option<std::path::PathBuf>,
 }
 
 static SHARED: Mutex<Option<Shared>> = Mutex::new(None);
@@ -140,6 +144,16 @@ pub fn player_biome() -> Option<String> {
     with(|s| s.player_biome.clone())
 }
 
+/// The window's size in physical pixels.
+pub fn window_size() -> Option<[u32; 2]> {
+    with(|s| s.window)
+}
+
+/// The folder of the game's prepared resources, for texture colours.
+pub fn resources_dir() -> Option<std::path::PathBuf> {
+    with(|s| s.resources.clone())
+}
+
 /// Forgets cached looks (resources reloaded).
 pub fn clear_looks() {
     with(|s| {
@@ -167,6 +181,10 @@ pub(super) fn frame(game: &mut super::Game<'_>) {
         }
     }
     answer_requests(game, s);
+    s.window = game.native_physical_window_size();
+    if s.resources.is_none() {
+        s.resources = Some(game.options.resources.clone());
+    }
     s.player_biome = game.native_player().and_then(|p| {
         let (x, y, z) = (p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32);
         let chunk = game.world.chunks.get(&(x >> 4, z >> 4))?;

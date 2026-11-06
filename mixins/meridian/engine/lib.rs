@@ -7,6 +7,8 @@
 //! which horizon-mixins adds to the game (`mixins/meridian/bridge/`).
 #![forbid(unsafe_code)]
 
+mod gpu;
+
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -15,7 +17,7 @@ use horizon_client::mod_api::{
     ClientChatReceivedEvent, ClientDisconnectingEvent, ClientLevelLoadEvent,
     ClientLevelUnloadEvent, ClientResourcesReloadedEvent, ClientStoppingEvent, CommandEvent,
     CommandsEvent, Flow, FrameEvent, Hooks, Host, HudBatch, HudEvent, KeyEvent, ModsEvent,
-    NativeMod, PlayerDiedEvent, Text, TintSource, WorldLifecycleEvent, WorldPhase,
+    NativeMod, PlayerDiedEvent, RenderHooks, Text, TintSource, WorldLifecycleEvent, WorldPhase,
     WorldPrimitivesEvent,
 };
 use meridian_core::MapEngine;
@@ -36,7 +38,7 @@ use parking_lot::Mutex;
 pub const MOD_ID: &str = "meridian";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The bridge shape this adapter was written for.
-const BRIDGE_VERSION: u32 = 1;
+const BRIDGE_VERSION: u32 = 2;
 
 /// The singleplayer world's folder name, set by the integrated server's
 /// thread (the window's client only knows the world's display name).
@@ -44,9 +46,78 @@ static SERVER_WORLD: Mutex<Option<String>> = Mutex::new(None);
 /// Blocks within which a waypoint's beam is left out (it would fill the view).
 const BEAM_HIDE_DISTANCE: f64 = 8.0;
 
+/// Mean colours of the block textures, by texture file, and which file each
+/// sprite of Horizon's block atlas comes from.
+#[derive(Default)]
+struct Textures {
+    files: std::collections::HashMap<(u32, u32), PathBuf>,
+    means: std::collections::HashMap<PathBuf, Option<u32>>,
+    indexed: bool,
+}
+
+static TEXTURES: Mutex<Option<Textures>> = Mutex::new(None);
+
+impl Textures {
+    /// Maps every block texture file to its sprite once (`texture_sprites`).
+    fn index(&mut self, host: &dyn Host) {
+        if self.indexed {
+            return;
+        }
+        self.indexed = true;
+        let Some(root) = bridge::resources_dir() else { return };
+        let dir = root.join("assets/minecraft/textures/block");
+        let Ok(entries) = std::fs::read_dir(&dir) else { return };
+        let files: Vec<PathBuf> =
+            entries.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "png")).collect();
+        let names: Vec<String> = files
+            .iter()
+            .filter_map(|p| p.file_stem().map(|s| format!("minecraft:block/{}", s.to_string_lossy())))
+            .collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        for (sprite, file) in host.texture_sprites(&refs).into_iter().zip(files) {
+            if let Some(s) = sprite {
+                self.files.entry((s.array, s.layer)).or_insert(file);
+            }
+        }
+    }
+
+    fn mean(&mut self, sprite: (u32, u32)) -> Option<u32> {
+        let file = self.files.get(&sprite)?.clone();
+        *self.means.entry(file.clone()).or_insert_with(|| {
+            std::fs::read(&file).ok().and_then(|b| meridian_core::texture::mean_color(&b))
+        })
+    }
+}
+
+/// Whether numbers use a decimal comma here (the system's locale), as the
+/// game's Java side would print them.
+fn decimal_comma() -> bool {
+    static COMMA: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *COMMA.get_or_init(|| {
+        let mut locale = ["LC_ALL", "LC_NUMERIC", "LANG"]
+            .iter()
+            .find_map(|k| std::env::var(k).ok().filter(|v| !v.is_empty() && v != "C"))
+            .unwrap_or_default();
+        if locale.is_empty() && cfg!(target_os = "macos") {
+            locale = std::process::Command::new("defaults")
+                .args(["read", "-g", "AppleLocale"])
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+                .unwrap_or_default();
+        }
+        let lang = locale.split(['_', '-', '.']).next().unwrap_or("").to_ascii_lowercase();
+        matches!(
+            lang.as_str(),
+            "de" | "fr" | "es" | "it" | "nl" | "pt" | "ru" | "pl" | "sv" | "da" | "fi" | "nb" | "no" | "cs" | "sk"
+                | "tr" | "uk" | "hu" | "ro" | "el" | "bg" | "hr" | "sl" | "lt" | "lv" | "et" | "id" | "vi"
+        )
+    })
+}
+
 pub fn hooks() -> Box<dyn Hooks> {
     Box::new(Meridian {
         state: Mutex::new(None),
+        renderer: gpu::MapRenderer::default(),
     })
 }
 
@@ -64,10 +135,22 @@ struct State {
     next_color: u8,
     /// Feedback to show on the action bar when a hook can.
     notice: Option<String>,
+    /// The minimap's composed image and what it was composed from.
+    map_image: Option<(MapImageKey, std::sync::Arc<gpu::MapImage>)>,
+}
+
+/// What a minimap image depends on: its origin and size, and the regions'
+/// revisions (any redraw changes them).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct MapImageKey {
+    origin: [i32; 2],
+    size: u32,
+    revisions: u64,
 }
 
 struct Meridian {
     state: Mutex<Option<State>>,
+    renderer: gpu::MapRenderer,
 }
 
 /// Horizon's `Host` seen as a [`MapHost`].
@@ -163,22 +246,21 @@ impl MapHost for HorizonHost<'_> {
     fn block_appearance(&self, block: &str) -> BlockAppearance {
         let look = bridge::block_look(block).unwrap_or_default();
         // The top face's tint, from Horizon's model library (API 380).
-        let tint = self
-            .host
-            .block_sprites(&[block])
-            .into_iter()
-            .next()
-            .flatten()
-            .and_then(|s| s.sides[1].first().map(|f| f.tint))
-            .map_or(Tint::None, tint_of);
+        let sprites = self.host.block_sprites(&[block]).into_iter().next().flatten();
+        // The top face, else the model's particle sprite (crossed plants).
+        let top = sprites.as_ref().and_then(|s| s.sides[1].first());
+        let tint = top.map_or(Tint::None, |f| tint_of(f.tint));
         let tint = if look.fluid == 1 { Tint::Water } else { tint };
-        // Until texture means are available (Phase 4), tinted blocks use a
-        // mid grey under their tint and the rest their map colour.
-        let texture_color = if tint == Tint::None {
-            look.map_color
-        } else {
-            0x9A_9A9A
-        };
+        let sprite = top.map(|f| f.sprite).or_else(|| sprites.as_ref().and_then(|s| s.particle));
+        let mean = sprite.and_then(|sp| {
+            let mut guard = TEXTURES.lock();
+            let textures = guard.get_or_insert_with(Textures::default);
+            textures.index(self.host);
+            textures.mean((sp.array, sp.layer))
+        });
+        // Without a texture, tinted blocks use a mid grey under their tint
+        // and the rest their map colour.
+        let texture_color = mean.unwrap_or(if tint == Tint::None { look.map_color } else { 0x9A_9A9A });
         BlockAppearance {
             map_color: look.map_color,
             texture_color,
@@ -304,6 +386,7 @@ impl Meridian {
                 last_book_save: Instant::now(),
                 next_color: 12,
                 notice: None,
+                map_image: None,
             }
         });
         f(state)
@@ -320,32 +403,34 @@ impl Meridian {
     }
 }
 
-/// Draws the core's operations into Horizon's HUD batch.
+/// Draws the core's operations into Horizon's HUD batch. Text at another
+/// scale than the GUI's goes through a pushed pose (`gui_paint`).
 fn paint(host: &dyn Host, batch: &mut HudBatch, ops: &[DrawOp]) {
+    use horizon_client::hud_layout::PoseOp;
+    use horizon_client::mod_api::GuiDraw;
     for op in ops {
         match op {
             DrawOp::Fill { rect, argb } => host.fill(batch, *rect, *argb),
             DrawOp::Quad { points, argb } => host.quad(batch, *points, *argb),
-            DrawOp::Text {
-                x,
-                y,
-                text,
-                argb,
-                align,
-            } => {
-                let w = host.text_width(text);
+            DrawOp::Text { x, y, text, argb, align, scale } => {
+                let w = host.text_width(text) * scale;
                 let x = match align {
                     Align::Left => *x,
                     Align::Center => x - w / 2.0,
                     Align::Right => x - w,
                 };
-                host.text(
-                    batch,
-                    text,
-                    [x.round(), y.round()],
-                    argb & 0x00FF_FFFF,
-                    true,
-                );
+                if (scale - 1.0).abs() < 1e-3 {
+                    host.text(batch, text, [x.round(), y.round()], argb & 0x00FF_FFFF, true);
+                } else {
+                    host.gui_paint(
+                        batch,
+                        &[
+                            GuiDraw::Push(vec![PoseOp::Translate(x, *y), PoseOp::Scale(*scale, *scale)]),
+                            GuiDraw::Text { text: Text::literal(text.clone()), x: 0, y: 0, color: *argb, shadow: true },
+                            GuiDraw::Pop,
+                        ],
+                    );
+                }
             }
         }
     }
@@ -526,6 +611,10 @@ impl Meridian {
 }
 
 impl Hooks for Meridian {
+    fn render(&self) -> Option<&dyn RenderHooks> {
+        Some(&self.renderer)
+    }
+
     fn mods(&self, _host: &mut dyn Host, event: &mut ModsEvent<'_>) {
         event.mods.push(NativeMod {
             id: MOD_ID.to_owned(),
@@ -691,6 +780,7 @@ impl Hooks for Meridian {
         _event: &mut ClientResourcesReloadedEvent,
     ) {
         bridge::clear_looks();
+        *TEXTURES.lock() = None;
         self.send(host, HostEvent::ResourcesReloaded);
     }
 
@@ -766,25 +856,9 @@ impl Hooks for Meridian {
                     w.pos[2] as f64 + 0.5,
                 ];
                 let flat = ((base[0] - camera[0]).powi(2) + (base[2] - camera[2]).powi(2)).sqrt();
-                if flat > BEAM_HIDE_DISTANCE {
+                if settings.beam && flat > BEAM_HIDE_DISTANCE {
                     event.primitives.beam(base, 256, color);
                 }
-                let label = format!(
-                    "{} ({})",
-                    w.name,
-                    waypoint::distance_label(distance, settings.distance_in_km_from, 1)
-                );
-                event
-                    .primitives
-                    .text(
-                        [base[0], base[1] + 2.0, base[2]],
-                        label,
-                        0xFF00_0000 | 0xFFFFFF,
-                        1.0,
-                    )
-                    .through_walls()
-                    .scale_with_distance()
-                    .background();
             }
         });
     }
@@ -792,79 +866,156 @@ impl Hooks for Meridian {
     fn hud(&self, host: &mut dyn Host, event: &mut HudEvent<'_>) {
         let host: &dyn Host = host;
         let Some(client) = host.client_state() else {
+            gpu::set_frame(None);
             return;
         };
         if client.gui_hidden {
+            gpu::set_frame(None);
             return;
         }
+        let gui = client.gui_size;
+        let gui_scale = bridge::window_size().map_or(2.0, |w| w[1] as f32 / gui[1].max(1.0));
         self.with_state(host, |s| {
+            let map_host = HorizonHost { host, dimension: s.dimension.as_deref() };
+            let Some(player) = map_host.player() else { return };
+            let mut ops = Vec::new();
+            world_waypoints(host, s, gui, gui_scale, &mut ops);
             let settings = &s.config.current().minimap;
-            if !settings.enabled || (settings.hide_under_screens && !host.playing()) {
-                return;
+            if settings.enabled && !(settings.hide_under_screens && !host.playing()) {
+                minimap_ops(s, &player, gui, gui_scale, &mut ops);
+            } else {
+                gpu::set_frame(None);
             }
-            let map_host = HorizonHost {
-                host,
-                dimension: s.dimension.as_deref(),
-            };
-            let Some(player) = map_host.player() else {
-                return;
-            };
-            let [px, py, pz] = player.position;
-            let mut lines = vec![(
-                format!("{}, {}, {}", px.floor(), py.floor(), pz.floor()),
-                0xFFFF_FFFF,
-            )];
-            if let Some(biome) = bridge::player_biome() {
-                lines.push((biome_label(&biome), 0xFFFF_FFFF));
-            }
-            let enlarged = s.controls.enlarged();
-            let layout = minimap::layout(settings, client.gui_size, enlarged, lines.len());
-            let sampler = s.engine.sampler();
-            let mut ops = minimap::terrain(
-                &layout,
-                [px, pz],
-                player.yaw,
-                settings.opacity,
-                settings.undiscovered_opacity,
-                |x, z| sampler.pixel(x, z),
-            );
-            ops.extend(minimap::frame(&layout, 0xFF20_2020));
-            ops.extend(minimap::compass(&layout, player.yaw));
-            let wp = &s.config.current().waypoints;
-            if wp.on_minimap
-                && let (Some(dim), Some((_, book))) = (&s.dimension, &s.book)
-                && let Some(waypoints) = book.dimension(dim)
-            {
-                let alpha = ((wp.opacity_on_minimap.min(100) as u32 * 255) / 100) << 24;
-                for w in waypoints.visible(wp.all_sets) {
-                    let at = [w.pos[0] as f64 + 0.5, w.pos[2] as f64 + 0.5];
-                    let ([x, y], _) = minimap::project(&layout, [px, pz], player.yaw, at, 5.0);
-                    ops.push(DrawOp::Fill {
-                        rect: [x - 4.0, y - 4.0, 9.0, 9.0],
-                        argb: alpha,
-                    });
-                    ops.push(DrawOp::Fill {
-                        rect: [x - 3.0, y - 3.0, 7.0, 7.0],
-                        argb: alpha | w.rgb(),
-                    });
-                    let initial: String = w.initials.chars().take(1).collect();
-                    ops.push(DrawOp::Text {
-                        x: x + 0.5,
-                        y: y - 3.0,
-                        text: initial,
-                        argb: 0xFFFF_FFFF,
-                        align: Align::Center,
-                    });
-                }
-            }
-            ops.push(minimap::arrow(
-                &layout,
-                player.yaw,
-                settings.arrow_scale,
-                0xFFFF_FFFF,
-            ));
-            ops.extend(minimap::info(&layout, &lines));
             paint(host, event.batch, &ops);
         });
     }
+}
+
+/// Waypoints in the world, drawn over it: a mark in the waypoint's colour,
+/// its name on a dark plate and its distance under it.
+fn world_waypoints(host: &dyn Host, s: &State, gui: [f32; 2], gui_scale: f32, ops: &mut Vec<DrawOp>) {
+    let settings = &s.config.current().waypoints;
+    if !settings.in_world {
+        return;
+    }
+    let (Some(camera), Some(dim), Some((_, book))) = (host.camera(), &s.dimension, &s.book) else { return };
+    let Some(waypoints) = book.dimension(dim) else { return };
+    let alpha = |opacity: u8, share: f32| (((opacity.min(100) as f32 / 100.0) * share * 255.0) as u32) << 24;
+    let u = minimap::unit(gui[1], gui_scale);
+    let mark = 9.0 * u;
+    for w in waypoints.visible(settings.all_sets) {
+        let distance = w.distance(camera.position);
+        if !w.global && settings.max_distance > 0 && distance > settings.max_distance as f64 {
+            continue;
+        }
+        let at = [w.pos[0] as f64 + 0.5, w.pos[1] as f64 + 1.0, w.pos[2] as f64 + 0.5];
+        let Some([x, y]) = minimap::world_to_screen(camera.position, &camera.view, &camera.projection, at, gui)
+        else {
+            continue;
+        };
+        if x < -50.0 || y < -50.0 || x > gui[0] + 50.0 || y > gui[1] + 50.0 {
+            continue;
+        }
+        let initial: String = w.initials.chars().take(2).collect();
+        ops.extend(minimap::waypoint_mark([x, y], mark, alpha(settings.opacity_in_world, 0.6) | w.rgb(), &initial, u));
+        let name_scale = 0.64 * u;
+        let name_y = y + mark / 2.0 + 2.0 * u;
+        let name_w = host.text_width(&w.name) * name_scale;
+        ops.push(DrawOp::Fill {
+            rect: [x - name_w / 2.0 - name_scale, name_y - name_scale, name_w + 2.0 * name_scale, 9.0 * name_scale],
+            argb: 0x6000_0000,
+        });
+        ops.push(DrawOp::Text { x, y: name_y, text: w.name.clone(), argb: 0xFFFF_FFFF, align: Align::Center, scale: name_scale });
+        let dist = minimap::distance_text(distance, settings.distance_in_km_from, decimal_comma());
+        ops.push(DrawOp::Text { x, y: name_y + 10.0 * name_scale, text: dist, argb: 0xFFFF_FFFF, align: Align::Center, scale: u });
+    }
+}
+
+/// The minimap: terrain, frame, waypoints, compass, the player's mark and
+/// the info lines.
+fn minimap_ops(s: &mut State, player: &PlayerState, gui: [f32; 2], gui_scale: f32, ops: &mut Vec<DrawOp>) {
+    let settings = &s.config.current().minimap;
+    let [px, py, pz] = player.position;
+    let mut lines = Vec::new();
+    if settings.show_coords {
+        lines.push((format!("{}, {}, {}", px.floor(), py.floor(), pz.floor()), 0xFFFF_FFFF));
+    }
+    if settings.show_biome
+        && let Some(biome) = bridge::player_biome()
+    {
+        lines.push((biome_label(&biome), 0xFFFF_FFFF));
+    }
+    let layout = minimap::layout(settings, gui, gui_scale, s.controls.enlarged(), lines.len());
+    compose_map(s, &layout, player);
+    let settings = &s.config.current().minimap;
+    let axes = minimap::Axes::new(layout.rotate, player.yaw);
+    if let Some((key, image)) = &s.map_image {
+        let undiscovered = settings.undiscovered_opacity.min(100) as f32 / 100.0;
+        gpu::set_frame(Some(gpu::MapFrame {
+            rect: [layout.x, layout.y, layout.size, layout.size],
+            gui,
+            right: [axes.right[0] as f32, axes.right[1] as f32],
+            forward: [axes.forward[0] as f32, axes.forward[1] as f32],
+            center: [(px - key.origin[0] as f64) as f32, (pz - key.origin[1] as f64) as f32],
+            blocks_per_gui_px: layout.blocks_per_pixel,
+            round: layout.round,
+            opacity: settings.opacity.min(100) as f32 / 100.0,
+            backdrop: [0.06, 0.06, 0.06, undiscovered],
+            image: image.clone(),
+            at: Instant::now(),
+        }));
+    }
+    let wp = &s.config.current().waypoints;
+    if wp.on_minimap
+        && let (Some(dim), Some((_, book))) = (&s.dimension, &s.book)
+        && let Some(waypoints) = book.dimension(dim)
+    {
+        let alpha = ((wp.opacity_on_minimap.min(100) as u32 * 255) / 100) << 24;
+        let size = 9.0 * layout.unit;
+        for w in waypoints.visible(wp.all_sets) {
+            let at = [w.pos[0] as f64 + 0.5, w.pos[2] as f64 + 0.5];
+            let (p, _) = minimap::project(&layout, [px, pz], player.yaw, at, size / 2.0);
+            let initial: String = w.initials.chars().take(1).collect();
+            ops.extend(minimap::waypoint_mark(p, size, alpha | w.rgb(), &initial, layout.unit));
+        }
+    }
+    ops.extend(minimap::frame(&layout));
+    ops.extend(minimap::compass(&layout, player.yaw));
+    ops.extend(minimap::player_mark(&layout, player.yaw, settings.arrow_scale));
+    ops.extend(minimap::info(&layout, &lines));
+}
+
+/// Composes the north-up image the GPU turns: one texel per block, wide
+/// enough for the map's diagonal, centred on the player's block. Only when
+/// the player crossed a block or a region under it was redrawn.
+fn compose_map(s: &mut State, layout: &minimap::Layout, player: &PlayerState) {
+    let side_blocks = layout.size * layout.blocks_per_pixel;
+    let size = (((side_blocks * std::f32::consts::SQRT_2) as u32 + 4).div_ceil(16) * 16).clamp(16, 2048);
+    let (bx, bz) = (player.position[0].floor() as i32, player.position[2].floor() as i32);
+    let origin = [bx - size as i32 / 2, bz - size as i32 / 2];
+    let (rmin, rmax) = (
+        RegionPos::of_block(origin[0], origin[1]),
+        RegionPos::of_block(origin[0] + size as i32, origin[1] + size as i32),
+    );
+    let mut revisions = 0u64;
+    for x in rmin.x..=rmax.x {
+        for z in rmin.z..=rmax.z {
+            if let Some(r) = s.engine.region(RegionPos::new(x, z)) {
+                revisions = revisions.wrapping_mul(31).wrapping_add(r.revision + 1);
+            }
+        }
+    }
+    let key = MapImageKey { origin, size, revisions };
+    if s.map_image.as_ref().is_some_and(|(k, _)| *k == key) {
+        return;
+    }
+    let sampler = s.engine.sampler();
+    let mut pixels = Vec::with_capacity((size * size) as usize);
+    for z in 0..size as i32 {
+        for x in 0..size as i32 {
+            pixels.push(sampler.pixel(origin[0] + x, origin[1] + z));
+        }
+    }
+    let revision = s.map_image.as_ref().map_or(0, |(_, i)| i.revision + 1);
+    s.map_image = Some((key, std::sync::Arc::new(gpu::MapImage { size, pixels, revision })));
 }
