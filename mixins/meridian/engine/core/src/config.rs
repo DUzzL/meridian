@@ -390,10 +390,28 @@ impl Default for RadarSettings {
 pub struct SeedAtlasSettings {
     /// Seed Atlas ships built in and on; this switches it off.
     pub enabled: bool,
+    /// The seed biome layer on the world map.
     pub biome_layer: bool,
+    /// The layer's opacity, 0..=255 (the Fabric version's default 255).
     pub biome_opacity: u8,
+    /// Structure markers (off by default, as in the Fabric version).
     pub structures: bool,
+    pub hide_completed: bool,
+    /// Blocks per biome sample at full zoom: 1, 2, 4, 8 or 16.
+    pub biome_resolution: u8,
+    /// Background threads; 0 picks from the CPU count.
+    pub worker_threads: u8,
+    /// Regions computed ahead around the view: 0 (off) to 3.
+    pub prefetch_radius: u8,
+    /// Large Biomes for seeds entered by hand.
     pub large_biomes: bool,
+    /// The heights biomes are sampled at.
+    pub overworld_y: i32,
+    pub nether_y: i32,
+    pub end_y: i32,
+    /// Marker kinds by id (`village`, `stronghold`...); missing ids use
+    /// their default.
+    pub markers: std::collections::BTreeMap<String, bool>,
 }
 
 impl Default for SeedAtlasSettings {
@@ -402,8 +420,16 @@ impl Default for SeedAtlasSettings {
             enabled: true,
             biome_layer: true,
             biome_opacity: 255,
-            structures: true,
+            structures: false,
+            hide_completed: false,
+            biome_resolution: 1,
+            worker_threads: 0,
+            prefetch_radius: 1,
             large_biomes: false,
+            overworld_y: 255,
+            nether_y: 64,
+            end_y: 128,
+            markers: std::collections::BTreeMap::new(),
         }
     }
 }

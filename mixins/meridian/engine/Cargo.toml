@@ -14,6 +14,8 @@ path = "lib.rs"
 horizon-client = { git = "https://github.com/horizon-rust/horizon", rev = "66f3981f522b24c250b21523a70080965b940424" }
 meridian-core = { path = "core" }
 meridian-host = { path = "host" }
+meridian-seedatlas = { path = "seedatlas" }
+png = "=0.18.1"
 log = "=0.4.34"
 parking_lot = "=0.12.5"
 chrono = { version = "=0.4.45", default-features = false, features = ["clock", "std"] }

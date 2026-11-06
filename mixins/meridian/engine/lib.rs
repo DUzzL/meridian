@@ -49,6 +49,9 @@ const BRIDGE_VERSION: u32 = 4;
 /// The singleplayer world's folder name, set by the integrated server's
 /// thread (the window's client only knows the world's display name).
 static SERVER_WORLD: Mutex<Option<String>> = Mutex::new(None);
+/// The singleplayer world's seed and whether it has Large Biomes, read on
+/// the integrated server's thread when the world opens.
+static SERVER_SEED: Mutex<Option<(i64, bool)>> = Mutex::new(None);
 /// Blocks within which a waypoint's beam is left out (it would fill the view).
 const BEAM_HIDE_DISTANCE: f64 = 8.0;
 
@@ -168,6 +171,10 @@ struct State {
     /// Client levels loaded and not yet unloaded: a dimension change loads
     /// the new level before it unloads the old one.
     levels: u32,
+    /// Seeds entered per world or server.
+    seeds: meridian_core::seedatlas::SeedBook,
+    /// Seed Atlas tiles and markers for the current seed.
+    seed_svc: meridian_core::seedatlas::SeedService,
 }
 
 /// The last finished export's message, for the action bar.
@@ -457,6 +464,7 @@ impl Meridian {
                 );
             }
             log::info!("meridian {VERSION}: settings in {}", store.path().display());
+            load_icons();
             State {
                 config,
                 store,
@@ -480,6 +488,8 @@ impl Meridian {
                 viewer: None,
                 export_dir: data_dir(host).join("exports"),
                 levels: 0,
+                seeds: meridian_core::seedatlas::SeedBook::load(&data_dir(host)),
+                seed_svc: Default::default(),
             }
         });
         f(state)
@@ -753,6 +763,23 @@ impl Hooks for Meridian {
         let at = host.cursor();
         let right = event.button == 1;
         if self.map_open(host) {
+            let (layer_button, settings_button) = seed_atlas_buttons(Self::map_view(host).gui);
+            let on = self.with_state(host, |s| s.config.current().seed_atlas.enabled);
+            if on && !right && inside(layer_button, at) {
+                self.with_state(host, |s| {
+                    let sa = &mut s.config.current_mut().seed_atlas;
+                    sa.biome_layer = !sa.biome_layer;
+                    s.engine.set_settings(s.config.current().clone());
+                    s.save_config();
+                });
+                return Flow::Cancel;
+            }
+            if on && !right && inside(settings_button, at) {
+                self.with_state(host, |s| {
+                    s.open_from_map(Screen::Settings(SettingsScreen::group(meridian_core::screens::Group::SeedAtlas)))
+                });
+                return Flow::Cancel;
+            }
             self.map_input(host, |s, view, map_data| {
                 if right {
                     let w = s.map.to_world(at, view.gui, view.unit);
@@ -910,10 +937,23 @@ impl Hooks for Meridian {
 
     fn commands(&self, _host: &mut dyn Host, event: &mut CommandsEvent<'_>) {
         event.commands.push("meridian");
+        event.commands.push("seedatlas");
     }
 
     fn command(&self, host: &mut dyn Host, event: &mut CommandEvent<'_>) -> Flow {
         let args: Vec<&str> = event.command.split_whitespace().collect();
+        if args.first() == Some(&"seedatlas") {
+            let rest = event.command.trim_start().strip_prefix("seedatlas").unwrap_or("").trim().to_owned();
+            let (reply, open) = self.on_seedatlas(&*host, &rest);
+            host.client_action_bar(Text::literal(reply), false);
+            if open && host.mod_screen_open(MOD_ID) {
+                self.with_state(&*host, |s| {
+                    s.map_open = false;
+                    s.screen = Some(Screen::Settings(SettingsScreen::group(meridian_core::screens::Group::SeedAtlas)));
+                });
+            }
+            return Flow::Cancel;
+        }
         if args.first() != Some(&"meridian") {
             return Flow::Continue;
         }
@@ -968,9 +1008,14 @@ impl Hooks for Meridian {
                     .world_dir()
                     .and_then(|d| d.file_name().map(|n| n.to_string_lossy().into_owned()));
                 *SERVER_WORLD.lock() = name;
+                *SERVER_SEED.lock() = host.world_dir().and_then(|d| {
+                    let level = horizon_client::save::Level::read(&d)?;
+                    Some((level.seed, horizon_client::save::WorldGen::preset(&d) == "minecraft:large_biomes"))
+                });
             }
             WorldPhase::WorldCloseFinal | WorldPhase::WorldOpenFailed => {
-                *SERVER_WORLD.lock() = None
+                *SERVER_WORLD.lock() = None;
+                *SERVER_SEED.lock() = None;
             }
             _ => {}
         }
@@ -1107,6 +1152,10 @@ impl Hooks for Meridian {
                 let layer = s.cave.update(&cave, allowed, bridge::under_roof(), p.position[1] + 1.62, Instant::now());
                 s.engine.set_layer(layer);
             }
+            let seed = s.current_seed().map(|(e, _)| (e.seed, e.large_biomes));
+            let sa = s.config.current().seed_atlas.clone();
+            s.seed_svc.configure(if sa.enabled { seed } else { None }, &sa);
+            s.seed_svc.poll();
             let budget =
                 Duration::from_micros(s.config.current().performance.frame_budget_us as u64);
             s.engine.tick(&map_host, budget);
@@ -1647,6 +1696,8 @@ impl Meridian {
                         rect: [a[0], a[1], b[0], b[1]],
                         pixels: region.and_then(|r| r.shared_pixels()),
                         revision: region.map_or(0, |r| r.revision),
+                        size: 512,
+                        alpha: 255,
                     });
                 }
             }
@@ -1657,7 +1708,72 @@ impl Meridian {
                 engine.layer().hash(&mut h);
                 h.finish()
             };
-            gpu_map::set_frame(Some(gpu_map::WorldMapFrame { gui, world, regions, at: Instant::now() }));
+            // Seed Atlas: the biome layer under the terrain and the markers.
+            let sa_settings = s.config.current().seed_atlas.clone();
+            let sa_dim = sa::dimension_of(&shown);
+            let gui_scale = bridge::window_size().map_or(2.0, |w| w[1] as f32 / gui[1].max(1.0));
+            let mut background = Vec::new();
+            let mut icons = Vec::new();
+            let mut marker_hover: Option<MarkerHover> = None;
+            if let (Some(dim), true) = (sa_dim, sa_settings.enabled && s.seed_svc.active()) {
+                let region_side = (512.0 * s.map.scale(u) as f32) * gui_scale;
+                let step = sa::step_for(region_side, sa_settings.biome_resolution);
+                let y = sa::sample_y(&sa_settings, dim);
+                let radius = if step >= 16 { 16 } else { MAP_REQUEST_RADIUS };
+                let mut order: Vec<RegionPos> = (dmin.x..=dmax.x).flat_map(|x| (dmin.z..=dmax.z).map(move |z| RegionPos::new(x, z))).collect();
+                order.sort_by_key(|r| (r.x - mid.x).abs().max((r.z - mid.z).abs()));
+                if sa_settings.biome_layer {
+                    for pos in &order {
+                        let near = (pos.x - mid.x).abs() <= radius && (pos.z - mid.z).abs() <= radius;
+                        let job = sa::Job::Tile { dimension: dim, region: *pos, step, y };
+                        let tile = if near { s.seed_svc.tile(job) } else { None };
+                        let (bx, bz) = pos.min_block();
+                        let a = s.map.to_screen([bx as f64, bz as f64], gui, u);
+                        let b = s.map.to_screen([(bx + 512) as f64, (bz + 512) as f64], gui, u);
+                        background.push(gpu_map::RegionQuad {
+                            pos: [pos.x, pos.z],
+                            rect: [a[0], a[1], b[0], b[1]],
+                            size: tile.as_ref().map_or((512 / step) as u32, |t| t.size),
+                            revision: tile.as_ref().map_or(0, |t| t.revision),
+                            pixels: tile.map(|t| t.pixels),
+                            alpha: sa_settings.biome_opacity,
+                        });
+                    }
+                }
+                if sa_settings.structures {
+                    let size = 20.0 * u;
+                    for pos in order.iter().filter(|r| (r.x - mid.x).abs() <= MAP_REQUEST_RADIUS && (r.z - mid.z).abs() <= MAP_REQUEST_RADIUS) {
+                        let Some(hits) = s.seed_svc.markers(dim, *pos) else { continue };
+                        for h in hits.iter() {
+                            let Some(m) = sa::marker_for(h.kind) else { continue };
+                            let special = h.kind == meridian_seedatlas::structures::kind::ABANDONED_CAMP
+                                && h.detail >= 0
+                                && h.detail & meridian_seedatlas::atlas::CAMP_SPECIAL_LOOT != 0;
+                            let icon = if special { ICON_CAMP_SPECIAL } else { sa::MARKERS.iter().position(|k| k.id == m.id).unwrap_or(0) };
+                            let c = s.map.to_screen([h.x as f64 + 0.5, h.z as f64 + 0.5], gui, u);
+                            let rect = [c[0] - size / 2.0, c[1] - size / 2.0, size, size];
+                            if rect[0] > gui[0] || rect[1] > gui[1] || rect[0] + size < 0.0 || rect[1] + size < 0.0 {
+                                continue;
+                            }
+                            icons.push(gpu_map::IconQuad { icon, rect });
+                            if inside(rect, mouse) {
+                                let mut first = m.name.to_owned();
+                                if h.flags & meridian_seedatlas::atlas::RESULT_APPROXIMATE != 0 {
+                                    first.push_str(" (approx.)");
+                                }
+                                let mut lines = vec![first];
+                                if special {
+                                    lines.push("Special loot".into());
+                                }
+                                let y = h.y.map_or(String::new(), |y| format!(" · Y={y}"));
+                                lines.push(format!("X={}{y} · Z={}", h.x, h.z));
+                                marker_hover = Some(MarkerHover { lines });
+                            }
+                        }
+                    }
+                }
+            }
+            gpu_map::set_frame(Some(gpu_map::WorldMapFrame { gui, world, regions, background, icons, at: Instant::now() }));
             let hovered = s.map.to_world(mouse, gui, u);
             let (hx, hz) = (hovered[0].floor() as i32, hovered[1].floor() as i32);
             let sampler = engine.sampler();
@@ -1680,7 +1796,7 @@ impl Meridian {
             };
             let entities = if shown == here { entities } else { Vec::new() };
             let wm = &settings.world_map;
-            s.map.overlay(&Overlay {
+            let mut ops = s.map.overlay(&Overlay {
                 gui,
                 unit: u,
                 mouse,
@@ -1696,7 +1812,45 @@ impl Meridian {
                 show_footsteps: wm.footsteps,
                 cave_layer,
                 other_dimension: (shown != here).then(|| shown.rsplit(':').next().unwrap_or(&shown).to_owned()),
-            })
+            });
+            // Seed Atlas: the switch and settings buttons, and tooltips.
+            if sa_settings.enabled {
+                let (layer_button, settings_button) = seed_atlas_buttons(gui);
+                for (rect, label, color) in [
+                    (layer_button, "SA", if sa_settings.biome_layer { 0xFF55_FF55 } else { 0xFFAA_AAAA }),
+                    (settings_button, "...", 0xFFFF_FFFF),
+                ] {
+                    let hover = inside(rect, mouse);
+                    let sprite = if hover { "gui/sprites/widget/button_highlighted" } else { "gui/sprites/widget/button" };
+                    ops.push(DrawOp::NineSlice { sprite, rect, argb: 0xFFFF_FFFF });
+                    ops.push(DrawOp::Text { x: rect[0] + rect[2] / 2.0, y: rect[1] + 6.0, text: label.into(), argb: color, align: Align::Center, scale: 1.0 });
+                    if hover {
+                        let tip = if label == "SA" {
+                            format!("Seed map layer: {}", if sa_settings.biome_layer { "On" } else { "Off" })
+                        } else {
+                            "Seed Atlas Settings".into()
+                        };
+                        tooltip(&mut ops, mouse, gui, &[tip]);
+                    }
+                }
+                if let Some(h) = &marker_hover {
+                    tooltip(&mut ops, mouse, gui, &h.lines);
+                } else if sa_settings.biome_layer
+                    && let Some(dim) = sa_dim
+                    && !inside(layer_button, mouse)
+                    && !inside(settings_button, mouse)
+                    && s.map.menu.is_none()
+                {
+                    let y = sa::sample_y(&sa_settings, dim);
+                    if let Some(id) = s.seed_svc.biome_at(dim, hx, y, hz)
+                        && let Some(name) = meridian_seedatlas::biomes::name(id)
+                    {
+                        let line = format!("{} · Y={y} · X={hx} · Z={hz}", meridian_core::info::title_case(name));
+                        tooltip(&mut ops, mouse, gui, &[line]);
+                    }
+                }
+            }
+            ops
         });
         paint(host, batch, &ops);
     }
@@ -1837,4 +1991,193 @@ fn newest_cave_layer(dimension_dir: &std::path::Path) -> Option<i32> {
         })
         .max()?;
     surface.is_none_or(|s| time > s).then_some(layer)
+}
+
+// ------------------------------------------------------------ Seed Atlas --
+
+use meridian_core::seedatlas::{self as sa, SeedEntry};
+
+/// Icon files of the markers (Seed Atlas's own), in `sa::MARKERS` order,
+/// then the special-loot camp.
+const ICON_FILES: [&[u8]; 29] = [
+    include_bytes!("assets/seedatlas/camp.png"),
+    include_bytes!("assets/seedatlas/ancient_city.png"),
+    include_bytes!("assets/seedatlas/bastion.png"),
+    include_bytes!("assets/seedatlas/chambers.png"),
+    include_bytes!("assets/seedatlas/desert.png"),
+    include_bytes!("assets/seedatlas/endcity.png"),
+    include_bytes!("assets/seedatlas/end_ship.png"),
+    include_bytes!("assets/seedatlas/fortress.png"),
+    include_bytes!("assets/seedatlas/gateway.png"),
+    include_bytes!("assets/seedatlas/geode.png"),
+    include_bytes!("assets/seedatlas/hut.png"),
+    include_bytes!("assets/seedatlas/igloo.png"),
+    include_bytes!("assets/seedatlas/jungle.png"),
+    include_bytes!("assets/seedatlas/mansion.png"),
+    include_bytes!("assets/seedatlas/mineshaft.png"),
+    include_bytes!("assets/seedatlas/monument.png"),
+    include_bytes!("assets/seedatlas/orevein.png"),
+    include_bytes!("assets/seedatlas/outpost.png"),
+    include_bytes!("assets/seedatlas/portal.png"),
+    include_bytes!("assets/seedatlas/ruins.png"),
+    include_bytes!("assets/seedatlas/shipwreck.png"),
+    include_bytes!("assets/seedatlas/slime.png"),
+    include_bytes!("assets/seedatlas/spawn.png"),
+    include_bytes!("assets/seedatlas/stronghold.png"),
+    include_bytes!("assets/seedatlas/trails.png"),
+    include_bytes!("assets/seedatlas/treasure.png"),
+    include_bytes!("assets/seedatlas/village.png"),
+    include_bytes!("assets/seedatlas/well.png"),
+    include_bytes!("assets/seedatlas/camp_special.png"),
+];
+const ICON_CAMP_SPECIAL: usize = 28;
+
+/// Decodes the marker icons for the map renderer, once.
+fn load_icons() {
+    if gpu_map::ICONS.get().is_some() {
+        return;
+    }
+    let icons = ICON_FILES
+        .iter()
+        .map(|bytes| {
+            let decoded = (|| {
+                let mut decoder = png::Decoder::new(std::io::Cursor::new(*bytes));
+                decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+                let mut reader = decoder.read_info().ok()?;
+                let mut buf = vec![0; reader.output_buffer_size()?];
+                let info = reader.next_frame(&mut buf).ok()?;
+                let rgba: Vec<u8> = match info.color_type {
+                    png::ColorType::Rgba => buf[..info.buffer_size()].to_vec(),
+                    png::ColorType::Rgb => buf[..info.buffer_size()].chunks_exact(3).flat_map(|c| [c[0], c[1], c[2], 255]).collect(),
+                    png::ColorType::GrayscaleAlpha => buf[..info.buffer_size()].chunks_exact(2).flat_map(|c| [c[0], c[0], c[0], c[1]]).collect(),
+                    _ => buf[..info.buffer_size()].iter().flat_map(|&g| [g, g, g, 255]).collect(),
+                };
+                Some((info.width, info.height, rgba))
+            })();
+            decoded.unwrap_or((1, 1, vec![0, 0, 0, 0]))
+        })
+        .collect();
+    let _ = gpu_map::ICONS.set(icons);
+}
+
+/// The marker under the cursor on the map, if any.
+#[derive(Clone, Debug)]
+struct MarkerHover {
+    lines: Vec<String>,
+}
+
+impl State {
+    /// The seed for the open world: one entered for it, else the
+    /// singleplayer world's own; and whether it was found automatically.
+    fn current_seed(&self) -> Option<(SeedEntry, bool)> {
+        let source = &self.engine.context()?.source;
+        let key = meridian_core::persist::source_key(source);
+        if let Some(e) = self.seeds.get(&key) {
+            return Some((e.clone(), false));
+        }
+        match source {
+            WorldSource::Singleplayer { .. } => {
+                SERVER_SEED.lock().map(|(seed, large)| (SeedEntry { input: seed.to_string(), seed, large_biomes: large }, true))
+            }
+            _ => None,
+        }
+    }
+}
+
+impl Meridian {
+    /// `/seedatlas seed <seed> | clear | status | settings`; answers the
+    /// reply and whether to open the settings.
+    fn on_seedatlas(&self, host: &dyn Host, args: &str) -> (String, bool) {
+        let (cmd, rest) = args.split_once(' ').map_or((args, ""), |(a, b)| (a, b.trim()));
+        self.with_state(host, |s| {
+            let source = s.engine.context().map(|c| c.source.clone());
+            let label = match &source {
+                Some(WorldSource::Singleplayer { world }) => world.clone(),
+                Some(WorldSource::Multiplayer { address }) => address.clone(),
+                None => String::new(),
+            };
+            match cmd {
+                "seed" => {
+                    let Some(seed) = sa::parse_seed(rest) else {
+                        return ("The seed must not be empty.".into(), false);
+                    };
+                    let Some(source) = source else {
+                        return ("No active world or multiplayer server was found.".into(), false);
+                    };
+                    let large = s.config.current().seed_atlas.large_biomes;
+                    let key = meridian_core::persist::source_key(&source);
+                    s.seeds.set(&key, SeedEntry { input: rest.to_owned(), seed, large_biomes: large });
+                    (format!("Seed set to {seed} ({rest}) for {label}."), false)
+                }
+                "clear" => {
+                    let Some(source) = source else {
+                        return ("No active world or multiplayer server was found.".into(), false);
+                    };
+                    if s.seeds.clear(&meridian_core::persist::source_key(&source)) {
+                        ("The configured seed for this world/server was cleared.".into(), false)
+                    } else {
+                        ("No seed is configured for this world/server.".into(), false)
+                    }
+                }
+                "settings" => (String::new(), true),
+                _ => {
+                    let c = &s.config.current().seed_atlas;
+                    let on = |b: bool| if b { "On" } else { "Off" };
+                    let seed = match s.current_seed() {
+                        Some((e, true)) => format!("Seed: {} (from the world)", e.seed),
+                        Some((e, false)) => format!("Seed: {} (input: {})", e.seed, e.input),
+                        None => "Seed: not configured. Use /seedatlas seed <seed>.".into(),
+                    };
+                    let kind = if s.current_seed().is_some_and(|(e, _)| e.large_biomes) { "Large Biomes" } else { "Normal" };
+                    (
+                        format!(
+                            "Seed Atlas context: {} · {seed} · Layer: {}, opacity: {}% · World type: {kind} · Structures: {}",
+                            if label.is_empty() { "-" } else { &label },
+                            on(c.biome_layer),
+                            (c.biome_opacity as u32 * 100 + 127) / 255,
+                            on(c.structures)
+                        ),
+                        false,
+                    )
+                }
+            }
+        })
+    }
+}
+
+/// The Seed Atlas buttons at the map's left edge: the layer switch and the
+/// settings.
+fn seed_atlas_buttons(gui: [f32; 2]) -> ([f32; 4], [f32; 4]) {
+    ([0.0, (gui[1] - 20.0).max(0.0), 20.0, 20.0], [0.0, (gui[1] - 80.0).max(0.0), 20.0, 20.0])
+}
+
+fn inside(r: [f32; 4], p: [f32; 2]) -> bool {
+    p[0] >= r[0] && p[0] < r[0] + r[2] && p[1] >= r[1] && p[1] < r[1] + r[3]
+}
+
+/// A tooltip in the game's style next to the cursor (kept on screen).
+fn tooltip(ops: &mut Vec<DrawOp>, mouse: [f32; 2], gui: [f32; 2], lines: &[String]) {
+    // Width estimated from the font's average advance; the plate fits the
+    // text the host measures.
+    let longest = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as f32 * 6.0;
+    let h = lines.len() as f32 * 10.0 + 6.0;
+    let mut x = mouse[0] + 12.0;
+    if x + longest + 8.0 > gui[0] {
+        x = (mouse[0] - 16.0 - longest).max(4.0);
+    }
+    let y = (mouse[1] - 12.0).clamp(4.0, (gui[1] - h).max(4.0));
+    for (i, line) in lines.iter().enumerate() {
+        ops.push(DrawOp::Plate {
+            x,
+            y: y + 3.0 + i as f32 * 10.0,
+            text: line.clone(),
+            align: Align::Left,
+            scale: 1.0,
+            pad: 3.0,
+            argb: 0xF010_0010,
+        });
+    }
+    for (i, line) in lines.iter().enumerate() {
+        ops.push(DrawOp::Text { x, y: y + 3.0 + i as f32 * 10.0, text: line.clone(), argb: 0xFFFF_FFFF, align: Align::Left, scale: 1.0 });
+    }
 }

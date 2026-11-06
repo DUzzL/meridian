@@ -20,10 +20,25 @@ pub struct RegionQuad {
     pub pos: [i32; 2],
     /// Left, top, right, bottom in GUI pixels.
     pub rect: [f32; 4],
-    /// 512 x 512 ARGB when the region is in memory and drawn.
+    /// `size` x `size` ARGB when the region is in memory and drawn.
     pub pixels: Option<Arc<Vec<u32>>>,
     pub revision: u64,
+    /// Texels a side of `pixels`: 512 for terrain, which is drawn at a level
+    /// of detail; other sizes (Seed Atlas tiles) are drawn as they are.
+    pub size: u32,
+    /// Opacity of the texels, 0..=255.
+    pub alpha: u8,
 }
+
+/// A marker icon on screen.
+#[derive(Debug, Clone, Copy)]
+pub struct IconQuad {
+    pub icon: usize,
+    pub rect: [f32; 4],
+}
+
+/// Icons the map can draw, RGBA, uploaded once.
+pub static ICONS: std::sync::OnceLock<Vec<(u32, u32, Vec<u8>)>> = std::sync::OnceLock::new();
 
 #[derive(Debug, Clone)]
 pub struct WorldMapFrame {
@@ -31,6 +46,10 @@ pub struct WorldMapFrame {
     /// Which map the regions belong to (world, dimension, cave layer).
     pub world: u64,
     pub regions: Vec<RegionQuad>,
+    /// Drawn first, under the terrain (the Seed Atlas biome layer).
+    pub background: Vec<RegionQuad>,
+    /// Drawn last, over the terrain.
+    pub icons: Vec<IconQuad>,
     pub at: std::time::Instant,
 }
 
@@ -64,7 +83,7 @@ fn fs(in: Out) -> @location(0) vec4<f32> {
     if (c.a <= 0.0) {
         discard;
     }
-    return vec4(c.rgb, 1.0);
+    return c;
 }
 "#;
 
@@ -94,6 +113,7 @@ struct Gpu {
     entries: HashMap<Key, Entry>,
     bytes: usize,
     frame: u64,
+    icons: Vec<(wgpu::BindGroup, wgpu::Texture)>,
 }
 
 #[derive(Default)]
@@ -198,7 +218,7 @@ impl Gpu {
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
-                    blend: None,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
@@ -217,6 +237,7 @@ impl Gpu {
             entries: HashMap::new(),
             bytes: 0,
             frame: 0,
+            icons: Vec::new(),
         }
     }
 
@@ -226,9 +247,19 @@ impl Gpu {
         target: wgpu::TextureFormat,
         side: u32,
     ) -> (wgpu::Texture, wgpu::BindGroup) {
+        Self::texture_wh(device, layout, target, side, side)
+    }
+
+    fn texture_wh(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        target: wgpu::TextureFormat,
+        width: u32,
+        height: u32,
+    ) -> (wgpu::Texture, wgpu::BindGroup) {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("meridian world map region"),
-            size: wgpu::Extent3d { width: side, height: side, depth_or_array_layers: 1 },
+            size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
@@ -246,6 +277,11 @@ impl Gpu {
     }
 
     fn write(queue: &wgpu::Queue, texture: &wgpu::Texture, side: u32, bytes: &[u8]) {
+        Self::write_wh(queue, texture, side, side, bytes);
+    }
+
+    fn write_wh(queue: &wgpu::Queue, texture: &wgpu::Texture, width: u32, height: u32, bytes: &[u8]) {
+        let side = width;
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture,
@@ -254,8 +290,8 @@ impl Gpu {
                 aspect: wgpu::TextureAspect::All,
             },
             bytes,
-            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(side * 4), rows_per_image: Some(side) },
-            wgpu::Extent3d { width: side, height: side, depth_or_array_layers: 1 },
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(side * 4), rows_per_image: Some(height) },
+            wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
         );
     }
 
@@ -268,6 +304,7 @@ impl Gpu {
         key: Key,
         pixels: &[u32],
         revision: u64,
+        fixed: Option<u8>,
         budget: &mut usize,
     ) -> bool {
         if self.entries.get(&key).is_some_and(|e| e.revision == revision) {
@@ -278,7 +315,13 @@ impl Gpu {
         }
         *budget -= 1;
         let side = key.3;
-        let bytes = downsample(pixels, side);
+        let bytes = match fixed {
+            None => downsample(pixels, side),
+            Some(alpha) => pixels
+                .iter()
+                .flat_map(|p| [(p >> 16) as u8, (p >> 8) as u8, *p as u8, if p >> 24 == 0 { 0 } else { alpha }])
+                .collect(),
+        };
         if let Some(e) = self.entries.get_mut(&key) {
             Self::write(queue, &e._texture, side, &bytes);
             e.revision = revision;
@@ -340,21 +383,48 @@ impl WorldMapRenderer {
             }
         };
         quad([-1.0, 1.0], [1.0, -1.0]);
-        let mut draws: Vec<Key> = Vec::new();
+        enum Draw {
+            Entry(Key),
+            Icon(usize),
+        }
+        let mut draws: Vec<Draw> = Vec::new();
         let mut budget = UPLOADS_PER_FRAME;
-        // Nearest regions first, so uploads fill in from the middle.
-        let mut regions = frame.regions.clone();
         let mid = [frame.gui[0] / 2.0, frame.gui[1] / 2.0];
-        regions.sort_by(|a, b| {
+        let near = |a: &RegionQuad, b: &RegionQuad| {
             let d = |r: &RegionQuad| ((r.rect[0] + r.rect[2]) / 2.0 - mid[0]).abs() + ((r.rect[1] + r.rect[3]) / 2.0 - mid[1]).abs();
             d(a).total_cmp(&d(b))
-        });
+        };
+        // The Seed Atlas layer under the terrain, at the size it comes in.
+        let mut background = frame.background.clone();
+        background.sort_by(near);
+        let layer = frame.world ^ 0x5EED_A71A5;
+        for r in &background {
+            let key = (layer, r.pos[0], r.pos[1], r.size);
+            let ready = match &r.pixels {
+                Some(p) => gpu.upload(world.device, world.queue, key, p, r.revision, Some(r.alpha), &mut budget),
+                None => gpu.entries.contains_key(&key),
+            };
+            let chosen = if ready {
+                Some(key)
+            } else {
+                [512u32, 256, 128, 64, 32].iter().map(|&l| (layer, r.pos[0], r.pos[1], l)).find(|k| gpu.entries.contains_key(k))
+            };
+            let Some(key) = chosen else { continue };
+            if let Some(e) = gpu.entries.get_mut(&key) {
+                e.last_frame = gpu.frame;
+            }
+            quad(ndc(r.rect[0], r.rect[1]), ndc(r.rect[2], r.rect[3]));
+            draws.push(Draw::Entry(key));
+        }
+        // Nearest regions first, so uploads fill in from the middle.
+        let mut regions = frame.regions.clone();
+        regions.sort_by(near);
         for r in &regions {
             let side = (r.rect[2] - r.rect[0]) * scale[0];
             let want = level_for(side);
             let key = (frame.world, r.pos[0], r.pos[1], want);
             let ready = match &r.pixels {
-                Some(p) => gpu.upload(world.device, world.queue, key, p, r.revision, &mut budget),
+                Some(p) => gpu.upload(world.device, world.queue, key, p, r.revision, None, &mut budget),
                 None => gpu.entries.contains_key(&key),
             };
             let chosen = if ready {
@@ -370,7 +440,22 @@ impl WorldMapRenderer {
                 e.last_frame = gpu.frame;
             }
             quad(ndc(r.rect[0], r.rect[1]), ndc(r.rect[2], r.rect[3]));
-            draws.push(key);
+            draws.push(Draw::Entry(key));
+        }
+        if gpu.icons.is_empty()
+            && let Some(icons) = ICONS.get()
+        {
+            for (w, h, rgba) in icons {
+                let (texture, bind) = Gpu::texture_wh(world.device, &gpu.layout, gpu.format, *w, *h);
+                Gpu::write_wh(world.queue, &texture, *w, *h, rgba);
+                gpu.icons.push((bind, texture));
+            }
+        }
+        for icon in &frame.icons {
+            if icon.icon < gpu.icons.len() {
+                quad(ndc(icon.rect[0], icon.rect[1]), ndc(icon.rect[0] + icon.rect[2], icon.rect[1] + icon.rect[3]));
+                draws.push(Draw::Icon(icon.icon));
+            }
         }
         gpu.evict();
         let bytes: Vec<u8> = vertices.iter().flat_map(|v| v.to_le_bytes()).collect();
@@ -401,10 +486,16 @@ impl WorldMapRenderer {
         pass.set_vertex_buffer(0, buffer.slice(..));
         pass.set_bind_group(0, &gpu.background, &[]);
         pass.draw(0..6, 0..1);
-        for (i, key) in draws.iter().enumerate() {
-            let Some(e) = gpu.entries.get(key) else { continue };
+        for (i, draw) in draws.iter().enumerate() {
+            let bind = match draw {
+                Draw::Entry(key) => match gpu.entries.get(key) {
+                    Some(e) => &e.bind,
+                    None => continue,
+                },
+                Draw::Icon(i) => &gpu.icons[*i].0,
+            };
             let first = (i as u32 + 1) * 6;
-            pass.set_bind_group(0, &e.bind, &[]);
+            pass.set_bind_group(0, bind, &[]);
             pass.draw(first..first + 6, 0..1);
         }
         true

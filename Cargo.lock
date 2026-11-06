@@ -111,6 +111,7 @@ dependencies = [
  "flate2",
  "log",
  "meridian-host",
+ "meridian-seedatlas",
  "parking_lot",
  "png",
  "serde",

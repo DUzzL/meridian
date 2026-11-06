@@ -709,6 +709,7 @@ pub enum Group {
     BlockMap,
     Overlay,
     Waypoints,
+    SeedAtlas,
 }
 
 impl Group {
@@ -721,6 +722,7 @@ impl Group {
             Group::BlockMap => "Block Map Settings",
             Group::Overlay => "Overlay Settings",
             Group::Waypoints => "Waypoint Settings",
+            Group::SeedAtlas => "Seed Atlas Settings",
         }
     }
 }
@@ -767,7 +769,7 @@ macro_rules! toggle {
 /// Every setting the screens offer, by group.
 pub fn options() -> Vec<Opt> {
     use Group::*;
-    vec![
+    let mut all = vec![
         Opt {
             label: "Minimap Shape",
             group: View,
@@ -1008,7 +1010,9 @@ pub fn options() -> Vec<Opt> {
                 s.waypoints.max_distance = cycle(&STEPS, s.waypoints.max_distance, b);
             },
         },
-    ]
+    ];
+    all.extend(seed_atlas_options());
+    all
 }
 
 #[derive(Debug, PartialEq)]
@@ -1133,6 +1137,14 @@ impl SettingsScreen {
                     ws.push(Widget::button(id, Self::grid(env, i), label, enabled));
                 }
             }
+            SettingsPage::Main { page: 1 } => {
+                ws.push(Widget::button(
+                    "g:seedatlas",
+                    Self::grid(env, 0),
+                    "Seed Atlas Settings",
+                    true,
+                ));
+            }
             SettingsPage::Main { .. } => {}
             _ => {
                 let opts = self.page_options();
@@ -1189,6 +1201,7 @@ impl SettingsScreen {
             Some("g:info") => self.page = group(Group::Information),
             Some("g:waypoints") => self.page = group(Group::Waypoints),
             Some("g:misc") => self.page = group(Group::Misc),
+            Some("g:seedatlas") => self.page = group(Group::SeedAtlas),
             Some("waypoints") => return Action::Open(Screen::List(List::default())),
             Some(o) if o.starts_with("opt:") => {
                 if let Some(opt) = o[4..]
@@ -1242,6 +1255,153 @@ impl SettingsScreen {
 
 /// The kinds a waypoint of the list can be (re-exported for hosts).
 pub type WaypointKind = Kind;
+
+macro_rules! marker {
+    ($label:literal, $id:literal) => {
+        Opt {
+            label: $label,
+            group: Group::SeedAtlas,
+            value: |s| on_off(crate::seedatlas::marker_enabled(&s.seed_atlas, $id)),
+            step: |s, _| {
+                let on = crate::seedatlas::marker_enabled(&s.seed_atlas, $id);
+                s.seed_atlas.markers.insert($id.to_owned(), !on);
+            },
+        }
+    };
+}
+
+fn y_steps(now: i32, back: bool) -> i32 {
+    const YS: [i32; 9] = [-64, -32, 0, 32, 64, 128, 192, 255, 320];
+    let i = YS.iter().position(|y| *y >= now).unwrap_or(YS.len() - 1);
+    YS[if back {
+        (i + YS.len() - 1) % YS.len()
+    } else {
+        (i + 1) % YS.len()
+    }]
+}
+
+/// The Seed Atlas options, as the Fabric version's settings offer them.
+fn seed_atlas_options() -> Vec<Opt> {
+    use Group::SeedAtlas;
+    vec![
+        toggle!("Seed Atlas", SeedAtlas, seed_atlas.enabled),
+        toggle!("Seed map layer", SeedAtlas, seed_atlas.biome_layer),
+        Opt {
+            label: "Layer opacity",
+            group: SeedAtlas,
+            value: |s| format!("{}%", (s.seed_atlas.biome_opacity as u32 * 100 + 127) / 255),
+            step: |s, b| {
+                let pct = (s.seed_atlas.biome_opacity as i32 * 100 + 127) / 255;
+                let next = if b {
+                    (pct - 10).rem_euclid(110)
+                } else {
+                    (pct + 10) % 110
+                };
+                s.seed_atlas.biome_opacity = ((next * 255 + 50) / 100) as u8;
+            },
+        },
+        toggle!("Structures", SeedAtlas, seed_atlas.structures),
+        Opt {
+            label: "Biome resolution",
+            group: SeedAtlas,
+            value: |s| match s.seed_atlas.biome_resolution {
+                1 => "Full Detail (1x)".into(),
+                2 => "High (2x)".into(),
+                4 => "Reduced (4x)".into(),
+                8 => "Low (8x)".into(),
+                _ => "Very Low (16x)".into(),
+            },
+            step: |s, b| {
+                s.seed_atlas.biome_resolution =
+                    cycle(&[1, 2, 4, 8, 16], s.seed_atlas.biome_resolution, b)
+            },
+        },
+        Opt {
+            label: "Worker threads",
+            group: SeedAtlas,
+            value: |s| {
+                if s.seed_atlas.worker_threads == 0 {
+                    "Auto".into()
+                } else {
+                    s.seed_atlas.worker_threads.to_string()
+                }
+            },
+            step: |s, b| {
+                s.seed_atlas.worker_threads =
+                    cycle(&[0, 1, 2, 4, 8], s.seed_atlas.worker_threads, b)
+            },
+        },
+        Opt {
+            label: "Background prefetch",
+            group: SeedAtlas,
+            value: |s| {
+                ["Off", "Near", "Medium", "Far"][s.seed_atlas.prefetch_radius.min(3) as usize]
+                    .into()
+            },
+            step: |s, b| {
+                s.seed_atlas.prefetch_radius = cycle(&[0, 1, 2, 3], s.seed_atlas.prefetch_radius, b)
+            },
+        },
+        Opt {
+            label: "World type",
+            group: SeedAtlas,
+            value: |s| {
+                if s.seed_atlas.large_biomes {
+                    "Large Biomes".into()
+                } else {
+                    "Normal".into()
+                }
+            },
+            step: |s, _| s.seed_atlas.large_biomes = !s.seed_atlas.large_biomes,
+        },
+        Opt {
+            label: "Overworld Y",
+            group: SeedAtlas,
+            value: |s| s.seed_atlas.overworld_y.to_string(),
+            step: |s, b| s.seed_atlas.overworld_y = y_steps(s.seed_atlas.overworld_y, b),
+        },
+        Opt {
+            label: "Nether Y",
+            group: SeedAtlas,
+            value: |s| s.seed_atlas.nether_y.to_string(),
+            step: |s, b| s.seed_atlas.nether_y = y_steps(s.seed_atlas.nether_y, b),
+        },
+        Opt {
+            label: "End Y",
+            group: SeedAtlas,
+            value: |s| s.seed_atlas.end_y.to_string(),
+            step: |s, b| s.seed_atlas.end_y = y_steps(s.seed_atlas.end_y, b),
+        },
+        marker!("Abandoned Camp", "camp"),
+        marker!("Ancient City", "ancient_city"),
+        marker!("Bastion Remnant", "bastion"),
+        marker!("Trial Chambers", "chambers"),
+        marker!("Desert Pyramid", "desert"),
+        marker!("End City", "endcity"),
+        marker!("End Ship", "end_ship"),
+        marker!("Nether Fortress", "fortress"),
+        marker!("End Gateway", "gateway"),
+        marker!("Amethyst Geode", "geode"),
+        marker!("Swamp Hut", "hut"),
+        marker!("Igloo", "igloo"),
+        marker!("Jungle Temple", "jungle"),
+        marker!("Woodland Mansion", "mansion"),
+        marker!("Mineshaft", "mineshaft"),
+        marker!("Ocean Monument", "monument"),
+        marker!("Ore Vein", "orevein"),
+        marker!("Pillager Outpost", "outpost"),
+        marker!("Ruined Portal", "portal"),
+        marker!("Ocean Ruins", "ruins"),
+        marker!("Shipwreck", "shipwreck"),
+        marker!("Slime Chunk", "slime"),
+        marker!("World Spawn", "spawn"),
+        marker!("Stronghold", "stronghold"),
+        marker!("Trail Ruins", "trails"),
+        marker!("Buried Treasure", "treasure"),
+        marker!("Village", "village"),
+        marker!("Desert Well", "well"),
+    ]
+}
 
 #[cfg(test)]
 mod tests {

@@ -260,3 +260,36 @@
 - Server-Chunk-Radius und Kartendistanzen (WM-13/17).
 - Exportoptionen (Nacht, Teilung).
 - Die Symbolleisten links und rechts der Referenzkarte (eigene Symbole wären nötig; keine Assets der Referenz).
+
+## Phase 5: Seed Atlas (abgeschlossen)
+
+**Fertig**
+
+- Engine als Rust-Port (`engine/seedatlas`, D-025), nur für 26.3:
+  - Biome aller drei Dimensionen (normal und große Biome, alle Auflösungen der Fabric-Version);
+  - 25 Strukturtypen mit Biom- und Geländeprüfung, Varianten und Lagern mit Spezialbeute;
+  - End-Städte mit Inselhöhe und Schiffen, End-Gateways (fest und gestreut), End-Inseln;
+  - Festungen, Spawn, Schleimchunks, Erzadern.
+- Parität: Fixtures direkt aus der nativen Schnittstelle der Fabric-Version (`tools/seedatlas-fixtures/build.sh`). Alle Werte stimmen exakt:
+  - Biome: über 50.000 Proben;
+  - Strukturen: jeder Treffer für fünf Seeds.
+- Einbindung in Meridian:
+  - Seed im Einzelspieler automatisch aus der Welt (Horizons `save::Level`), sonst `/seedatlas seed <seed>`. Gespeichert wird pro Welt bzw. Server lokal in `seeds.toml`, der Seed verlässt den Client nie.
+  - `/seedatlas seed|clear|status|settings`.
+  - Weltkarte:
+    - Biom-Ebene unter dem erkundeten Gelände, Deckkraft einstellbar, Kacheln je nach Zoom in 1×, 4× oder 16×, berechnet auf Worker-Threads;
+    - Struktur-Icons (die eigenen Icons von Seed Atlas) mit Tooltip (Name, „(approx.)“, Spezialbeute, Koordinaten);
+    - Biom-Tooltip am Cursor wie in der Fabric-Version;
+    - Knöpfe „SA“ (Ebene an/aus, grün/grau) und „...“ (Einstellungen) am linken Rand.
+  - Einstellungsgruppe „Seed Atlas Settings“ mit allen Optionen der Fabric-Version und den 28 Markertypen. Die Standardwerte folgen der Fabric-Version: Ebene an, Strukturen aus, Hilfsmarker aus.
+
+**Build und Tests**:
+
+- 120 Tests grün (116 Kern, 2 Host, 2 Paritätstests mit Fixtures);
+- Clippy sauber, Adapter-Check grün;
+- im Spiel geprüft (Welt MeridianTest, Seed automatisch erkannt).
+
+**Offen**
+
+- Erledigte Strukturen markieren und ausblenden (Fabric: Kontextmenü), Wegpunkt aus Struktur (SA-07).
+- Biom-Ebene optional auf der Minimap, Prefetch über die Sicht hinaus.
