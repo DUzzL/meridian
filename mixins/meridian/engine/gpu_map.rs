@@ -35,6 +35,8 @@ pub struct RegionQuad {
 pub struct IconQuad {
     pub icon: usize,
     pub rect: [f32; 4],
+    /// Opacity 0..=1 (completed structures fade).
+    pub alpha: f32,
 }
 
 /// Icons the map can draw, RGBA, uploaded once.
@@ -65,13 +67,15 @@ const SHADER: &str = r#"
 struct Out {
     @builtin(position) pos: vec4<f32>,
     @location(0) uv: vec2<f32>,
+    @location(1) alpha: f32,
 }
 
 @vertex
-fn vs(@location(0) pos: vec2<f32>, @location(1) uv: vec2<f32>) -> Out {
+fn vs(@location(0) pos: vec2<f32>, @location(1) uv: vec2<f32>, @location(2) alpha: f32) -> Out {
     var out: Out;
     out.pos = vec4(pos, 0.0, 1.0);
     out.uv = uv;
+    out.alpha = alpha;
     return out;
 }
 
@@ -83,7 +87,7 @@ fn fs(in: Out) -> @location(0) vec4<f32> {
     if (c.a <= 0.0) {
         discard;
     }
-    return c;
+    return vec4(c.rgb, c.a * in.alpha);
 }
 "#;
 
@@ -195,7 +199,7 @@ impl Gpu {
             bind_group_layouts: &[Some(&layout)],
             ..Default::default()
         });
-        let attributes = wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2];
+        let attributes = wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32];
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("meridian world map"),
             layout: Some(&pipeline_layout),
@@ -204,7 +208,7 @@ impl Gpu {
                 entry_point: Some("vs"),
                 compilation_options: Default::default(),
                 buffers: &[Some(wgpu::VertexBufferLayout {
-                    array_stride: 16,
+                    array_stride: 20,
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &attributes,
                 })],
@@ -375,14 +379,19 @@ impl WorldMapRenderer {
             let (px, py) = ((x * scale[0]).round(), (y * scale[1]).round());
             [px / w as f32 * 2.0 - 1.0, 1.0 - py / h as f32 * 2.0]
         };
-        let mut vertices: Vec<f32> = Vec::with_capacity((frame.regions.len() + 1) * 24);
-        let mut quad = |l: [f32; 2], r: [f32; 2]| {
-            let (a, b, c, d) = ([l[0], l[1], 0.0, 0.0], [r[0], l[1], 1.0, 0.0], [r[0], r[1], 1.0, 1.0], [l[0], r[1], 0.0, 1.0]);
+        let mut vertices: Vec<f32> = Vec::with_capacity((frame.regions.len() + frame.background.len() + frame.icons.len() + 1) * 30);
+        let mut quad = |l: [f32; 2], r: [f32; 2], alpha: f32| {
+            let (a, b, c, d) = (
+                [l[0], l[1], 0.0, 0.0, alpha],
+                [r[0], l[1], 1.0, 0.0, alpha],
+                [r[0], r[1], 1.0, 1.0, alpha],
+                [l[0], r[1], 0.0, 1.0, alpha],
+            );
             for v in [a, b, c, a, c, d] {
                 vertices.extend_from_slice(&v);
             }
         };
-        quad([-1.0, 1.0], [1.0, -1.0]);
+        quad([-1.0, 1.0], [1.0, -1.0], 1.0);
         enum Draw {
             Entry(Key),
             Icon(usize),
@@ -413,7 +422,7 @@ impl WorldMapRenderer {
             if let Some(e) = gpu.entries.get_mut(&key) {
                 e.last_frame = gpu.frame;
             }
-            quad(ndc(r.rect[0], r.rect[1]), ndc(r.rect[2], r.rect[3]));
+            quad(ndc(r.rect[0], r.rect[1]), ndc(r.rect[2], r.rect[3]), 1.0);
             draws.push(Draw::Entry(key));
         }
         // Nearest regions first, so uploads fill in from the middle.
@@ -439,7 +448,7 @@ impl WorldMapRenderer {
             if let Some(e) = gpu.entries.get_mut(&key) {
                 e.last_frame = gpu.frame;
             }
-            quad(ndc(r.rect[0], r.rect[1]), ndc(r.rect[2], r.rect[3]));
+            quad(ndc(r.rect[0], r.rect[1]), ndc(r.rect[2], r.rect[3]), 1.0);
             draws.push(Draw::Entry(key));
         }
         if gpu.icons.is_empty()
@@ -453,7 +462,7 @@ impl WorldMapRenderer {
         }
         for icon in &frame.icons {
             if icon.icon < gpu.icons.len() {
-                quad(ndc(icon.rect[0], icon.rect[1]), ndc(icon.rect[0] + icon.rect[2], icon.rect[1] + icon.rect[3]));
+                quad(ndc(icon.rect[0], icon.rect[1]), ndc(icon.rect[0] + icon.rect[2], icon.rect[1] + icon.rect[3]), icon.alpha);
                 draws.push(Draw::Icon(icon.icon));
             }
         }

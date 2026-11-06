@@ -37,6 +37,8 @@ pub enum MenuItem {
     TeleportToWaypoint(u64),
     DeleteWaypoint(u64),
     ExportPng,
+    /// An entry the host adds (Seed Atlas markers): its id and label.
+    Extra(u32, String),
 }
 
 impl MenuItem {
@@ -50,6 +52,7 @@ impl MenuItem {
             MenuItem::TeleportToWaypoint(_) => "Teleport To Waypoint".into(),
             MenuItem::DeleteWaypoint(_) => "Delete Waypoint".into(),
             MenuItem::ExportPng => "Export Map as PNG".into(),
+            MenuItem::Extra(_, label) => label.clone(),
         }
     }
 }
