@@ -251,3 +251,14 @@ Die Karte zeigt das Biom unter dem Cursor. Dafür speichert jede Kachel eine Bio
 
 - `.mrg` Version 2 schreibt die Palette vor die Spalten jeder Kachel.
 - Version-1-Dateien werden weiter gelesen: Ihr Biom ist unbekannt, bis der Chunk neu erfasst wird.
+
+## D-025: Seed Atlas als reiner Rust-Port
+
+Die Fabric-Version rechnet mit einer C-Bibliothek (Seed-Atlas-Engine, aus cubiomes abgeleitet). Horizon-Bundles dürfen nur Crates aus Horizons Lockfile nutzen, und `cc` bzw. `libloading` sind dort nicht enthalten. Meridian portiert die Engine deshalb nach Rust (`engine/seedatlas`, `forbid(unsafe_code)`), und zwar nur den Pfad für Minecraft 26.3.
+
+- Die API spiegelt die native Schnittstelle der Fabric-Version (`sax_*`, ABI 4) Aufruf für Aufruf.
+- Parität: `tools/seedatlas-fixtures/` baut lokal die echte Glue-Schicht der Fabric-Version samt Engine und schreibt Fixtures. Die Tests vergleichen jede Zahl:
+  - Biome: Punkte, Flächen mit Schrittweite 1 bis 1024, Chunks;
+  - drei Dimensionen, normale und große Biome, sechs Seeds.
+- Gleitkomma: Die Fabric-Bibliothek für Apple Silicon ist mit clang gebaut, das `a*b + c` zu FMA zusammenzieht. Weit draußen im End (über rund 78.000 Blöcke) ändert das die Inselgewichte. Meridian rechnet dort mit `mul_add` wie dieser Build. Auf x86-Builds der Fabric-Version können End-Biome so weit draußen abweichen.
+- Biomnamen, Farben und Existenz kommen generiert aus der Engine (`biome_table.c`), der Biom-Suchbaum aus ihrer Tabelle (`btree_table.py`).

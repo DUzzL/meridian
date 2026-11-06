@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "mixins/meridian/engine/host",
     "mixins/meridian/engine/core",
+    "mixins/meridian/engine/seedatlas",
 ]
 # The Horizon adapter depends on the game itself and is built by the Horizon
 # launcher (or `tools/check-adapter.sh`), not by this workspace.
