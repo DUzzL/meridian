@@ -118,9 +118,13 @@ impl Shading {
 /// Sky brightness for a time of day in ticks: 1 at noon (6000), 0 at
 /// midnight (18000), following the sun's height.
 pub fn daylight(day_time: i64) -> f32 {
-    let t = day_time.rem_euclid(24_000) as f32;
-    let angle = (t - 6_000.0) / 24_000.0 * std::f32::consts::TAU;
-    (0.5 + 0.5 * angle.cos()).clamp(0.0, 1.0)
+    // The sun's angle as the game computes it (0 at noon, 0.5 at midnight),
+    // then the sky's darkening from it; the map stays fully lit while the
+    // sky is at least half bright and dims from there into the night.
+    let d = (day_time.rem_euclid(24_000) as f32 / 24_000.0 - 0.25).rem_euclid(1.0);
+    let angle = (d * 2.0 + (0.5 - (d * std::f32::consts::PI).cos() / 2.0)) / 3.0;
+    let darken = (1.0 - ((angle * std::f32::consts::TAU).cos() * 2.0 + 0.2)).clamp(0.0, 1.0);
+    ((1.0 - darken) * 2.0).clamp(0.0, 1.0)
 }
 
 /// Brightness from a slope: `height` against its north and west neighbours.
@@ -141,7 +145,8 @@ pub fn slope_factor(slopes: Slopes, height: i16, north: Option<i16>, west: Optio
             } else {
                 0.045
             };
-            0.9 + (d * gain).clamp(-0.22, 0.12)
+            // Flat ground keeps its colour; rises brighten, drops darken.
+            1.0 + (d * gain).clamp(-0.3, 0.15)
         }
     }
 }
@@ -163,9 +168,9 @@ pub fn light_factor(block_light: u8, sky_light: u8, daylight: f32) -> f32 {
 /// Water over ground: opacity and darkening grow with depth.
 pub fn water_over(ground: u32, water: u32, depth: u8, transparency: bool) -> u32 {
     let d = depth.min(16) as f32 / 16.0;
-    let water = scale(water, 1.0 - 0.4 * d);
+    let water = scale(water, 1.0 - 0.2 * d);
     if transparency {
-        blend(ground, water, 0.55 + 0.4 * d)
+        blend(ground, water, 0.5 + 0.35 * d)
     } else {
         water
     }
@@ -250,7 +255,10 @@ mod tests {
         let mut last = 0.0;
         for d in -40..=40 {
             let f = slope_factor(Slopes::Smooth, 64 + d, Some(64), Some(64));
-            assert!((0.68 - 1e-6..=1.02 + 1e-6).contains(&f), "{f}");
+            assert!((0.7 - 1e-6..=1.15 + 1e-6).contains(&f), "{f}");
+            if d == 0 {
+                assert_eq!(f, 1.0, "flat ground keeps its colour");
+            }
             assert!(f >= last);
             last = f;
         }
@@ -262,9 +270,13 @@ mod tests {
 
     #[test]
     fn daylight_curve() {
-        assert!((daylight(6_000) - 1.0).abs() < 1e-6);
-        assert!(daylight(18_000) < 1e-6);
-        assert!((daylight(0) - 0.5).abs() < 1e-3);
+        assert!((daylight(6_000) - 1.0).abs() < 1e-6, "noon");
+        assert_eq!(daylight(0), 1.0, "sunrise is already bright");
+        assert!(daylight(18_000) < 0.5, "midnight is dark");
+        assert!(
+            daylight(13_000) < 1.0 && daylight(13_000) > daylight(18_000),
+            "dusk dims"
+        );
         assert_eq!(daylight(6_000 + 24_000 * 5), daylight(6_000));
         assert_eq!(daylight(-18_000), daylight(6_000));
     }
@@ -283,7 +295,7 @@ mod tests {
         assert!(luminance(deep) < luminance(shallow));
         assert_eq!(
             water_over(0xC2B280, 0x3F76E4, 3, false),
-            scale(0x3F76E4, 1.0 - 0.4 * 3.0 / 16.0)
+            scale(0x3F76E4, 1.0 - 0.2 * 3.0 / 16.0)
         );
     }
 

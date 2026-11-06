@@ -8,14 +8,20 @@
 
 use crate::config::{Corner, MinimapSettings, MinimapShape, MinimapSize};
 
-/// GUI pixels between the map and the screen edge.
-pub const MARGIN: f32 = 4.0;
-/// Height of one info line under the map.
+/// Height of one info line under the map, GUI pixels.
 pub const LINE_HEIGHT: f32 = 10.0;
 /// The most cells drawn per side; larger maps use bigger cells.
 const MAX_CELLS_PER_SIDE: f32 = 160.0;
+/// Blocks per minimap unit at the default zoom (a unit is about three
+/// physical pixels on a 1080p-class screen: 1.5 pixels per block).
+pub const BLOCKS_PER_UNIT: f32 = 2.0;
+/// Screen height, in minimap units, that one unit is measured against: the
+/// minimap's frame, marks and spacing scale with the window, not with the
+/// GUI scale.
+const UNITS_PER_SCREEN: f32 = 594.0;
 
-/// Blocks per GUI pixel for each zoom step; `further_zoom_out` adds two.
+/// Multipliers of the default zoom (blocks per pixel) for each zoom step;
+/// `further_zoom_out` adds two. Step 1 is the default.
 pub fn zoom_steps(further: bool) -> &'static [f32] {
     if further {
         &[0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0]
@@ -48,13 +54,15 @@ pub enum DrawOp {
         text: String,
         argb: u32,
         align: Align,
+        /// GUI pixels per font pixel.
+        scale: f32,
     },
 }
 
 /// Where and how big the map is this frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Layout {
-    /// Top left corner of the map square.
+    /// Top left corner of the map square (inside the frame).
     pub x: f32,
     pub y: f32,
     pub size: f32,
@@ -64,23 +72,40 @@ pub struct Layout {
     pub round: bool,
     /// Info lines go below the map (true) or above it (bottom corners).
     pub info_below: bool,
+    /// GUI pixels per minimap unit (frame lines, marks, spacing).
+    pub unit: f32,
 }
 
 impl Layout {
     pub fn center(&self) -> [f32; 2] {
         [self.x + self.size / 2.0, self.y + self.size / 2.0]
     }
+
+    /// Width of the frame around the map.
+    pub fn frame_width(&self) -> f32 {
+        if self.round { 0.0 } else { 4.0 * self.unit }
+    }
 }
 
-/// The map's side for a size setting and screen.
+/// GUI pixels per minimap unit on a screen `gui_height` GUI pixels tall at
+/// `gui_scale` physical pixels per GUI pixel. A unit is a whole number of
+/// physical pixels, so lines stay sharp.
+pub fn unit(gui_height: f32, gui_scale: f32) -> f32 {
+    let scale = gui_scale.max(0.25);
+    let physical = (gui_height * scale / UNITS_PER_SCREEN).round().max(1.0);
+    physical / scale
+}
+
+/// The map's side (inside the frame) for a size setting and screen.
 pub fn side(size: MinimapSize, gui: [f32; 2]) -> f32 {
-    let px = match size {
-        MinimapSize::Auto => (gui[0].min(gui[1]) * 0.28).clamp(64.0, 160.0),
-        MinimapSize::Small => 64.0,
-        MinimapSize::Medium => 96.0,
-        MinimapSize::Large => 128.0,
-        MinimapSize::Huge => 192.0,
+    let share = match size {
+        MinimapSize::Auto => 0.232,
+        MinimapSize::Small => 0.16,
+        MinimapSize::Medium => 0.2,
+        MinimapSize::Large => 0.28,
+        MinimapSize::Huge => 0.36,
     };
+    let px = (gui[1] * share).clamp(48.0, gui[0].min(gui[1]) * 0.9);
     // Even, so the centre falls between pixels the same way every frame.
     (px / 2.0).floor() * 2.0
 }
@@ -102,40 +127,60 @@ pub fn zoom_index(s: &MinimapSettings, enlarged: bool) -> usize {
     i.min(steps - 1)
 }
 
-/// Where the map goes on a `gui`-sized screen, with `info_lines` lines of
-/// text beside it.
-pub fn layout(s: &MinimapSettings, gui: [f32; 2], enlarged: bool, info_lines: usize) -> Layout {
+/// Where the map goes on a `gui`-sized screen drawn at `gui_scale`
+/// physical pixels per GUI pixel, with `info_lines` lines of text beside it.
+pub fn layout(
+    s: &MinimapSettings,
+    gui: [f32; 2],
+    gui_scale: f32,
+    enlarged: bool,
+    info_lines: usize,
+) -> Layout {
+    let u = unit(gui[1], gui_scale);
     let normal = side(s.size, gui);
     let size = if enlarged {
-        let big = (gui[0].min(gui[1]) * 0.7).floor();
+        let big = (gui[1] * 0.6).floor();
         ((big / 2.0).floor() * 2.0).max(normal)
     } else {
         normal
     };
-    let info = info_lines as f32 * LINE_HEIGHT;
+    let frame = if s.shape == MinimapShape::Round {
+        0.0
+    } else {
+        4.0 * u
+    };
+    let margin = 5.0 * u + frame;
+    let info = if info_lines > 0 {
+        3.0 * u + info_lines as f32 * LINE_HEIGHT
+    } else {
+        0.0
+    };
     let (x, y, info_below) = if enlarged && s.enlarged_centered {
         ((gui[0] - size) / 2.0, (gui[1] - size) / 2.0, true)
     } else {
-        let left = MARGIN + s.offset[0] as f32;
-        let right = gui[0] - size - MARGIN - s.offset[0] as f32;
-        let top = MARGIN + s.offset[1] as f32;
-        let bottom = gui[1] - size - MARGIN - info - s.offset[1] as f32;
+        let left = margin + s.offset[0] as f32;
+        let right = gui[0] - size - margin - s.offset[0] as f32;
+        let top = margin + s.offset[1] as f32;
+        let bottom = gui[1] - size - margin - s.offset[1] as f32;
         match s.corner {
             Corner::TopLeft => (left, top, true),
             Corner::TopRight => (right, top, true),
-            Corner::BottomLeft => (left, bottom + info, false),
-            Corner::BottomRight => (right, bottom + info, false),
+            Corner::BottomLeft => (left, bottom, false),
+            Corner::BottomRight => (right, bottom, false),
         }
     };
+    let _ = info;
     let steps = zoom_steps(s.further_zoom_out);
+    let default_bpp = BLOCKS_PER_UNIT / u;
     Layout {
         x: x.round(),
         y: y.round(),
         size,
-        blocks_per_pixel: steps[zoom_index(s, enlarged)],
+        blocks_per_pixel: steps[zoom_index(s, enlarged)] * default_bpp,
         rotate: !s.north_locked,
         round: s.shape == MinimapShape::Round,
         info_below,
+        unit: u,
     }
 }
 
@@ -197,7 +242,8 @@ pub fn terrain(
     pixel: impl Fn(i32, i32) -> u32,
 ) -> Vec<DrawOp> {
     let mut ops = Vec::new();
-    let cell = (layout.size / MAX_CELLS_PER_SIDE).ceil().max(1.0);
+    // One block per cell where the zoom allows; never more cells than the limit.
+    let cell = (1.0 / layout.blocks_per_pixel).max(layout.size / MAX_CELLS_PER_SIDE);
     let n = (layout.size / cell).ceil() as i32;
     let half = layout.size as f64 / 2.0;
     let r2 = half * half;
@@ -310,18 +356,33 @@ pub fn project(
     ([cx + dx as f32, cy + dy as f32], clamped)
 }
 
-/// The player's arrow at the map's centre: pointing up when the map turns,
-/// along the player's facing when north is locked.
-pub fn arrow(layout: &Layout, yaw: f32, scale: f32, argb: u32) -> DrawOp {
+/// The player's mark at the map's centre: a small cross while the map turns
+/// with the player (forward is always up), an arrow along the player's
+/// facing when north is locked.
+pub fn player_mark(layout: &Layout, yaw: f32, scale: f32) -> Vec<DrawOp> {
     let [cx, cy] = layout.center();
-    // Screen direction of the player's facing.
-    let (dir_x, dir_y) = if layout.rotate {
-        (0.0, -1.0)
-    } else {
-        let (s, c) = yaw.to_radians().sin_cos();
-        (-s, c)
-    };
-    let len = 4.0 * scale;
+    let u = layout.unit;
+    if layout.rotate {
+        let (white, tip) = (0xFFFF_FFFF, 0xFFB4_8CDC);
+        let px = |dx: f32, dy: f32, argb: u32| DrawOp::Fill {
+            rect: [cx + (dx - 0.5) * u, cy + (dy - 0.5) * u, u, u],
+            argb,
+        };
+        return vec![
+            px(0.0, -2.0, tip),
+            px(0.0, -1.0, white),
+            px(-2.0, 0.0, tip),
+            px(-1.0, 0.0, white),
+            px(0.0, 0.0, tip),
+            px(1.0, 0.0, white),
+            px(2.0, 0.0, tip),
+            px(0.0, 1.0, white),
+            px(0.0, 2.0, tip),
+        ];
+    }
+    let (s, c) = yaw.to_radians().sin_cos();
+    let (dir_x, dir_y) = (-s, c);
+    let len = 2.5 * u * scale;
     let (px, py) = (-dir_y, dir_x);
     let tip = [cx + dir_x * len, cy + dir_y * len];
     let left = [
@@ -333,82 +394,114 @@ pub fn arrow(layout: &Layout, yaw: f32, scale: f32, argb: u32) -> DrawOp {
         cx - dir_x * len - px * len * 0.8,
         cy - dir_y * len - py * len * 0.8,
     ];
-    DrawOp::Quad {
+    vec![DrawOp::Quad {
         points: [tip, right, notch, left],
-        argb,
-    }
+        argb: 0xFFFF_FFFF,
+    }]
 }
 
-/// N, E, S and W on the rim.
+/// N, E, S and W just inside the rim, each on a small blue plate.
 pub fn compass(layout: &Layout, yaw: f32) -> Vec<DrawOp> {
     let axes = Axes::new(layout.rotate, yaw);
-    let reach = (layout.size / 2.0 - 5.0) as f64;
+    let u = layout.unit;
+    let reach = (layout.size / 2.0 - 4.0 * u) as f64;
     let [cx, cy] = layout.center();
-    [
-        ("N", [0.0, -1.0], 0xFFFF_5555u32),
-        ("E", [1.0, 0.0], 0xFFFF_FFFF),
-        ("S", [0.0, 1.0], 0xFFFF_FFFF),
-        ("W", [-1.0, 0.0], 0xFFFF_FFFF),
-    ]
-    .into_iter()
-    .map(|(label, dir, argb): (&str, [f64; 2], u32)| {
+    let mut ops = Vec::new();
+    for (label, dir) in [
+        ("N", [0.0, -1.0]),
+        ("E", [1.0, 0.0]),
+        ("S", [0.0, 1.0]),
+        ("W", [-1.0, 0.0]),
+    ] {
         let [dx, dy] = axes.to_screen(dir[0], dir[1], 1.0);
-        let mut x = dx * reach;
-        let mut y = dy * reach;
+        let (mut x, mut y) = (dx * reach, dy * reach);
         if !layout.round {
             // Out to the square's edge along the same direction.
             let m = dx.abs().max(dy.abs()).max(1e-6);
             x = dx / m * reach;
             y = dy / m * reach;
         }
-        DrawOp::Text {
-            x: cx + x as f32,
-            y: cy + y as f32 - 4.0,
+        let (x, y) = (cx + x as f32, cy + y as f32);
+        let half = 3.0 * u;
+        ops.push(DrawOp::Fill {
+            rect: [x - half, y - half, 2.0 * half, 2.0 * half],
+            argb: 0xE06C_6CE8,
+        });
+        let scale = 0.75 * u;
+        ops.push(DrawOp::Text {
+            x: x + 0.5 * scale,
+            y: y - 3.5 * scale,
             text: label.to_owned(),
-            argb,
+            argb: 0xFFFF_FFFF,
             align: Align::Center,
-        }
-    })
-    .collect()
+            scale,
+        });
+    }
+    ops
 }
 
-/// A thin frame around a square map.
-pub fn frame(layout: &Layout, argb: u32) -> Vec<DrawOp> {
+/// The bevelled frame around a square map: black outside, a light grey
+/// band, a dark line inside.
+pub fn frame(layout: &Layout) -> Vec<DrawOp> {
     if layout.round {
         return Vec::new();
     }
-    let (x, y, s) = (layout.x, layout.y, layout.size);
-    vec![
-        DrawOp::Fill {
-            rect: [x - 1.0, y - 1.0, s + 2.0, 1.0],
-            argb,
-        },
-        DrawOp::Fill {
-            rect: [x - 1.0, y + s, s + 2.0, 1.0],
-            argb,
-        },
-        DrawOp::Fill {
-            rect: [x - 1.0, y, 1.0, s],
-            argb,
-        },
-        DrawOp::Fill {
-            rect: [x + s, y, 1.0, s],
-            argb,
-        },
-    ]
+    let u = layout.unit;
+    let ring = |inset: f32, width: f32, argb: u32| {
+        // `inset` units outside the map, `width` units wide.
+        let o = inset * u;
+        let w = width * u;
+        let (x, y, s) = (layout.x - o, layout.y - o, layout.size + 2.0 * o);
+        [
+            DrawOp::Fill {
+                rect: [x, y, s, w],
+                argb,
+            },
+            DrawOp::Fill {
+                rect: [x, y + s - w, s, w],
+                argb,
+            },
+            DrawOp::Fill {
+                rect: [x, y + w, w, s - 2.0 * w],
+                argb,
+            },
+            DrawOp::Fill {
+                rect: [x + s - w, y + w, w, s - 2.0 * w],
+                argb,
+            },
+        ]
+    };
+    let mut ops = Vec::new();
+    ops.extend(ring(4.0, 1.0, 0xFF00_0000));
+    ops.extend(ring(3.0, 2.0, 0xFFA8_A8A8));
+    // A lighter edge on the band's top and left, as if lit from there.
+    let (o, w) = (3.0 * u, u);
+    let (x, y, s) = (layout.x - o, layout.y - o, layout.size + 2.0 * o);
+    ops.push(DrawOp::Fill {
+        rect: [x, y, s - w, w],
+        argb: 0xFFD0_D0D0,
+    });
+    ops.push(DrawOp::Fill {
+        rect: [x, y, w, s - w],
+        argb: 0xFFD0_D0D0,
+    });
+    ops.extend(ring(1.0, 1.0, 0xFF1E_1E1E));
+    ops
 }
 
-/// The info lines centred under (or above) the map.
+/// The info lines centred under (or above) the map and its frame.
 pub fn info(layout: &Layout, lines: &[(String, u32)]) -> Vec<DrawOp> {
     let cx = layout.x + layout.size / 2.0;
+    let gap = layout.frame_width() + 3.0 * layout.unit;
+    let line = LINE_HEIGHT * layout.unit;
     lines
         .iter()
         .enumerate()
         .map(|(i, (text, argb))| {
             let y = if layout.info_below {
-                layout.y + layout.size + 3.0 + i as f32 * LINE_HEIGHT
+                layout.y + layout.size + gap + i as f32 * line
             } else {
-                layout.y - 3.0 - (lines.len() - i) as f32 * LINE_HEIGHT
+                layout.y - gap - (lines.len() - i) as f32 * line
             };
             DrawOp::Text {
                 x: cx,
@@ -416,9 +509,79 @@ pub fn info(layout: &Layout, lines: &[(String, u32)]) -> Vec<DrawOp> {
                 text: text.clone(),
                 argb: *argb,
                 align: Align::Center,
+                scale: layout.unit,
             }
         })
         .collect()
+}
+
+/// A waypoint's mark: a square in its colour with its initial in white.
+/// `size` is the square's side in GUI pixels, `text_scale` the initial's.
+pub fn waypoint_mark(
+    at: [f32; 2],
+    size: f32,
+    argb: u32,
+    initial: &str,
+    text_scale: f32,
+) -> Vec<DrawOp> {
+    let [x, y] = at;
+    let half = size / 2.0;
+    vec![
+        DrawOp::Fill {
+            rect: [x - half, y - half, size, size],
+            argb,
+        },
+        DrawOp::Text {
+            x: x + 0.5 * text_scale,
+            y: y - 3.5 * text_scale,
+            text: initial.to_owned(),
+            argb: 0xFFFF_FFFF,
+            align: Align::Center,
+            scale: text_scale,
+        },
+    ]
+}
+
+/// Where a world point appears on screen (GUI pixels), from the camera's
+/// position and its camera-relative view and projection matrices (column
+/// major, as Horizon gives them); `None` behind the camera.
+pub fn world_to_screen(
+    camera: [f64; 3],
+    view: &[f32; 16],
+    projection: &[f32; 16],
+    point: [f64; 3],
+    gui: [f32; 2],
+) -> Option<[f32; 2]> {
+    let rel = [
+        (point[0] - camera[0]) as f32,
+        (point[1] - camera[1]) as f32,
+        (point[2] - camera[2]) as f32,
+        1.0,
+    ];
+    let mul = |m: &[f32; 16], v: [f32; 4]| {
+        let mut out = [0.0f32; 4];
+        for (row, o) in out.iter_mut().enumerate() {
+            *o = (0..4).map(|col| m[col * 4 + row] * v[col]).sum();
+        }
+        out
+    };
+    let clip = mul(projection, mul(view, rel));
+    if clip[3] <= 1e-4 {
+        return None;
+    }
+    let (nx, ny) = (clip[0] / clip[3], clip[1] / clip[3]);
+    Some([(nx + 1.0) / 2.0 * gui[0], (1.0 - ny) / 2.0 * gui[1]])
+}
+
+/// "30.1m" / "30,1m" (one decimal, the locale's separator), "12.3km" from
+/// `km_from` blocks.
+pub fn distance_text(blocks: f64, km_from: u32, comma: bool) -> String {
+    let text = if km_from > 0 && blocks >= km_from as f64 {
+        format!("{:.1}km", blocks / 1000.0)
+    } else {
+        format!("{blocks:.1}m")
+    };
+    if comma { text.replace('.', ",") } else { text }
 }
 
 /// The minimap's own state between frames: whether it is enlarged.
@@ -487,39 +650,63 @@ mod tests {
 
     #[test]
     fn layout_in_corners() {
-        let gui = [480.0, 270.0];
-        let mut s = settings();
-        s.size = MinimapSize::Large;
-        let l = layout(&s, gui, false, 2);
-        assert_eq!((l.x, l.y, l.size), (480.0 - 128.0 - MARGIN, MARGIN, 128.0));
+        // A 1280 x 720 GUI at scale 2: one unit is 720 / 594 GUI pixels.
+        let gui = [1280.0, 720.0];
+        let s = settings();
+        assert_eq!(
+            s.corner,
+            Corner::TopLeft,
+            "top left by default, like the reference"
+        );
+        let l = layout(&s, gui, 2.0, false, 1);
+        let u = 1.0f32;
+        assert_eq!(l.size, 166.0);
+        assert_eq!(
+            (l.x, l.y),
+            ((9.0 * u).round(), (9.0 * u).round())
+        );
         assert!(l.info_below && l.rotate && !l.round);
-        s.corner = Corner::BottomLeft;
-        let l = layout(&s, gui, false, 2);
-        assert_eq!((l.x, l.y), (MARGIN, 270.0 - 128.0 - MARGIN));
+        assert!(
+            (l.blocks_per_pixel - 2.0).abs() < 1e-6,
+            "two blocks per unit"
+        );
+        let mut s = s;
+        s.corner = Corner::BottomRight;
+        let l = layout(&s, gui, 2.0, false, 1);
+        let right_edge = l.x + l.size + l.frame_width() + 5.0 * l.unit;
+        assert!((1280.0 - right_edge).abs() <= 1.0, "{right_edge}");
         assert!(!l.info_below, "info goes above a bottom map");
-        assert_eq!(info(&l, &[("a".into(), 0), ("b".into(), 0)]).len(), 2);
+        let lines = info(&l, &[("a".into(), 0), ("b".into(), 0)]);
+        let DrawOp::Text { y, .. } = &lines[1] else {
+            panic!()
+        };
+        assert!(*y < l.y);
     }
 
     #[test]
-    fn auto_size_follows_screen() {
-        assert_eq!(side(MinimapSize::Auto, [480.0, 270.0]), 74.0);
-        assert_eq!(side(MinimapSize::Auto, [2000.0, 2000.0]), 160.0);
-        assert_eq!(side(MinimapSize::Auto, [100.0, 100.0]), 64.0);
+    fn size_follows_screen_height() {
+        assert_eq!(side(MinimapSize::Auto, [1280.0, 720.0]), 166.0);
+        assert_eq!(side(MinimapSize::Auto, [432.0, 254.0]), 58.0);
+        assert_eq!(side(MinimapSize::Auto, [100.0, 100.0]), 48.0);
+        assert!((unit(594.0, 1.0) - 1.0).abs() < 1e-6);
+        assert!(
+            (unit(344.0, 5.0) - 0.6).abs() < 1e-6,
+            "3 physical pixels at 1720 px"
+        );
     }
 
     #[test]
     fn enlarging_zooms_out_and_grows() {
         let s = settings();
-        let gui = [480.0, 270.0];
-        let normal = layout(&s, gui, false, 0);
-        let big = layout(&s, gui, true, 0);
+        let gui = [1280.0, 720.0];
+        let normal = layout(&s, gui, 2.0, false, 0);
+        let big = layout(&s, gui, 2.0, true, 0);
         assert!(big.size > normal.size);
-        assert_eq!(normal.blocks_per_pixel, 1.0);
-        assert_eq!(big.blocks_per_pixel, 2.0);
+        assert_eq!(big.blocks_per_pixel, 2.0 * normal.blocks_per_pixel);
         let mut s = s;
         s.enlarged_centered = true;
-        let c = layout(&s, gui, true, 0);
-        assert_eq!(c.center(), [240.0, 135.0]);
+        let c = layout(&s, gui, 2.0, true, 0);
+        assert_eq!(c.center(), [640.0, 360.0]);
         s.zoom = 200;
         assert_eq!(zoom_index(&s, false), 4, "clamped to the last step");
     }
@@ -553,6 +740,7 @@ mod tests {
             rotate: false,
             round: false,
             info_below: true,
+            unit: 1.0,
         };
         let ops = terrain(&l, [0.0, 0.0], 0.0, 100, 50, |_, _| 0xFF33_6633);
         assert_eq!(ops.len(), 1 + 64, "backdrop + one run per row");
@@ -570,6 +758,7 @@ mod tests {
             rotate: true,
             round: true,
             info_below: true,
+            unit: 1.0,
         };
         let ops = terrain(&l, [0.0, 0.0], 45.0, 100, 50, |x, z| {
             0xFF00_0000 | ((x & 1) as u32) << 8 | (z & 1) as u32
@@ -611,6 +800,7 @@ mod tests {
             rotate: false,
             round: false,
             info_below: true,
+            unit: 1.0,
         };
         let (p, clamped) = project(&l, [0.0, 0.0], 0.0, [10.0, -20.0], 0.0);
         assert_eq!((p, clamped), ([60.0, 30.0], false));
@@ -633,15 +823,16 @@ mod tests {
             rotate: true,
             round: true,
             info_below: true,
+            unit: 1.0,
         };
         // Facing north (yaw 180): N is at the top.
-        let n = &compass(&l, 180.0)[0];
+        let n = &compass(&l, 180.0)[1];
         let DrawOp::Text { x, y, .. } = n else {
             panic!()
         };
-        assert!((x - 50.0).abs() < 1e-3 && *y < 20.0);
+        assert!((x - 50.0).abs() <= 1.0 && *y < 20.0);
         // Facing south: N at the bottom.
-        let DrawOp::Text { y, .. } = &compass(&l, 0.0)[0] else {
+        let DrawOp::Text { y, .. } = &compass(&l, 0.0)[1] else {
             panic!()
         };
         assert!(*y > 80.0);
@@ -687,6 +878,68 @@ mod tests {
         assert_eq!(s.zoom, 1, "the normal step is untouched");
         assert!(c.key("minimap.toggle", true, &mut s));
         assert!(!s.enabled);
+    }
+
+    #[test]
+    fn projects_points_in_front_and_drops_points_behind() {
+        // Identity view; a simple perspective looking down -z.
+        let view = [
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+        ];
+        let mut proj = [0.0f32; 16];
+        proj[0] = 1.0;
+        proj[5] = 1.0;
+        proj[11] = -1.0; // w = -z
+        let gui = [200.0, 100.0];
+        let ahead = world_to_screen([0.0; 3], &view, &proj, [0.0, 0.0, -10.0], gui).unwrap();
+        assert_eq!(ahead, [100.0, 50.0]);
+        let right_up = world_to_screen([0.0; 3], &view, &proj, [5.0, 5.0, -10.0], gui).unwrap();
+        assert_eq!(right_up, [150.0, 25.0]);
+        assert!(world_to_screen([0.0; 3], &view, &proj, [0.0, 0.0, 10.0], gui).is_none());
+    }
+
+    #[test]
+    fn distances_like_the_reference() {
+        assert_eq!(distance_text(30.06, 10_000, true), "30,1m");
+        assert_eq!(distance_text(30.06, 10_000, false), "30.1m");
+        assert_eq!(distance_text(12_345.0, 10_000, false), "12.3km");
+    }
+
+    #[test]
+    fn frame_and_marks() {
+        let l = Layout {
+            x: 10.0,
+            y: 10.0,
+            size: 100.0,
+            blocks_per_pixel: 1.0,
+            rotate: true,
+            round: false,
+            info_below: true,
+            unit: 1.0,
+        };
+        let f = frame(&l);
+        let outer = f.iter().find_map(|op| match op {
+            DrawOp::Fill {
+                rect,
+                argb: 0xFF00_0000,
+            } => Some(*rect),
+            _ => None,
+        });
+        assert_eq!(
+            outer,
+            Some([6.0, 6.0, 108.0, 1.0]),
+            "black line 4 units out"
+        );
+        assert_eq!(player_mark(&l, 0.0, 1.0).len(), 9, "a cross while turning");
+        let locked = Layout { rotate: false, ..l };
+        assert!(
+            matches!(player_mark(&locked, 0.0, 1.0)[0], DrawOp::Quad { .. }),
+            "an arrow when north is locked"
+        );
+        assert_eq!(
+            waypoint_mark([50.2, 50.0], 9.0, 0xFF00_FF00, "H", 1.0).len(),
+            2
+        );
     }
 
     #[test]

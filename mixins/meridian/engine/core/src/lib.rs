@@ -23,6 +23,7 @@ pub mod keybinds;
 pub mod minimap;
 pub mod persist;
 pub mod region;
+pub mod texture;
 pub mod tile;
 pub mod waypoint;
 pub mod worker;

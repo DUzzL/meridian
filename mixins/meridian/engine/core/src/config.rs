@@ -51,8 +51,8 @@ pub enum BlockColors {
 #[serde(rename_all = "snake_case")]
 pub enum Corner {
     #[default]
-    TopRight,
     TopLeft,
+    TopRight,
     BottomRight,
     BottomLeft,
 }
@@ -173,6 +173,9 @@ pub struct MinimapSettings {
     pub share_world_map_tiles: bool,
     pub chunk_grid: bool,
     pub slime_chunks: bool,
+    /// Info lines under the map.
+    pub show_coords: bool,
+    pub show_biome: bool,
     pub terrain: TerrainStyle,
     pub cave: CaveSettings,
 }
@@ -183,7 +186,7 @@ impl Default for MinimapSettings {
             enabled: true,
             shape: MinimapShape::Square,
             size: MinimapSize::Auto,
-            corner: Corner::TopRight,
+            corner: Corner::TopLeft,
             offset: [0, 0],
             zoom: 1,
             further_zoom_out: false,
@@ -200,6 +203,8 @@ impl Default for MinimapSettings {
             share_world_map_tiles: true,
             chunk_grid: false,
             slime_chunks: false,
+            show_coords: true,
+            show_biome: false,
             terrain: TerrainStyle::default(),
             cave: CaveSettings::default(),
         }
@@ -271,6 +276,8 @@ pub struct WaypointSettings {
     pub opacity_in_world: u8,
     pub opacity_on_minimap: u8,
     pub distance_in_km_from: u32,
+    /// A beacon-like beam over waypoints in the world (off by default).
+    pub beam: bool,
 }
 
 impl Default for WaypointSettings {
@@ -288,6 +295,7 @@ impl Default for WaypointSettings {
             opacity_in_world: 80,
             opacity_on_minimap: 90,
             distance_in_km_from: 10_000,
+            beam: false,
         }
     }
 }
