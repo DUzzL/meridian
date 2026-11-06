@@ -360,6 +360,10 @@ pub struct Tile {
 
 const MAX_TILES: usize = 1200;
 
+/// Work sent to the threads: the generation it belongs to, the seed's
+/// generators, the marker kinds wanted and the job.
+type Work = (u64, Arc<Atlas>, Vec<i32>, Job);
+
 pub struct SeedService {
     atlas: Option<Arc<Atlas>>,
     generation: u64,
@@ -368,7 +372,7 @@ pub struct SeedService {
     markers: HashMap<Job, Arc<Vec<Hit>>>,
     pending: HashSet<Job>,
     clock: u64,
-    jobs: Option<mpsc::Sender<(u64, Arc<Atlas>, Vec<i32>, Job)>>,
+    jobs: Option<mpsc::Sender<Work>>,
     done: mpsc::Receiver<(u64, Done)>,
     done_tx: mpsc::Sender<(u64, Done)>,
     workers: usize,
@@ -498,7 +502,7 @@ impl SeedService {
     }
 
     fn start(&mut self, workers: usize) {
-        let (tx, rx) = mpsc::channel::<(u64, Arc<Atlas>, Vec<i32>, Job)>();
+        let (tx, rx) = mpsc::channel::<Work>();
         let rx = Arc::new(parking_lot::Mutex::new(rx));
         for i in 0..workers {
             let rx = rx.clone();
