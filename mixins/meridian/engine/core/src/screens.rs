@@ -10,6 +10,11 @@ use crate::config::{
     BlockColors, ClockInfo, Corner, LightInfo, MinimapShape, MinimapSize, Settings, Slopes,
 };
 use crate::minimap::Align;
+use crate::nearest::WaypointMode;
+use crate::screens_seedatlas::{
+    BiomeHighlightScreen, ConfirmResetScreen, NearestKind, NearestScreen, SeedAtlasEnv,
+    WorldGenerationScreen,
+};
 use crate::seedatlas_state::{
     MARKER_SIZE_STEPS, completed_opacity_label, cycle_game_version, game_version_name,
     next_marker_size, world_type_label,
@@ -50,10 +55,13 @@ pub struct Env<'a> {
     /// Set when a screen changed `waypoints` / `settings`.
     pub waypoints_changed: bool,
     pub settings_changed: bool,
+    /// What the Seed Atlas screens need of the game (dimension, seed,
+    /// completed count, nearest options).
+    pub seed_atlas: SeedAtlasEnv,
 }
 
 impl Env<'_> {
-    fn center(&self) -> [f32; 2] {
+    pub(crate) fn center(&self) -> [f32; 2] {
         [(self.gui[0] / 2.0).floor(), (self.gui[1] / 2.0).floor()]
     }
 }
@@ -72,6 +80,20 @@ pub enum Action {
     },
     Teleport(u64),
     Share(u64),
+    /// Run a nearest search off the render thread: from the player's
+    /// position in the current dimension (`nearest_biome` /
+    /// `nearest_structure`), then show the result on the map and leave a
+    /// waypoint as `waypoint` says. The host reports back with
+    /// `NearestScreen::finish`.
+    FindNearest {
+        kind: NearestKind,
+        waypoint: WaypointMode,
+        skip_completed: bool,
+    },
+    /// Reset every completed structure of the open world or server
+    /// (`CompletedStore::reset_prompt` + `confirm_reset`), then open the
+    /// Seed Atlas settings again.
+    ResetCompleted,
 }
 
 #[derive(Debug, PartialEq)]
@@ -79,6 +101,10 @@ pub enum Screen {
     Editor(Editor),
     List(List),
     Settings(SettingsScreen),
+    Nearest(NearestScreen),
+    BiomeHighlight(BiomeHighlightScreen),
+    WorldGeneration(WorldGenerationScreen),
+    ConfirmReset(ConfirmResetScreen),
 }
 
 impl Screen {
@@ -87,6 +113,10 @@ impl Screen {
             Screen::Editor(s) => s.widgets(env),
             Screen::List(s) => s.widgets(env),
             Screen::Settings(s) => s.widgets(env),
+            Screen::Nearest(s) => s.widgets(env),
+            Screen::BiomeHighlight(s) => s.widgets(env),
+            Screen::WorldGeneration(s) => s.widgets(env),
+            Screen::ConfirmReset(s) => s.widgets(env),
         }
     }
 
@@ -98,6 +128,10 @@ impl Screen {
             Screen::Editor(s) => s.click(id.as_deref(), right, env),
             Screen::List(s) => s.click(id.as_deref(), right, env),
             Screen::Settings(s) => s.click(id.as_deref(), right, env),
+            Screen::Nearest(s) => s.click(id.as_deref(), env),
+            Screen::BiomeHighlight(s) => s.click(id.as_deref(), env),
+            Screen::WorldGeneration(s) => s.click(id.as_deref(), env),
+            Screen::ConfirmReset(s) => s.click(id.as_deref()),
         }
     }
 
@@ -106,6 +140,9 @@ impl Screen {
             Screen::Editor(s) => s.typed(c),
             Screen::List(s) => s.typed(c),
             Screen::Settings(s) => s.typed(c),
+            Screen::Nearest(s) => s.typed(c),
+            Screen::BiomeHighlight(s) => s.typed(c),
+            Screen::WorldGeneration(_) | Screen::ConfirmReset(_) => {}
         }
         let _ = env;
     }
@@ -116,12 +153,18 @@ impl Screen {
             Screen::Editor(s) => s.key(key, env),
             Screen::List(s) => s.key(key, env),
             Screen::Settings(s) => s.key(key),
+            Screen::Nearest(s) => s.key(key),
+            Screen::BiomeHighlight(s) => s.key(key),
+            Screen::WorldGeneration(_) | Screen::ConfirmReset(_) => Action::None,
         }
     }
 
     pub fn scroll(&mut self, lines: f32) {
-        if let Screen::List(s) = self {
-            s.scroll = (s.scroll as f32 - lines).max(0.0) as usize;
+        match self {
+            Screen::List(s) => s.scroll = (s.scroll as f32 - lines).max(0.0) as usize,
+            Screen::Nearest(s) => s.scroll(lines),
+            Screen::BiomeHighlight(s) => s.scroll(lines),
+            _ => {}
         }
     }
 }
@@ -1053,6 +1096,45 @@ impl SettingsScreen {
         }
     }
 
+    /// The Seed Atlas settings page.
+    pub fn seed_atlas() -> Self {
+        Self::group(Group::SeedAtlas)
+    }
+
+    /// The buttons that open screens, before a group's options: id, label
+    /// and whether it can be used.
+    fn openers(&self, env: &Env<'_>) -> Vec<(&'static str, String, bool)> {
+        if !matches!(
+            self.page,
+            SettingsPage::Group {
+                group: Group::SeedAtlas,
+                ..
+            }
+        ) {
+            return Vec::new();
+        }
+        let sa = &env.settings.seed_atlas;
+        let version = crate::seedatlas_state::game_version(sa, &sa.context_key)
+            .0
+            .label();
+        let completed = env.seed_atlas.completed_count.unwrap_or(0);
+        vec![
+            ("sa:biome", "Nearest biome...".into(), true),
+            ("sa:structure", "Nearest structure...".into(), true),
+            ("sa:highlight", "Biome highlights...".into(), true),
+            (
+                "sa:world",
+                format!("World: {version}, {}", world_type_label(sa.large_biomes)),
+                true,
+            ),
+            (
+                "sa:reset",
+                crate::completed::reset_button_label(completed),
+                completed > 0,
+            ),
+        ]
+    }
+
     /// The two-column grid's button rectangles, row by row.
     fn grid(env: &Env<'_>, i: usize) -> [f32; 4] {
         let [cx, c] = env.center();
@@ -1088,7 +1170,8 @@ impl SettingsScreen {
         let (title, pages, page) = match &self.page {
             SettingsPage::Main { page } => ("Minimap Settings".to_owned(), 2u8, *page),
             SettingsPage::Group { group, page } => {
-                let n = self.page_options().len().div_ceil(GRID_ROWS * 2).max(1) as u8;
+                let items = self.openers(env).len() + self.page_options().len();
+                let n = items.div_ceil(GRID_ROWS * 2).max(1) as u8;
                 (group.title().to_owned(), n, *page)
             }
             SettingsPage::Search => ("Search".to_owned(), 1, 0),
@@ -1151,20 +1234,21 @@ impl SettingsScreen {
             }
             SettingsPage::Main { .. } => {}
             _ => {
+                let openers = self.openers(env);
                 let opts = self.page_options();
-                for (i, o) in opts
-                    .iter()
-                    .enumerate()
-                    .skip(page as usize * GRID_ROWS * 2)
-                    .take(GRID_ROWS * 2)
-                {
-                    let slot = i - page as usize * GRID_ROWS * 2;
-                    ws.push(Widget::button(
-                        &format!("opt:{i}"),
-                        Self::grid(env, slot),
-                        format!("{}: {}", o.label, (o.value)(env.settings)),
-                        true,
-                    ));
+                let first = page as usize * GRID_ROWS * 2;
+                for slot in 0..GRID_ROWS * 2 {
+                    let n = first + slot;
+                    if let Some((id, label, enabled)) = openers.get(n) {
+                        ws.push(Widget::button(id, Self::grid(env, slot), label, *enabled));
+                    } else if let Some(o) = opts.get(n - openers.len()) {
+                        ws.push(Widget::button(
+                            &format!("opt:{}", n - openers.len()),
+                            Self::grid(env, slot),
+                            format!("{}: {}", o.label, (o.value)(env.settings)),
+                            true,
+                        ));
+                    }
                 }
             }
         }
@@ -1207,6 +1291,19 @@ impl SettingsScreen {
             Some("g:misc") => self.page = group(Group::Misc),
             Some("g:seedatlas") => self.page = group(Group::SeedAtlas),
             Some("waypoints") => return Action::Open(Screen::List(List::default())),
+            Some("sa:biome") => return Action::Open(Screen::Nearest(NearestScreen::biome(env))),
+            Some("sa:structure") => {
+                return Action::Open(Screen::Nearest(NearestScreen::structure(env)));
+            }
+            Some("sa:highlight") => {
+                return Action::Open(Screen::BiomeHighlight(BiomeHighlightScreen::new()));
+            }
+            Some("sa:world") => {
+                return Action::Open(Screen::WorldGeneration(WorldGenerationScreen::new(env)));
+            }
+            Some("sa:reset") => {
+                return Action::Open(Screen::ConfirmReset(ConfirmResetScreen::new(env)));
+            }
             Some(o) if o.starts_with("opt:") => {
                 if let Some(opt) = o[4..]
                     .parse::<usize>()
@@ -1475,6 +1572,7 @@ mod tests {
             settings: s,
             waypoints_changed: false,
             settings_changed: false,
+            seed_atlas: SeedAtlasEnv::default(),
         }
     }
 
