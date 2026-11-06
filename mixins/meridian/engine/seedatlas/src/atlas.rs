@@ -130,6 +130,36 @@ impl Atlas {
                 }
                 out
             }
+            // Layered overworlds only have the 1:4, 1:16, 1:64 and 1:256
+            // layers: sample a finer one and keep the centre of every cell.
+            _ if g.layered_scale(step) != step => {
+                let base = g.layered_scale(step);
+                let f = step / base;
+                if count * (f as i64) * (f as i64) > 4 * MAX_AREA_SAMPLES {
+                    return Err(AtlasError::RangeTooLarge);
+                }
+                let sx = w * f;
+                let dense = g.gen_biomes(Range {
+                    scale: base,
+                    x: ox / base,
+                    z: oz / base,
+                    sx,
+                    sz: h * f,
+                    y: floordiv(y, 4),
+                    sy: 1,
+                });
+                let mut out = Vec::with_capacity(count as usize);
+                for z in 0..h as i64 {
+                    for x in 0..w as i64 {
+                        out.push(
+                            dense[((z * f as i64 + (f / 2) as i64) * sx as i64
+                                + x * f as i64
+                                + (f / 2) as i64) as usize],
+                        );
+                    }
+                }
+                out
+            }
             _ => g.gen_biomes(Range {
                 scale: step,
                 x: ox / step,

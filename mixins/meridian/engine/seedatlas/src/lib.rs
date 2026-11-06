@@ -20,6 +20,7 @@ mod btree21wd;
 pub mod endcity;
 pub mod finders;
 pub mod generator;
+pub mod layers;
 pub mod mc;
 pub mod noise;
 pub mod rng;
