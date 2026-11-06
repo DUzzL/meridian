@@ -185,6 +185,8 @@ struct State {
     looks_ready: bool,
     /// The marker the open map menu is for.
     menu_marker: Option<HoveredMarker>,
+    /// The nearest search's options, kept for the session.
+    nearest_opts: meridian_core::nearest::NearestOptions,
 }
 
 /// The last finished export's message, for the action bar.
@@ -506,6 +508,7 @@ impl Meridian {
                 hovered_marker: None,
                 looks_ready: false,
                 menu_marker: None,
+                nearest_opts: Default::default(),
             }
         });
         f(state)
@@ -1183,6 +1186,7 @@ impl Hooks for Meridian {
             }
             s.update_seeds();
             s.seed_svc.poll();
+            s.poll_nearest();
             let budget =
                 Duration::from_micros(s.config.current().performance.frame_budget_us as u64);
             s.engine.tick(&map_host, budget);
@@ -1480,6 +1484,13 @@ impl Meridian {
                 return R::default();
             };
             let mut settings = s.config.current().clone();
+            let sa_dim = sa::dimension_of(&dim).unwrap_or(meridian_seedatlas::Dimension::Overworld);
+            let sa_env = meridian_core::screens_seedatlas::SeedAtlasEnv {
+                dimension: sa_dim,
+                has_seed: s.seed_svc.atlas_for(sa_dim).is_some(),
+                completed_count: s.seed_key.as_ref().map(|k| s.completed.count(k, None)),
+                nearest: s.nearest_opts,
+            };
             let (result, action, waypoints_changed, settings_changed) = {
                 let waypoints = book.dimension_mut(&dim);
                 let mut env = Env {
@@ -1491,7 +1502,7 @@ impl Meridian {
                     settings: &mut settings,
                     waypoints_changed: false,
                     settings_changed: false,
-                    seed_atlas: Default::default(),
+                    seed_atlas: sa_env,
                 };
                 let (result, action) = f(&mut screen, &mut env);
                 (result, action, env.waypoints_changed, env.settings_changed)
@@ -1503,6 +1514,9 @@ impl Meridian {
                 *s.config.current_mut() = settings;
                 s.engine.set_settings(s.config.current().clone());
                 s.save_config();
+            }
+            if let Screen::Nearest(n) = &screen {
+                s.nearest_opts = n.options;
             }
             s.screen = Some(screen);
             match action {
@@ -1531,6 +1545,18 @@ impl Meridian {
                     if let Some(w) = s.book.as_ref().and_then(|(_, b)| b.dimension(&dim)?.find(id).cloned()) {
                         s.pending.push(Pending::Chat(waypoint::share_text(&w, &dim)));
                     }
+                }
+                Action::FindNearest { kind, waypoint, skip_completed } => {
+                    s.nearest_opts = meridian_core::nearest::NearestOptions { waypoint, skip_completed };
+                    s.find_nearest(kind, waypoint, skip_completed, sa_dim, player_block);
+                }
+                Action::ResetCompleted => {
+                    if let Some(key) = s.seed_key.clone()
+                        && let Some(prompt) = s.completed.reset_prompt(&key, &world_label, None)
+                    {
+                        s.completed.confirm_reset(&prompt);
+                    }
+                    s.screen = Some(Screen::Settings(SettingsScreen::seed_atlas()));
                 }
             }
             result
@@ -2262,14 +2288,14 @@ fn structure_key(
     z: i32,
 ) -> Option<meridian_core::completed::StructureKey> {
     {
-        let world = seed_key?.to_owned();
+        let world = seed_key?;
         let atlas = svc.atlas_for(dimension)?;
         let dim_id = match dimension {
             meridian_seedatlas::Dimension::Overworld => "minecraft:overworld",
             meridian_seedatlas::Dimension::Nether => "minecraft:the_nether",
             meridian_seedatlas::Dimension::End => "minecraft:the_end",
         };
-        meridian_core::completed::StructureKey::new(world, atlas.seed, atlas.large_biomes, dim_id.to_owned(), id.to_owned(), x, z)
+        meridian_core::completed::StructureKey::new(world, atlas.seed, atlas.large_biomes, dim_id, id, x, z)
     }
 }
 
@@ -2307,5 +2333,84 @@ fn tooltip(ops: &mut Vec<DrawOp>, mouse: [f32; 2], gui: [f32; 2], lines: &[Strin
     }
     for (i, line) in lines.iter().enumerate() {
         ops.push(DrawOp::Text { x, y: y + 3.0 + i as f32 * 10.0, text: line.clone(), argb: 0xFFFF_FFFF, align: Align::Left, scale: 1.0 });
+    }
+}
+
+/// A nearest search's result: where (if found), the name and the waypoint
+/// wanted.
+type NearestDone = (Option<meridian_core::nearest::NearestResult>, String, meridian_core::nearest::WaypointMode);
+static NEAREST_DONE: Mutex<Option<NearestDone>> = Mutex::new(None);
+
+impl State {
+    /// Starts a nearest biome or structure search on a thread.
+    fn find_nearest(
+        &mut self,
+        kind: meridian_core::screens_seedatlas::NearestKind,
+        mode: meridian_core::nearest::WaypointMode,
+        skip_completed: bool,
+        dim: meridian_seedatlas::Dimension,
+        from: [i32; 3],
+    ) {
+        use meridian_core::screens_seedatlas::NearestKind;
+        let Some(atlas) = self.seed_svc.atlas_for(dim).cloned() else { return };
+        let y = sa::sample_y(&self.config.current().seed_atlas, dim);
+        let dim_id = match dim {
+            meridian_seedatlas::Dimension::Overworld => "minecraft:overworld",
+            meridian_seedatlas::Dimension::Nether => "minecraft:the_nether",
+            meridian_seedatlas::Dimension::End => "minecraft:the_end",
+        };
+        let world = self.seed_key.clone().unwrap_or_default();
+        let done: Vec<(i32, i32)> = match &kind {
+            NearestKind::Structure { marker, .. } if skip_completed => self
+                .completed
+                .keys()
+                .filter(|k| k.world == world && k.dimension == dim_id && k.kind == *marker && k.seed == atlas.seed)
+                .map(|k| (k.x, k.z))
+                .collect(),
+            _ => Vec::new(),
+        };
+        std::thread::spawn(move || {
+            let tolerance = meridian_core::seedatlas_state::COMPLETED_TOLERANCE;
+            let (found, name) = match kind {
+                NearestKind::Biome { id, name } => (meridian_core::nearest::nearest_biome(&atlas, dim, id, y, from[0], from[2]), name),
+                NearestKind::Structure { marker, name } => {
+                    let found = sa::MARKERS.iter().find(|m| m.id == marker).and_then(|m| {
+                        let skip = |x: i32, z: i32| done.iter().any(|&(cx, cz)| (cx - x).abs() <= tolerance && (cz - z).abs() <= tolerance);
+                        meridian_core::nearest::nearest_structure(&atlas, dim, m, from[0], from[2], &skip)
+                    });
+                    (found, name)
+                }
+            };
+            *NEAREST_DONE.lock() = Some((found, name, mode));
+        });
+    }
+
+    /// Carries out a finished nearest search: the map opens there with a
+    /// waypoint, or the screen says nothing was found.
+    fn poll_nearest(&mut self) {
+        use meridian_core::nearest::WaypointMode;
+        use meridian_core::screens_seedatlas::NearestOutcome;
+        let Some((found, name, mode)) = NEAREST_DONE.lock().take() else { return };
+        let outcome = match found {
+            Some(r) => {
+                if let Some((book, dim)) = self.book_here() {
+                    let mut w = Waypoint::new(name.clone(), [r.x, 64, r.z], 11);
+                    match mode {
+                        WaypointMode::Temporary => w.kind = Kind::Temporary,
+                        WaypointMode::Enabled => {}
+                        WaypointMode::Disabled => w.disabled = true,
+                    }
+                    book.add(&dim, w, false, waypoint::now());
+                }
+                self.map.center = [r.x as f64 + 0.5, r.z as f64 + 0.5];
+                self.screen = None;
+                self.map_open = true;
+                NearestOutcome::Found
+            }
+            None => NearestOutcome::NotFound,
+        };
+        if let Some(Screen::Nearest(n)) = &mut self.screen {
+            n.finish(outcome);
+        }
     }
 }

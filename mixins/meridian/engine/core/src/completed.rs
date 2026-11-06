@@ -90,6 +90,11 @@ pub struct CompletedStore {
 }
 
 impl CompletedStore {
+    /// Every completed structure, in the order it was marked.
+    pub fn keys(&self) -> impl Iterator<Item = &StructureKey> {
+        self.order.iter()
+    }
+
     pub fn load(data_dir: &Path) -> Self {
         let path = data_dir.join("completed.json");
         let file = std::fs::read(&path)
