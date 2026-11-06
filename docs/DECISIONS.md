@@ -158,3 +158,41 @@ Die beiden Farbstile unterscheiden sich daher vorerst kaum.
 
 - `player_died` ist ein Server-Hook und liefert nur im Singleplayer den eigenen Tod. Für Multiplayer kommt eine Erkennung über den Todesbildschirm.
 - **B** legt vorerst wie **Num +** sofort einen Wegpunkt an. Editor und Liste als eigene Screens folgen im nächsten Schritt.
+
+## D-019: Optik auf den ersten Blick wie die Referenz (Wunsch des Auftraggebers, 2026-11-06)
+
+Abweichend vom ursprünglichen „Optik darf abweichen“ soll Meridian auf den ersten Blick wie die Referenz aussehen.
+
+Umsetzung clean-room:
+
+- Beobachtung der laufenden Referenz in der Prism-Instanz (Bildschirmaufnahmen, Quelle O3).
+- Nachbau mit eigenen Zeichenmitteln: Flächen, Text, Shader.
+- Keine Textur, kein Icon und keine Sprachdatei wird übernommen. Name und Menütexte bleiben Meridian.
+- Die Referenz-Screenshots bleiben lokal und kommen nicht ins Repo.
+
+Gemessene Werte (`core/src/minimap.rs`):
+
+- Minimap oben links. Eine eigene Einheit = Bildschirmhöhe / 594, auf ganze physische Pixel gerundet.
+- Seite = 23,2 % der GUI-Höhe, 2 Blöcke pro Einheit.
+- Rahmen: Schwarz 1, Hellgrau 2 (oben/links heller), Dunkel 1.
+- Abstand zum Rand: 5 Einheiten.
+- Himmelsrichtungen: 6×6-Einheiten-Kästchen in Blau-Violett mit weißem Buchstaben (Schrift 0,75 Einheiten).
+- Spieler: 5-Einheiten-Kreuz, Weiß mit violetten Enden (Pfeil nur bei Nord-Lock).
+- Infozeile: nur Koordinaten, Schrift 1 Einheit, 3 Einheiten unter dem Rahmen. Biom ist wie in der Referenz standardmäßig aus.
+- Wegpunkte:
+  - auf der Minimap 9-Einheiten-Quadrat in Wegpunktfarbe mit weißem Kürzel;
+  - in der Welt Quadrat (60 % Deckkraft), darunter der Name (Schrift 0,64) auf dunkler Platte, darunter die Distanz (Schrift 1) mit einer Nachkommastelle und dem Dezimaltrenner des Systems („30,1m“);
+  - kein Beam (abschaltbare Option `waypoints.beam`).
+- Gelände: mittlere Texturfarben der Blocktexturen des Spielers × Biom-Tint. Ebene Flächen behalten ihre Farbe, Hänge werden heller bzw. dunkler. Tageslicht folgt Minecrafts Himmelskurve und ist tagsüber voll hell.
+
+## D-020: Minimap-Gelände auf der GPU über `RenderHooks::world_drawn` (ersetzt D-016)
+
+Flächen-Rechtecke reichen für die Detaildichte der Referenz (rund 270 Blöcke Kartenbreite, ein Texel pro Block) nicht aus. Deshalb:
+
+- Der Adapter gibt über `Hooks::render()` einen Renderer an Horizon (`engine/gpu.rs`).
+- Der Spiel-Thread stellt ein nordausgerichtetes Bild aus den Regionspixeln zusammen. Das geschieht nur bei einem Blockwechsel des Spielers oder bei neuen Regionsrevisionen.
+- Der Render-Thread lädt das Bild hoch und zeichnet ein Rechteck. Der Shader übernimmt Drehung, Subpixel-Position, runde Maske, Deckkraft und den Hintergrund.
+- Das HUD zeichnet Rahmen, Kompass, Marken und Text darüber.
+- Läuft das HUD nicht (F1, Screens), verfällt das Bild nach 200 ms.
+
+Einschränkung: Der Hook läuft vor Horizons Nachbearbeitung. Morgens und abends dunkelt Horizon die Karte deshalb mit der Welt ab, die Referenz nicht. Eine saubere Lösung braucht eine HUD-Textur-API (E3).

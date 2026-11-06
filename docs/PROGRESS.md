@@ -132,3 +132,29 @@
 
 - Die Farbstile „genau“ und „Vanilla“ unterscheiden sich kaum (D-017).
 - Die Minimap besteht aus Flächen statt einer Textur (D-016); bei sehr großer Karte gibt es gröbere Zellen.
+
+### Phase 3, Zwischenstand 2: Optik wie die Referenz
+
+**Fertig und im Spiel verglichen** (gleiche Welt, Position und Blickrichtung, Fenster 1512×891)
+
+- Minimap-Layout, Rahmen, Himmelsrichtungen, Spielerkreuz, Koordinatenzeile, Maßstab und Wegpunkt-Darstellung in Welt und Minimap entsprechen den Messungen an der Referenz (D-019).
+- Gelände auf der GPU mit echten Texturfarben (D-020).
+- Neue Kernmodule bzw. Erweiterungen: `texture` (Texturmittelwerte aus PNG), Projektion Welt → Bildschirm, Distanztext, Minimap-Einheiten.
+
+**Build und Tests**
+
+- `cargo test --workspace --locked`: 80 Tests grün (78 Kern, 2 Host); Clippy sauber.
+- Adapter-Check grün; Launcher-Build `native-66f3981-32cd9cb72d9f`.
+
+**Offen**
+
+- Wegpunkt-Editor (B) und -Liste (U) als Screens im Layout der Referenz (Aufnahmen liegen vor).
+- Einstellungs-Screen (Y) im Layout der Referenz.
+- Entity-Radar (Rauten-Punkte: gelb friedlich, rot feindlich, abgedunkelt auf anderer Höhe).
+- Höhlenmodus, weitere Infoanzeigen.
+
+**Bekannte Probleme**
+
+- Bei Sonnenauf- und -untergang ist die Karte dunkler als bei der Referenz (Nachbearbeitung, D-020).
+- Die Farbe neuer Wegpunkte weicht ab: Meridian beginnt mit Rot, die Referenz wählt zufällig.
+- Die Prism-Referenzinstanz wurde für die Aufnahmen verändert: Welt `MeridianTest` hinzugefügt und `pauseOnLostFocus:false` gesetzt.

@@ -20,7 +20,7 @@ Meridian ist eine Neuentwicklung. Das Verhalten der Referenz-Mods (Minimap und W
 | S4 | https://www.curseforge.com/minecraft/mc-mods/xaeros-world-map | öffentliche Modseite | 2026-11-06 |
 | O1 | `options.txt` der Prism-Instanz `26.3`, Zeilen `key_gui.xaero_*` | vom Spiel geschriebene Tastenbelegung | 2026-11-06 |
 | O2 | `config/xaero/{minimap,world-map,lib}/**/*.cfg`, `default_radar_categories_*.json`, `info_display_config` der Prism-Instanz | vom Spiel beim ersten Start geschriebene Benutzerkonfiguration (Optionsnamen und Standardwerte) | 2026-11-06 |
-| O3 | Beobachtung im laufenden Spiel (Menüs, Tooltips) | eigene Beobachtung | offen |
+| O3 | Beobachtung im laufenden Spiel: Bildschirmaufnahmen der Prism-Instanz (Minimap, Wegpunkt in Welt und Minimap, B-Editor, U-Liste, Y-Einstellungen, M-Weltkarte) | eigene Beobachtung; Aufnahmen nur lokal, nicht im Repo | 2026-11-06 |
 | SA | `DUzzL/seed-atlas-xaero` (lokal, Commit `df4e212`), `config/seedatlas_xaero.json` | eigener Code des Auftraggebers | 2026-11-06 |
 
 **Zu O2:** Diese Dateien sind keine Jar-Inhalte, sondern Laufzeitausgabe des Spiels im Konfigurationsordner des Nutzers. Sie sind dafür gedacht, dass der Nutzer sie liest und bearbeitet. Verwendet werden nur Optionsnamen, Standardwerte und die Struktur der Radar-Kategorien, um den Funktionsumfang festzustellen. Meridian verwendet eigene Schlüsselnamen und ein eigenes Dateiformat.
@@ -51,3 +51,4 @@ Die Quellenspalte in `FEATURES.md` und `KEYBINDS.md` nennt für jedes Feature di
 - 2026-11-06: S1–S4 über einen Web-Abruf in eigenen Worten zusammengefasst, ohne längere Zitate.
 - 2026-11-06: Spiel einmal über Prism gestartet; O1 und O2 entstanden dabei und wurden gelesen.
 - 2026-11-06: Die Beobachtung im Spiel (O3) per Bildschirmsteuerung ist nicht möglich. Prism startet Minecraft als `java`-Prozess ohne App-Bundle, der sich nicht freigeben lässt. Die offenen Punkte stehen in `KEYBINDS.md`.
+- 2026-11-06: O3 nachgeholt. Die Testwelt wurde in die Prism-Instanz kopiert, `pauseOnLostFocus` in deren `options.txt` ausgeschaltet und das Spiel per Tastatur-Automation (AppleScript) bedient. Bildschirmaufnahmen mit `screencapture`. Daraus wurden Maße, Farben und Anordnung in eigenen Worten und Zahlen abgeleitet (DECISIONS D-019); keine Pixel oder Grafiken übernommen.
