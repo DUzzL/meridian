@@ -28,6 +28,9 @@ pub struct RegionQuad {
     pub size: u32,
     /// Opacity of the texels, 0..=255.
     pub alpha: u8,
+    /// Which set the position belongs to (Seed Atlas tiles: their step), so
+    /// equal positions of different sets keep their own textures.
+    pub layer: u32,
 }
 
 /// A marker icon on screen.
@@ -408,7 +411,7 @@ impl WorldMapRenderer {
         background.sort_by(near);
         let layer = frame.world ^ 0x5EED_A71A5;
         for r in &background {
-            let key = (layer, r.pos[0], r.pos[1], r.size);
+            let key = (layer ^ ((r.layer as u64) << 40), r.pos[0], r.pos[1], r.size);
             let ready = match &r.pixels {
                 Some(p) => gpu.upload(world.device, world.queue, key, p, r.revision, Some(r.alpha), &mut budget),
                 None => gpu.entries.contains_key(&key),
@@ -416,7 +419,7 @@ impl WorldMapRenderer {
             let chosen = if ready {
                 Some(key)
             } else {
-                [512u32, 256, 128, 64, 32].iter().map(|&l| (layer, r.pos[0], r.pos[1], l)).find(|k| gpu.entries.contains_key(k))
+                None
             };
             let Some(key) = chosen else { continue };
             if let Some(e) = gpu.entries.get_mut(&key) {

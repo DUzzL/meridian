@@ -395,6 +395,12 @@ pub const MARKERS: &[MarkerKind] = &[
 ];
 
 pub fn marker_for(structure: i32) -> Option<&'static MarkerKind> {
+    // Ore vein scans answer copper and iron veins.
+    let structure = if structure == marker::ORE_VEIN_COPPER || structure == marker::ORE_VEIN_IRON {
+        marker::ORE_VEIN
+    } else {
+        structure
+    };
     MARKERS.iter().find(|m| m.kinds.contains(&structure))
 }
 
@@ -440,12 +446,18 @@ pub fn sample_y(s: &SeedAtlasSettings, d: Dimension) -> i32 {
 /// What the service computes: biome tiles and markers, by region.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Job {
-    /// A region's biome colours, `512 / step` samples a side.
+    /// One tile of biome colours: `TILE_SAMPLES` samples a side, `step`
+    /// blocks apart, covering `tile_span(step)` blocks from the tile's
+    /// north-west corner (`region` is the tile's index at that span). The
+    /// preview comes first; `refine` adds the expensive terrain (the vanilla
+    /// surface, the Nether floor and caves, the End islands), as the Fabric
+    /// version's two passes do.
     Tile {
         dimension: Dimension,
         region: RegionPos,
         step: i32,
         y: i32,
+        refine: bool,
     },
     /// A region's markers of the enabled kinds.
     Markers {
@@ -471,6 +483,41 @@ pub struct Tile {
 
 const MAX_TILES: usize = 1200;
 
+/// Samples a tile side, whatever the step.
+pub const TILE_SAMPLES: i32 = 128;
+
+/// Blocks a tile side covers at `step`.
+pub fn tile_span(step: i32) -> i32 {
+    TILE_SAMPLES * step
+}
+
+/// Previews (and marker scans) waiting at most; older requests are dropped,
+/// newer ones run first.
+const MAX_QUEUED: usize = 64;
+/// Refinements waiting at most.
+const MAX_QUEUED_REFINE: usize = 12;
+
+/// The seed's strongholds and spawn, computed once and shared by every
+/// marker scan of that seed.
+#[derive(Default)]
+struct Globals {
+    strongholds: std::sync::OnceLock<Vec<Hit>>,
+    spawn: std::sync::OnceLock<(i32, i32)>,
+}
+
+/// The jobs waiting for the workers: newest first, previews before
+/// refinements, refinements on at most all but one worker.
+#[derive(Default)]
+struct Queue {
+    preview: std::collections::VecDeque<Work>,
+    refine: std::collections::VecDeque<Work>,
+    refining: usize,
+    workers: usize,
+    closed: bool,
+}
+
+type SharedQueue = Arc<(parking_lot::Mutex<Queue>, parking_lot::Condvar)>;
+
 /// How tiles are coloured: the terrain look and the biome data it reads.
 #[derive(Clone)]
 struct TileLook {
@@ -494,7 +541,7 @@ pub type CaveMasker = dyn Fn(i64, i32, i32, i32, usize, usize) -> Vec<u64> + Sen
 
 /// Work sent to the threads: the generation it belongs to, the seed's
 /// generators, the marker kinds wanted, the tile look and the job.
-type Work = (u64, Arc<Atlas>, Vec<i32>, TileLook, Job);
+type Work = (u64, Arc<Atlas>, Vec<i32>, TileLook, Job, Arc<Globals>);
 
 pub struct SeedService {
     /// The generators per dimension (Overworld, Nether, End); equal seeds
@@ -508,7 +555,9 @@ pub struct SeedService {
     pending: HashSet<Job>,
     look: TileLook,
     clock: u64,
-    jobs: Option<mpsc::Sender<Work>>,
+    jobs: Option<SharedQueue>,
+    /// Strongholds and spawn per dimension's atlas, shared with the workers.
+    globals: [Arc<Globals>; 3],
     done: mpsc::Receiver<(u64, Done)>,
     done_tx: mpsc::Sender<(u64, Done)>,
     workers: usize,
@@ -545,6 +594,7 @@ impl Default for SeedService {
             },
             clock: 0,
             jobs: None,
+            globals: Default::default(),
             done,
             done_tx,
             workers: 0,
@@ -561,12 +611,14 @@ fn tile_pixels(atlas: &Atlas, look: &TileLook, job: Job) -> Vec<u32> {
         region,
         step,
         y,
+        refine,
     } = job
     else {
         return Vec::new();
     };
-    let n = 512 / step;
-    let (x0, z0) = region.min_block();
+    let n = TILE_SAMPLES;
+    let span = tile_span(step);
+    let (x0, z0) = (region.x.wrapping_mul(span), region.z.wrapping_mul(span));
     let ids = atlas
         .biome_area(dimension, x0, z0, y, step, n, n)
         .unwrap_or_default();
@@ -583,7 +635,7 @@ fn tile_pixels(atlas: &Atlas, look: &TileLook, job: Job) -> Vec<u32> {
     // Detailed Overworld tiles: the game's vanilla base terrain, with a
     // one-sample halo (the Fabric version's refinement pass).
     let surface = match (&look.surface, dimension) {
-        (Some(sample), Dimension::Overworld) if step <= 4 => sample(
+        (Some(sample), Dimension::Overworld) if refine && step <= 4 => sample(
             atlas.seed,
             atlas.large_biomes,
             x0 - step,
@@ -594,13 +646,12 @@ fn tile_pixels(atlas: &Atlas, look: &TileLook, job: Job) -> Vec<u32> {
         ),
         _ => None,
     };
-    // Meridian computes a tile in one pass, so every tile is the refinement pass.
     let request = seedatlas_look::heights_request(
         dimension,
         step,
         terrain_style,
         false,
-        true,
+        refine,
         surface.is_some(),
         atlas.has_terrain(),
     );
@@ -629,7 +680,7 @@ fn tile_pixels(atlas: &Atlas, look: &TileLook, job: Job) -> Vec<u32> {
         size,
         seed: atlas.seed,
         terrain_style,
-        refining: true,
+        refining: refine,
         ids: &ids,
         argb: &argb,
         heights: heights.as_deref(),
@@ -638,7 +689,7 @@ fn tile_pixels(atlas: &Atlas, look: &TileLook, job: Job) -> Vec<u32> {
     })
 }
 
-fn run(atlas: &Atlas, kinds: &[i32], look: &TileLook, job: Job) -> Done {
+fn run(atlas: &Atlas, kinds: &[i32], look: &TileLook, job: Job, globals: &Globals) -> Done {
     match job {
         Job::Tile { .. } => Done::Tile(job, Arc::new(tile_pixels(atlas, look, job))),
         Job::Markers { dimension, region } => {
@@ -647,10 +698,21 @@ fn run(atlas: &Atlas, kinds: &[i32], look: &TileLook, job: Job) -> Done {
             let mut hits = Vec::new();
             for &k in kinds.iter().filter(|&&k| dimension_of_kind(k) == dimension) {
                 let found = match k {
-                    marker::STRONGHOLD => atlas.scan_strongholds(b, true),
+                    marker::STRONGHOLD => {
+                        let all = globals.strongholds.get_or_init(|| {
+                            atlas
+                                .scan_strongholds([i32::MIN, i32::MIN, i32::MAX, i32::MAX], true)
+                                .unwrap_or_default()
+                        });
+                        Ok(all
+                            .iter()
+                            .filter(|h| h.x >= b[0] && h.x <= b[2] && h.z >= b[1] && h.z <= b[3])
+                            .copied()
+                            .collect())
+                    }
                     marker::SLIME_CHUNK => atlas.scan_slime_chunks(b),
                     marker::SPAWN => {
-                        let (x, z) = atlas.spawn(true);
+                        let (x, z) = *globals.spawn.get_or_init(|| atlas.spawn(true));
                         Ok(if x >= b[0] && x <= b[2] && z >= b[1] && z <= b[3] {
                             vec![Hit {
                                 kind: marker::SPAWN,
@@ -711,6 +773,7 @@ impl SeedService {
                             .find(|&j| old_specs[j] == Some(spec))
                             .and_then(|j| old[j].clone())
                     });
+                self.globals[i] = Arc::new(Globals::default());
                 self.atlases[i] = Some(shared.unwrap_or_else(|| {
                     Arc::new(Atlas::versioned(spec.seed, spec.large_biomes, spec.mc))
                 }));
@@ -750,24 +813,52 @@ impl SeedService {
     }
 
     fn start(&mut self, workers: usize) {
-        let (tx, rx) = mpsc::channel::<Work>();
-        let rx = Arc::new(parking_lot::Mutex::new(rx));
+        if let Some(old) = self.jobs.take() {
+            old.0.lock().closed = true;
+            old.1.notify_all();
+        }
+        let queue: SharedQueue = Arc::new((
+            parking_lot::Mutex::new(Queue {
+                workers,
+                ..Default::default()
+            }),
+            parking_lot::Condvar::new(),
+        ));
         for i in 0..workers {
-            let rx = rx.clone();
+            let queue = queue.clone();
             let done = self.done_tx.clone();
             let spawned = std::thread::Builder::new()
                 .name(format!("meridian-seedatlas-{i}"))
                 .spawn(move || {
                     loop {
-                        let next = rx.lock().recv();
-                        let Ok((generation, atlas, kinds, look, job)) = next else {
-                            break;
+                        let (work, refining) = {
+                            let (lock, cv) = &*queue;
+                            let mut q = lock.lock();
+                            loop {
+                                if q.closed {
+                                    return;
+                                }
+                                if let Some(w) = q.preview.pop_back() {
+                                    break (w, false);
+                                }
+                                if q.refining + 1 < q.workers.max(2)
+                                    && let Some(w) = q.refine.pop_back()
+                                {
+                                    q.refining += 1;
+                                    break (w, true);
+                                }
+                                cv.wait(&mut q);
+                            }
                         };
-                        if done
-                            .send((generation, run(&atlas, &kinds, &look, job)))
-                            .is_err()
-                        {
-                            break;
+                        let (generation, atlas, kinds, look, job, globals) = work;
+                        let result = run(&atlas, &kinds, &look, job, &globals);
+                        if refining {
+                            let (lock, cv) = &*queue;
+                            lock.lock().refining -= 1;
+                            cv.notify_one();
+                        }
+                        if done.send((generation, result)).is_err() {
+                            return;
                         }
                     }
                 });
@@ -775,7 +866,7 @@ impl SeedService {
                 log::warn!("meridian: cannot start a Seed Atlas worker: {e}");
             }
         }
-        self.jobs = Some(tx);
+        self.jobs = Some(queue);
         self.workers = workers;
         self.pending.clear();
     }
@@ -800,6 +891,11 @@ impl SeedService {
     }
 
     fn invalidate(&mut self) {
+        if let Some(q) = &self.jobs {
+            let mut q = q.0.lock();
+            q.preview.clear();
+            q.refine.clear();
+        }
         self.generation += 1;
         self.tiles.clear();
         self.markers.clear();
@@ -838,8 +934,9 @@ impl SeedService {
                         continue;
                     };
                     self.clock += 1;
+                    let _ = step;
                     let tile = Tile {
-                        size: (512 / step) as u32,
+                        size: TILE_SAMPLES as u32,
                         pixels,
                         revision: self.clock,
                     };
@@ -865,38 +962,120 @@ impl SeedService {
     }
 
     fn submit(&mut self, job: Job) {
-        let (Some(atlas), Some(tx)) = (&self.atlases[dim_index(job_dimension(&job))], &self.jobs)
-        else {
+        let d = dim_index(job_dimension(&job));
+        let (Some(atlas), Some(queue)) = (&self.atlases[d], &self.jobs) else {
             return;
         };
-        // A bounded queue: what scrolled out of view is not computed late.
-        if self.pending.contains(&job) || self.pending.len() >= 48 {
+        if self.pending.contains(&job) {
             return;
         }
-        if tx
-            .send((
-                self.generation,
-                atlas.clone(),
-                self.kinds.clone(),
-                self.look.clone(),
-                job,
-            ))
-            .is_ok()
-        {
-            self.pending.insert(job);
+        let refine = matches!(job, Job::Tile { refine: true, .. });
+        let work = (
+            self.generation,
+            atlas.clone(),
+            self.kinds.clone(),
+            self.look.clone(),
+            job,
+            self.globals[d].clone(),
+        );
+        let (lock, cv) = &**queue;
+        let mut q = lock.lock();
+        let (list, cap) = if refine {
+            (&mut q.refine, MAX_QUEUED_REFINE)
+        } else {
+            (&mut q.preview, MAX_QUEUED)
+        };
+        list.push_back(work);
+        // What scrolled out of view long ago is not computed late.
+        while list.len() > cap {
+            if let Some((_, _, _, _, old, _)) = list.pop_front() {
+                self.pending.remove(&old);
+            }
         }
+        drop(q);
+        cv.notify_one();
+        self.pending.insert(job);
     }
 
-    /// A region's biome tile, asking for it when missing.
+    /// A tile's best colours so far: refined when ready, else the preview.
+    /// Asks for the preview, then for the refinement where the look needs
+    /// one; `job` is the preview's (`refine: false`).
     pub fn tile(&mut self, job: Job) -> Option<Tile> {
         self.clock += 1;
         let clock = self.clock;
-        if let Some((tile, used)) = self.tiles.get_mut(&job) {
+        let Job::Tile {
+            dimension,
+            region,
+            step,
+            y,
+            ..
+        } = job
+        else {
+            return None;
+        };
+        let preview = Job::Tile {
+            dimension,
+            region,
+            step,
+            y,
+            refine: false,
+        };
+        let refined = Job::Tile {
+            dimension,
+            region,
+            step,
+            y,
+            refine: true,
+        };
+        if let Some((tile, used)) = self.tiles.get_mut(&refined) {
             *used = clock;
             return Some(tile.clone());
         }
-        self.submit(job);
-        None
+        let found = self.tiles.get_mut(&preview).map(|(tile, used)| {
+            *used = clock;
+            tile.clone()
+        });
+        match &found {
+            Some(_) => {
+                let has_terrain = self.atlas_for(dimension).is_some_and(|a| a.has_terrain());
+                if seedatlas_look::needs_surface_refinement(
+                    dimension,
+                    self.look.terrain && has_terrain,
+                    !self.look.highlight.is_empty(),
+                    step,
+                ) {
+                    self.submit(refined);
+                }
+            }
+            None => self.submit(preview),
+        }
+        found
+    }
+
+    /// A tile's colours if already computed (the coarser fallback under a
+    /// tile that is not ready yet); asks for nothing.
+    pub fn cached_tile(&mut self, job: Job) -> Option<Tile> {
+        let Job::Tile {
+            dimension,
+            region,
+            step,
+            y,
+            ..
+        } = job
+        else {
+            return None;
+        };
+        [true, false].into_iter().find_map(|refine| {
+            self.tiles
+                .get(&Job::Tile {
+                    dimension,
+                    region,
+                    step,
+                    y,
+                    refine,
+                })
+                .map(|(t, _)| t.clone())
+        })
     }
 
     /// A region's markers, asking for them when missing.
@@ -929,17 +1108,16 @@ fn job_dimension(job: &Job) -> Dimension {
     }
 }
 
-/// The sample step for a region drawn `side_px` physical pixels wide, no
-/// finer than the configured resolution.
+/// The sample step for a region drawn `side_px` physical pixels wide: about
+/// one sample per screen pixel (a power of two, 1 to 1024), no finer than the
+/// configured resolution.
 pub fn step_for(side_px: f32, resolution: u8) -> i32 {
-    let want = if side_px >= 300.0 {
-        1
-    } else if side_px >= 75.0 {
-        4
-    } else {
-        16
-    };
-    want.max(resolution.clamp(1, 16) as i32)
+    let blocks_per_px = 512.0 / side_px.max(0.001);
+    let mut step = 1;
+    while step < 1024 && (step * 2) as f32 <= blocks_per_px {
+        step *= 2;
+    }
+    step.max(resolution.clamp(1, 16) as i32)
 }
 
 #[cfg(test)]
@@ -985,6 +1163,7 @@ mod tests {
             region: RegionPos::new(0, 0),
             step: 16,
             y: 255,
+            refine: false,
         };
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         let (mut tile, mut marks) = (None, None);
@@ -995,11 +1174,12 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         let tile = tile.expect("a tile");
-        assert_eq!(tile.size, 32);
+        assert_eq!(tile.size, TILE_SAMPLES as u32);
         assert!(tile.pixels.iter().all(|p| p >> 24 == 0xFF));
         assert!(marks.is_some());
-        assert_eq!(step_for(400.0, 1), 1);
+        assert_eq!(step_for(600.0, 1), 1);
         assert_eq!(step_for(400.0, 4), 4);
-        assert_eq!(step_for(10.0, 1), 16);
+        assert_eq!(step_for(10.0, 1), 32);
+        assert_eq!(step_for(0.1, 1), 1024);
     }
 }

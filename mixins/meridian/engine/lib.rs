@@ -9,8 +9,10 @@
 
 mod gpu;
 mod gpu_map;
+mod icons;
 mod terrain_sampler;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -1755,6 +1757,7 @@ impl Meridian {
                         revision: region.map_or(0, |r| r.revision),
                         size: 512,
                         alpha: 255,
+                        layer: 0,
                     });
                 }
             }
@@ -1776,31 +1779,73 @@ impl Meridian {
                 let region_side = (512.0 * s.map.scale(u) as f32) * gui_scale;
                 let step = sa::step_for(region_side, sa_settings.biome_resolution);
                 let y = sa::sample_y(&sa_settings, dim);
-                let radius = if step >= 16 { 16 } else { MAP_REQUEST_RADIUS };
                 let mut order: Vec<RegionPos> = (dmin.x..=dmax.x).flat_map(|x| (dmin.z..=dmax.z).map(move |z| RegionPos::new(x, z))).collect();
                 order.sort_by_key(|r| (r.x - mid.x).abs().max((r.z - mid.z).abs()));
                 if sa_settings.biome_layer {
-                    for pos in &order {
-                        let near = (pos.x - mid.x).abs() <= radius && (pos.z - mid.z).abs() <= radius;
-                        let job = sa::Job::Tile { dimension: dim, region: *pos, step, y };
-                        let tile = if near { s.seed_svc.tile(job) } else { None };
-                        let (bx, bz) = pos.min_block();
-                        let a = s.map.to_screen([bx as f64, bz as f64], gui, u);
-                        let b = s.map.to_screen([(bx + 512) as f64, (bz + 512) as f64], gui, u);
-                        background.push(gpu_map::RegionQuad {
-                            pos: [pos.x, pos.z],
+                    // Tiles of 128 samples at the chosen step, nearest first;
+                    // a coarser tile already computed shows under one that is
+                    // not ready yet.
+                    let tile_quad = |s: &WorldMap, t: RegionPos, step: i32, tile: Option<sa::Tile>| {
+                        let span = sa::tile_span(step);
+                        let (bx, bz) = (t.x as f64 * span as f64, t.z as f64 * span as f64);
+                        let a = s.to_screen([bx, bz], gui, u);
+                        let b = s.to_screen([bx + span as f64, bz + span as f64], gui, u);
+                        gpu_map::RegionQuad {
+                            pos: [t.x, t.z],
                             rect: [a[0], a[1], b[0], b[1]],
-                            size: tile.as_ref().map_or((512 / step) as u32, |t| t.size),
+                            size: tile.as_ref().map_or(sa::TILE_SAMPLES as u32, |t| t.size),
                             revision: tile.as_ref().map_or(0, |t| t.revision),
                             pixels: tile.map(|t| t.pixels),
                             alpha: sa_settings.biome_opacity,
-                        });
+                            layer: step as u32,
+                        }
+                    };
+                    let span = sa::tile_span(step);
+                    let w0 = s.map.to_world([0.0, 0.0], gui, u);
+                    let w1 = s.map.to_world(gui, gui, u);
+                    let t0 = RegionPos::new((w0[0] / span as f64).floor() as i32, (w0[1] / span as f64).floor() as i32);
+                    let t1 = RegionPos::new((w1[0] / span as f64).floor() as i32, (w1[1] / span as f64).floor() as i32);
+                    let centre = s.map.center;
+                    let mut tiles: Vec<RegionPos> = (t0.x..=t1.x).flat_map(|x| (t0.z..=t1.z).map(move |z| RegionPos::new(x, z))).collect();
+                    tiles.sort_by(|a, b| {
+                        let d = |t: &RegionPos| {
+                            let (cx, cz) = ((t.x as f64 + 0.5) * span as f64 - centre[0], (t.z as f64 + 0.5) * span as f64 - centre[1]);
+                            cx * cx + cz * cz
+                        };
+                        d(a).total_cmp(&d(b))
+                    });
+                    tiles.truncate(600);
+                    let mut fine = Vec::with_capacity(tiles.len());
+                    let mut coarse: Vec<gpu_map::RegionQuad> = Vec::new();
+                    for t in &tiles {
+                        let job = sa::Job::Tile { dimension: dim, region: *t, step, y, refine: false };
+                        let tile = s.seed_svc.tile(job);
+                        if tile.is_none() && step < 1024 {
+                            let cstep = (step * 4).min(1024);
+                            let f = sa::tile_span(cstep) / span;
+                            let c = RegionPos::new(t.x.div_euclid(f), t.z.div_euclid(f));
+                            if !coarse.iter().any(|q| q.pos == [c.x, c.z])
+                                && let Some(ct) = s.seed_svc.cached_tile(sa::Job::Tile { dimension: dim, region: c, step: cstep, y, refine: false })
+                            {
+                                coarse.push(tile_quad(&s.map, c, cstep, Some(ct)));
+                            }
+                        }
+                        fine.push(tile_quad(&s.map, *t, step, tile));
                     }
+                    background.extend(coarse);
+                    background.extend(fine);
                 }
                 s.hovered_marker = None;
                 if sa_settings.structures {
-                    // The Fabric version's default marker size (150 %) draws at 20 units.
-                    let size = 20.0 * u * sa_settings.marker_size_factor() / 1.5;
+                    load_icons();
+                    // `MarkerSize.iconScale`: two blocks wide with the map,
+                    // never below the sprite size, at most a quarter of the view.
+                    let setting = sa_settings.marker_size_factor().clamp(0.25, 4.0);
+                    let floor = 20.0 * u * 0.45 * setting;
+                    let with_map = 2.0 * setting * s.map.scale(u) as f32;
+                    let ceiling = floor.max(gui[0].min(gui[1]) * 0.25);
+                    let units = floor.max(with_map).clamp(floor, ceiling);
+                    let px = units / icons::DISPLAY_SIZE;
                     let completed_alpha = sa_settings.completed_opacity_pct() as f32 / 100.0;
                     for pos in order.iter().filter(|r| (r.x - mid.x).abs() <= MAP_REQUEST_RADIUS && (r.z - mid.z).abs() <= MAP_REQUEST_RADIUS) {
                         let Some(hits) = s.seed_svc.markers(dim, *pos) else { continue };
@@ -1809,10 +1854,19 @@ impl Meridian {
                             let special = h.kind == meridian_seedatlas::structures::kind::ABANDONED_CAMP
                                 && h.detail >= 0
                                 && h.detail & meridian_seedatlas::atlas::CAMP_SPECIAL_LOOT != 0;
-                            let icon = if special { ICON_CAMP_SPECIAL } else { sa::MARKERS.iter().position(|k| k.id == m.id).unwrap_or(0) };
+                            let icon_id = if special {
+                                "camp_special"
+                            } else if h.kind == meridian_seedatlas::atlas::marker::ORE_VEIN_COPPER {
+                                "orevein_copper"
+                            } else {
+                                m.id
+                            };
+                            let Some((icon_index, info)) = icon(icon_id) else { continue };
+                            let (dw, dh) = info.display();
+                            let (w, hgt) = (dw * px, dh * px);
                             let c = s.map.to_screen([h.x as f64 + 0.5, h.z as f64 + 0.5], gui, u);
-                            let rect = [c[0] - size / 2.0, c[1] - size / 2.0, size, size];
-                            if rect[0] > gui[0] || rect[1] > gui[1] || rect[0] + size < 0.0 || rect[1] + size < 0.0 {
+                            let rect = [c[0] - (dw / 2.0).floor() * px, c[1] - (dh / 2.0).floor() * px, w, hgt];
+                            if rect[0] > gui[0] || rect[1] > gui[1] || rect[0] + w < 0.0 || rect[1] + hgt < 0.0 {
                                 continue;
                             }
                             let key = structure_key(s.seed_key.as_deref(), &s.seed_svc, m.id, dim, h.x, h.z);
@@ -1821,10 +1875,16 @@ impl Meridian {
                                 continue;
                             }
                             let alpha = if completed { completed_alpha } else { 1.0 };
-                            icons.push(gpu_map::IconQuad { icon, rect, alpha });
-                            if completed {
-                                let b = size * 0.45;
-                                icons.push(gpu_map::IconQuad { icon: ICON_COMPLETED, rect: [rect[0] + size - b * 0.8, rect[1] + size - b * 0.8, b, b], alpha });
+                            if info.block
+                                && let Some((frame, _)) = icon("frame")
+                            {
+                                icons.push(gpu_map::IconQuad { icon: frame, rect: [rect[0] - px, rect[1] - px, w + 2.0 * px, hgt + 2.0 * px], alpha });
+                            }
+                            icons.push(gpu_map::IconQuad { icon: icon_index, rect, alpha });
+                            if completed && let Some((badge, _)) = icon("completed") {
+                                // `CompletedBadge`: 10 icon pixels in the lower right, 3 overhanging.
+                                let b = meridian_core::completed::BADGE_DISPLAY_SIZE as f32 * px;
+                                icons.push(gpu_map::IconQuad { icon: badge, rect: [rect[0] + w - b + 3.0 * px, rect[1] + hgt - b + 3.0 * px, b, b], alpha });
                             }
                             if inside(rect, mouse) {
                                 s.hovered_marker = Some(HoveredMarker { name: m.name, x: h.x, z: h.z, key: key.clone() });
@@ -2077,69 +2137,33 @@ fn newest_cave_layer(dimension_dir: &std::path::Path) -> Option<i32> {
 
 use meridian_core::seedatlas as sa;
 
-/// Icon files of the markers (Seed Atlas's own), in `sa::MARKERS` order,
-/// then the special-loot camp.
-const ICON_FILES: [&[u8]; 30] = [
-    include_bytes!("assets/seedatlas/camp.png"),
-    include_bytes!("assets/seedatlas/ancient_city.png"),
-    include_bytes!("assets/seedatlas/bastion.png"),
-    include_bytes!("assets/seedatlas/chambers.png"),
-    include_bytes!("assets/seedatlas/desert.png"),
-    include_bytes!("assets/seedatlas/endcity.png"),
-    include_bytes!("assets/seedatlas/end_ship.png"),
-    include_bytes!("assets/seedatlas/fortress.png"),
-    include_bytes!("assets/seedatlas/gateway.png"),
-    include_bytes!("assets/seedatlas/geode.png"),
-    include_bytes!("assets/seedatlas/hut.png"),
-    include_bytes!("assets/seedatlas/igloo.png"),
-    include_bytes!("assets/seedatlas/jungle.png"),
-    include_bytes!("assets/seedatlas/mansion.png"),
-    include_bytes!("assets/seedatlas/mineshaft.png"),
-    include_bytes!("assets/seedatlas/monument.png"),
-    include_bytes!("assets/seedatlas/orevein.png"),
-    include_bytes!("assets/seedatlas/outpost.png"),
-    include_bytes!("assets/seedatlas/portal.png"),
-    include_bytes!("assets/seedatlas/ruins.png"),
-    include_bytes!("assets/seedatlas/shipwreck.png"),
-    include_bytes!("assets/seedatlas/slime.png"),
-    include_bytes!("assets/seedatlas/spawn.png"),
-    include_bytes!("assets/seedatlas/stronghold.png"),
-    include_bytes!("assets/seedatlas/trails.png"),
-    include_bytes!("assets/seedatlas/treasure.png"),
-    include_bytes!("assets/seedatlas/village.png"),
-    include_bytes!("assets/seedatlas/well.png"),
-    include_bytes!("assets/seedatlas/camp_special.png"),
-    include_bytes!("assets/seedatlas/completed.png"),
-];
-const ICON_CAMP_SPECIAL: usize = 28;
-const ICON_COMPLETED: usize = 29;
+/// The marker icons by id, and their order in the renderer's icon list.
+static ICON_INDEX: std::sync::OnceLock<(HashMap<&'static str, usize>, Vec<icons::Icon>)> = std::sync::OnceLock::new();
 
-/// Decodes the marker icons for the map renderer, once.
+/// Builds the marker icons (Minecraft's textures need the game's resources,
+/// so this waits until they are known) and hands them to the renderer.
 fn load_icons() {
-    if gpu_map::ICONS.get().is_some() {
+    if ICON_INDEX.get().is_some() {
         return;
     }
-    let icons = ICON_FILES
-        .iter()
-        .map(|bytes| {
-            let decoded = (|| {
-                let mut decoder = png::Decoder::new(std::io::Cursor::new(*bytes));
-                decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
-                let mut reader = decoder.read_info().ok()?;
-                let mut buf = vec![0; reader.output_buffer_size()?];
-                let info = reader.next_frame(&mut buf).ok()?;
-                let rgba: Vec<u8> = match info.color_type {
-                    png::ColorType::Rgba => buf[..info.buffer_size()].to_vec(),
-                    png::ColorType::Rgb => buf[..info.buffer_size()].chunks_exact(3).flat_map(|c| [c[0], c[1], c[2], 255]).collect(),
-                    png::ColorType::GrayscaleAlpha => buf[..info.buffer_size()].chunks_exact(2).flat_map(|c| [c[0], c[0], c[0], c[1]]).collect(),
-                    _ => buf[..info.buffer_size()].iter().flat_map(|&g| [g, g, g, 255]).collect(),
-                };
-                Some((info.width, info.height, rgba))
-            })();
-            decoded.unwrap_or((1, 1, vec![0, 0, 0, 0]))
-        })
-        .collect();
-    let _ = gpu_map::ICONS.set(icons);
+    let Some(root) = bridge::resources_dir() else { return };
+    let set = icons::load(Some(&root));
+    let mut index = HashMap::new();
+    let mut list = Vec::new();
+    let mut gpu = Vec::new();
+    for (id, icon) in set {
+        index.insert(id, list.len());
+        gpu.push((icon.width, icon.height, icon.rgba.clone()));
+        list.push(icon);
+    }
+    let _ = gpu_map::ICONS.set(gpu);
+    let _ = ICON_INDEX.set((index, list));
+}
+
+fn icon(id: &str) -> Option<(usize, &'static icons::Icon)> {
+    let (index, list) = ICON_INDEX.get()?;
+    let i = *index.get(id)?;
+    Some((i, &list[i]))
 }
 
 /// The marker under the cursor on the map, if any.
