@@ -220,3 +220,43 @@
 - Schleimchunks (braucht den Seed: kommt mit Seed Atlas, Phase 5).
 - Radar: Boote, Loren, Projektile; Symbole/Köpfe statt Rauten.
 - Profile (Namen, Löschen), Positionseditor.
+
+## Phase 4: Weltkarte (abgeschlossen)
+
+**Fertig und im Spiel geprüft** (Vergleich mit Referenzaufnahme r07, D-023)
+
+- Vollbildkarte mit M:
+  - Gelände als GPU-Regionstexturen mit drei Detailstufen und Cache;
+  - HUD und Hand ausgeblendet.
+- Bedienung:
+  - Zoom mit dem Mausrad um den Cursor und mit den Knöpfen + und −;
+  - Verschieben per Ziehen und mit den Pfeiltasten/WASD;
+  - Leertaste zentriert, M schließt.
+- Anzeigen:
+  - Koordinaten und Biom unter dem Cursor (Biome neu im Regionsformat v2, D-024);
+  - Zoomanzeige, Kompass, roter Spielerpfeil;
+  - Wegpunkte als Schilde, Entities, Fußspuren.
+- Rechtsklickmenü:
+  - Wegpunkt erstellen (Editor, danach zurück zur Karte), Teleport hierher, Position teilen, PNG-Export;
+  - auf Wegpunkten zusätzlich bearbeiten, hinteleportieren, löschen.
+  - B legt am Cursor einen Wegpunkt an.
+- Dimensionen:
+  - Die Taste „Switch map dimension“ wechselt zwischen Oberwelt, Nether und End. Andere Dimensionen werden nur aus ihren Dateien gelesen.
+  - Koordinaten werden 1:8 umgerechnet, Teleports nutzen das Dimensionsformat.
+  - Dimensionen mit Dach zeigen ihre zuletzt kartierte Höhlenebene.
+- Fehler behoben: Beim Dimensionswechsel lädt Horizon das neue Level vor dem Entladen des alten. Die Karte blieb dadurch geschlossen; jetzt zählt Meridian die geladenen Level.
+- PNG-Export:
+  - zeilenweise gestreamt, Unerkundetes transparent;
+  - über 16384 px Kantenlänge in Zweierpotenzen verkleinert;
+  - Ablage in `.horizon-mod-data/meridian/exports/`.
+
+**Build und Tests**: 115 Tests grün (113 Kern, 2 Host), Clippy sauber, Adapter-Check grün.
+
+**Offen (Phase 6 oder später)**
+
+- Öffnungsanimation (WM-01), Steuerungs-Tooltip (WM-19), Spieler-Teleport im Menü.
+- Karte aus dem Weltspeicher erzeugen (WM-05/06).
+- Oberwelt-Wegpunkte skaliert im Nether.
+- Server-Chunk-Radius und Kartendistanzen (WM-13/17).
+- Exportoptionen (Nacht, Teilung).
+- Die Symbolleisten links und rechts der Referenzkarte (eigene Symbole wären nötig; keine Assets der Referenz).

@@ -142,9 +142,9 @@ fn downsample(pixels: &[u32], lod: u32) -> Vec<u8> {
                     }
                 }
             }
-            if n > 0 {
+            if let (Some(r), Some(g), Some(b)) = (r.checked_div(n), g.checked_div(n), b.checked_div(n)) {
                 let o = (ty * lod + tx) * 4;
-                out[o..o + 4].copy_from_slice(&[(r / n) as u8, (g / n) as u8, (b / n) as u8, 255]);
+                out[o..o + 4].copy_from_slice(&[r as u8, g as u8, b as u8, 255]);
             }
         }
     }

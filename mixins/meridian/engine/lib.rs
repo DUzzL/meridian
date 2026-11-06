@@ -161,6 +161,55 @@ struct State {
     open_map: bool,
     /// A screen opened from the map goes back to it when it closes.
     return_to_map: bool,
+    /// Another dimension's map the world map shows, read from disk only.
+    viewer: Option<(String, MapEngine)>,
+    /// Where PNG exports go.
+    export_dir: PathBuf,
+    /// Client levels loaded and not yet unloaded: a dimension change loads
+    /// the new level before it unloads the old one.
+    levels: u32,
+}
+
+/// The last finished export's message, for the action bar.
+static EXPORT_NOTICE: Mutex<Option<String>> = Mutex::new(None);
+
+/// Dimensions the map can switch between, in order.
+const MAP_DIMENSIONS: [&str; 3] = ["minecraft:overworld", "minecraft:the_nether", "minecraft:the_end"];
+
+/// Blocks of the overworld per block of a dimension (the Nether's 8).
+fn dimension_scale(dimension: &str) -> f64 {
+    if dimension == "minecraft:the_nether" { 8.0 } else { 1.0 }
+}
+
+/// The game seen by a map that only reads its files: no player, no chunks.
+struct ViewerHost<'a>(HorizonHost<'a>);
+
+impl MapHost for ViewerHost<'_> {
+    fn context(&self) -> Option<WorldContext> {
+        None
+    }
+    fn player(&self) -> Option<PlayerState> {
+        None
+    }
+    fn request_chunk(&self, _chunk: ChunkPos, _mode: ReadMode) {}
+    fn take_chunks(&self) -> Vec<ChunkSnapshot> {
+        Vec::new()
+    }
+    fn block_appearance(&self, block: &str) -> BlockAppearance {
+        self.0.block_appearance(block)
+    }
+    fn biome_appearance(&self, biome: &str) -> BiomeAppearance {
+        self.0.biome_appearance(biome)
+    }
+    fn day_time(&self) -> Option<i64> {
+        self.0.day_time()
+    }
+    fn data_dir(&self) -> PathBuf {
+        self.0.data_dir()
+    }
+    fn config_dir(&self) -> PathBuf {
+        self.0.config_dir()
+    }
 }
 
 /// Work a screen asked for that needs the game's write access.
@@ -428,6 +477,9 @@ impl Meridian {
                 map_open: false,
                 open_map: false,
                 return_to_map: false,
+                viewer: None,
+                export_dir: data_dir(host).join("exports"),
+                levels: 0,
             }
         });
         f(state)
@@ -815,6 +867,9 @@ impl Hooks for Meridian {
                 s.map_open = false;
                 s.return_to_map = false;
                 s.map.press = None;
+                if !s.map_open {
+                    s.viewer = None;
+                }
             });
             gpu_map::set_frame(None);
         }
@@ -925,6 +980,8 @@ impl Hooks for Meridian {
         let host: &dyn Host = host;
         self.with_state(host, |s| {
             let dimension = event.dimension.to_owned();
+            s.levels += 1;
+            s.viewer = None;
             s.dimension = Some(dimension.clone());
             let map_host = HorizonHost {
                 host,
@@ -944,11 +1001,23 @@ impl Hooks for Meridian {
     }
 
     fn client_level_unload(&self, host: &mut dyn Host, _event: &mut ClientLevelUnloadEvent<'_>) {
-        self.send(host, HostEvent::LevelUnloaded);
+        // Only the last level's unload closes the map: on a dimension change
+        // the new level is already open.
+        let last = self.with_state(&*host, |s| {
+            s.levels = s.levels.saturating_sub(1);
+            s.levels == 0
+        });
+        if last {
+            self.send(host, HostEvent::LevelUnloaded);
+        }
     }
 
     fn client_disconnecting(&self, host: &dyn Host, _event: &mut ClientDisconnectingEvent) {
-        self.with_state(host, State::close_book);
+        self.with_state(host, |s| {
+            s.close_book();
+            s.levels = 0;
+            s.viewer = None;
+        });
         self.send(host, HostEvent::Disconnected);
     }
 
@@ -971,6 +1040,9 @@ impl Hooks for Meridian {
     }
 
     fn frame(&self, host: &mut dyn Host, _event: &mut FrameEvent) {
+        if let Some(text) = EXPORT_NOTICE.lock().take() {
+            host.client_action_bar(Text::literal(text), false);
+        }
         let pending = self.with_state(&*host, |s| std::mem::take(&mut s.pending));
         for p in pending {
             match p {
@@ -1038,6 +1110,9 @@ impl Hooks for Meridian {
             let budget =
                 Duration::from_micros(s.config.current().performance.frame_budget_us as u64);
             s.engine.tick(&map_host, budget);
+            if let Some((_, viewer)) = &mut s.viewer {
+                viewer.tick(&ViewerHost(HorizonHost { host, dimension: None }), budget / 2);
+            }
             if let Some(p) = player
                 && s.config.current().waypoints.delete_reached_deathpoints
                 && let Some((book, dim)) = s.book_here()
@@ -1500,6 +1575,7 @@ impl Meridian {
             for id in &hits {
                 match *id {
                     "worldmap.open" => s.pending.push(Pending::CloseScreen),
+                    "worldmap.toggle_dimension" => s.next_map_dimension(host),
                     "worldmap.zoom_in" | "minimap.zoom_in" => s.map.scroll(1.0, center, view.gui, view.unit),
                     "worldmap.zoom_out" | "minimap.zoom_out" => s.map.scroll(-1.0, center, view.gui, view.unit),
                     "waypoint.new" => {
@@ -1544,12 +1620,19 @@ impl Meridian {
         let ops = self.with_state(host, |s| {
             let Some(player) = player else { return Vec::new() };
             let (gui, u) = (view.gui, view.unit);
+            let here = s.dimension.clone().unwrap_or_default();
+            let (shown, engine) = match &mut s.viewer {
+                Some((dim, engine)) => (dim.clone(), engine),
+                None => (here.clone(), &mut s.engine),
+            };
+            let factor = dimension_scale(&here) / dimension_scale(&shown);
+            let player_pos = [player.position[0] * factor, player.position[1], player.position[2] * factor];
             let (min, max) = s.map.visible_regions(gui, u);
             let mid = RegionPos::of_block(s.map.center[0].floor() as i32, s.map.center[1].floor() as i32);
             let clamp = |p: RegionPos, r: i32| {
                 RegionPos::new(p.x.clamp(mid.x - r, mid.x + r), p.z.clamp(mid.z - r, mid.z + r))
             };
-            s.engine.request_area(clamp(min, MAP_REQUEST_RADIUS), clamp(max, MAP_REQUEST_RADIUS));
+            engine.request_area(clamp(min, MAP_REQUEST_RADIUS), clamp(max, MAP_REQUEST_RADIUS));
             let (dmin, dmax) = (clamp(min, MAP_DRAW_RADIUS), clamp(max, MAP_DRAW_RADIUS));
             let mut regions = Vec::new();
             for x in dmin.x..=dmax.x {
@@ -1558,7 +1641,7 @@ impl Meridian {
                     let (bx, bz) = pos.min_block();
                     let a = s.map.to_screen([bx as f64, bz as f64], gui, u);
                     let b = s.map.to_screen([(bx + 512) as f64, (bz + 512) as f64], gui, u);
-                    let region = s.engine.region(pos);
+                    let region = engine.region(pos);
                     regions.push(gpu_map::RegionQuad {
                         pos: [x, z],
                         rect: [a[0], a[1], b[0], b[1]],
@@ -1570,16 +1653,17 @@ impl Meridian {
             let world = {
                 use std::hash::{Hash, Hasher};
                 let mut h = std::collections::hash_map::DefaultHasher::new();
-                format!("{:?}", s.engine.context()).hash(&mut h);
-                s.engine.layer().hash(&mut h);
+                format!("{:?}", engine.context()).hash(&mut h);
+                engine.layer().hash(&mut h);
                 h.finish()
             };
             gpu_map::set_frame(Some(gpu_map::WorldMapFrame { gui, world, regions, at: Instant::now() }));
             let hovered = s.map.to_world(mouse, gui, u);
             let (hx, hz) = (hovered[0].floor() as i32, hovered[1].floor() as i32);
-            let sampler = s.engine.sampler();
+            let sampler = engine.sampler();
             let hovered_height = sampler.column(hx, hz).map(|c| c.height);
             let hovered_biome = sampler.biome(hx, hz);
+            let cave_layer = engine.layer();
             let settings = s.config.current();
             let radar_on = settings.radar.enabled;
             bridge::want_entities(radar_on);
@@ -1588,18 +1672,19 @@ impl Meridian {
             } else {
                 Vec::new()
             };
-            let waypoints: Vec<&Waypoint> = match (&s.dimension, &s.book) {
-                (Some(dim), Some((_, book))) if settings.waypoints.on_minimap => {
-                    book.dimension(dim).map(|d| d.visible(settings.waypoints.all_sets)).unwrap_or_default()
+            let waypoints: Vec<&Waypoint> = match &s.book {
+                Some((_, book)) if settings.waypoints.on_minimap => {
+                    book.dimension(&shown).map(|d| d.visible(settings.waypoints.all_sets)).unwrap_or_default()
                 }
                 _ => Vec::new(),
             };
+            let entities = if shown == here { entities } else { Vec::new() };
             let wm = &settings.world_map;
             s.map.overlay(&Overlay {
                 gui,
                 unit: u,
                 mouse,
-                player: player.position,
+                player: player_pos,
                 yaw: player.yaw,
                 hovered_height,
                 hovered_biome,
@@ -1609,7 +1694,8 @@ impl Meridian {
                 show_zoom: wm.show_zoom,
                 show_biome: wm.show_hovered_biome,
                 show_footsteps: wm.footsteps,
-                cave_layer: s.engine.layer(),
+                cave_layer,
+                other_dimension: (shown != here).then(|| shown.rsplit(':').next().unwrap_or(&shown).to_owned()),
             })
         });
         paint(host, batch, &ops);
@@ -1620,8 +1706,16 @@ impl State {
     /// Carries out what the map asked for.
     fn map_action(&mut self, action: MapAction) {
         let MapAction::Menu(item) = action else { return };
-        let tp = self.config.current().waypoints.teleport_format.clone();
-        let Some((book, dim)) = self.book_here() else { return };
+        if item == MenuItem::ExportPng {
+            self.export_png();
+            return;
+        }
+        let other = self.viewer.as_ref().map(|(d, _)| d.clone());
+        let wm = &self.config.current().world_map;
+        let tp = if other.is_some() { wm.map_teleport_dimension_format.clone() } else { wm.map_teleport_format.clone() };
+        let wp_tp = self.config.current().waypoints.teleport_format.clone();
+        let Some(dim) = other.or_else(|| self.dimension.clone()) else { return };
+        let Some((_, book)) = self.book.as_mut() else { return };
         let find = |book: &WaypointBook, id| book.dimension(&dim).and_then(|d| d.find(id).cloned());
         match item {
             MenuItem::Header(_) => {}
@@ -1649,15 +1743,76 @@ impl State {
             }
             MenuItem::TeleportToWaypoint(id) => {
                 if let Some(w) = find(book, id) {
+                    let template = if self.viewer.is_some() { &tp } else { &wp_tp };
                     self.pending.push(Pending::CloseScreen);
-                    self.pending.push(Pending::Chat(waypoint::command(&tp, &w, &dim)));
+                    self.pending.push(Pending::Chat(waypoint::command(template, &w, &dim)));
                 }
             }
             MenuItem::DeleteWaypoint(id) => {
                 book.dimension_mut(&dim).remove(id);
                 book.dirty = true;
             }
+            MenuItem::ExportPng => {}
         }
+    }
+
+    /// The map shows the next dimension: the player's own through a
+    /// read-only map of the others' saved files.
+    fn next_map_dimension(&mut self, host: &dyn Host) {
+        let Some(here) = self.dimension.clone() else { return };
+        let Some(context) = self.engine.context().cloned() else { return };
+        let shown = self.viewer.as_ref().map_or(here.clone(), |(d, _)| d.clone());
+        let mut order: Vec<String> = MAP_DIMENSIONS.iter().map(|d| d.to_string()).collect();
+        if !order.contains(&here) {
+            order.push(here.clone());
+        }
+        let i = order.iter().position(|d| *d == shown).unwrap_or(0);
+        let next = order[(i + 1) % order.len()].clone();
+        let factor = dimension_scale(&shown) / dimension_scale(&next);
+        self.map.center = [self.map.center[0] * factor, self.map.center[1] * factor];
+        if next == here {
+            self.viewer = None;
+            return;
+        }
+        let mut engine = MapEngine::new(self.config.current().clone(), data_dir(host));
+        let viewer_host = ViewerHost(HorizonHost { host, dimension: None });
+        let context = WorldContext { source: context.source, dimension: DimensionId::new(&next) };
+        engine.handle(&viewer_host, HostEvent::LevelLoaded(context));
+        // A dimension under a roof shows its most recently mapped cave layer.
+        if let Some(surface) = engine.regions_dir()
+            && let Some(layer) = newest_cave_layer(surface.parent().unwrap_or(&surface))
+        {
+            engine.set_layer(Some(layer));
+        }
+        self.viewer = Some((next, engine));
+    }
+
+    /// Writes the shown map to a PNG in the background.
+    fn export_png(&mut self) {
+        self.engine.flush();
+        let engine = self.viewer.as_ref().map_or(&self.engine, |(_, e)| e);
+        let Some(regions) = engine.regions_dir() else { return };
+        let shading = meridian_core::color::Shading::new(&self.config.current().world_map.terrain, None)
+            .for_cave(engine.layer().is_some());
+        let name = {
+            let (world, dim) = context_labels(self);
+            let dim = self.viewer.as_ref().map_or(dim, |(d, _)| d.clone());
+            let clean = |t: &str| t.replace(" (auto)", "").replace([':', '/', '\\', ' '], "_");
+            format!("{}_{}_{}.png", clean(&world), clean(&dim), chrono::Local::now().format("%Y-%m-%d_%H.%M.%S"))
+        };
+        let out = self.export_dir.join(name);
+        self.notice = Some("Exporting the map...".to_owned());
+        *EXPORT_NOTICE.lock() = Some("Exporting the map...".to_owned());
+        std::thread::spawn(move || {
+            // Let the region saves just started land first.
+            std::thread::sleep(Duration::from_millis(500));
+            let text = match meridian_core::export::export_png(&regions, &out, &shading, 16384) {
+                Ok(r) => format!("Map exported: {} ({}x{})", r.path.display(), r.width, r.height),
+                Err(e) => format!("Map export failed: {e}"),
+            };
+            log::info!("meridian: {text}");
+            *EXPORT_NOTICE.lock() = Some(text);
+        });
     }
 
     /// Shows `screen` in place of the map; closing it comes back.
@@ -1666,4 +1821,20 @@ impl State {
         self.map_open = false;
         self.return_to_map = true;
     }
+}
+
+/// The cave layer (`caves/<y>/`) of a dimension's map folder written last,
+/// when its surface is older or missing (a dimension under a roof).
+fn newest_cave_layer(dimension_dir: &std::path::Path) -> Option<i32> {
+    let modified = |p: &std::path::Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    let surface = modified(&dimension_dir.join("regions"));
+    let entries = std::fs::read_dir(dimension_dir.join("caves")).ok()?;
+    let (time, layer) = entries
+        .flatten()
+        .filter_map(|e| {
+            let y = e.file_name().to_str()?.parse::<i32>().ok()?;
+            Some((modified(&e.path().join("regions"))?, y))
+        })
+        .max()?;
+    surface.is_none_or(|s| time > s).then_some(layer)
 }

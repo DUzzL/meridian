@@ -36,6 +36,7 @@ pub enum MenuItem {
     EditWaypoint(u64),
     TeleportToWaypoint(u64),
     DeleteWaypoint(u64),
+    ExportPng,
 }
 
 impl MenuItem {
@@ -48,6 +49,7 @@ impl MenuItem {
             MenuItem::EditWaypoint(_) => "Edit Waypoint".into(),
             MenuItem::TeleportToWaypoint(_) => "Teleport To Waypoint".into(),
             MenuItem::DeleteWaypoint(_) => "Delete Waypoint".into(),
+            MenuItem::ExportPng => "Export Map as PNG".into(),
         }
     }
 }
@@ -109,6 +111,8 @@ pub struct Overlay<'a> {
     pub show_biome: bool,
     pub show_footsteps: bool,
     pub cave_layer: Option<i32>,
+    /// The dimension shown, when it isn't the player's.
+    pub other_dimension: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -256,6 +260,7 @@ impl WorldMap {
                 MenuItem::DeleteWaypoint(id),
             ]);
         }
+        items.push(MenuItem::ExportPng);
         self.menu = Some(Menu {
             at: p,
             items,
@@ -370,6 +375,19 @@ impl WorldMap {
                 y,
                 text,
                 argb: 0xFFFF_FFFF,
+                align: Align::Center,
+                scale: ts,
+            });
+        }
+        if let Some(dim) = &o.other_dimension {
+            let text = crate::info::title_case(dim);
+            let at = 2.0 * u + 2.0 * 9.0 * ts;
+            ops.push(plate(gui[0] / 2.0, at, &text, ts));
+            ops.push(DrawOp::Text {
+                x: gui[0] / 2.0,
+                y: at,
+                text,
+                argb: 0xFFFF_FF55,
                 align: Align::Center,
                 scale: ts,
             });

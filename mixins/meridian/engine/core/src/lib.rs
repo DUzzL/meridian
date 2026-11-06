@@ -19,6 +19,7 @@ pub mod codec;
 pub mod color;
 pub mod config;
 pub mod engine;
+pub mod export;
 pub mod geom;
 pub mod info;
 pub mod keybinds;

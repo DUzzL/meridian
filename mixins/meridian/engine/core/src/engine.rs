@@ -190,6 +190,14 @@ impl MapEngine {
         }
     }
 
+    /// The folder of the region files the map shows now (its cave layer's
+    /// when one is shown).
+    pub fn regions_dir(&self) -> Option<std::path::PathBuf> {
+        self.active
+            .as_ref()
+            .map(|a| a.paths.with_layer(self.layer).regions_dir())
+    }
+
     /// The cave layer the map shows (its ceiling Y), or `None` for the
     /// surface.
     pub fn layer(&self) -> Option<i32> {
