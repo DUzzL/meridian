@@ -22,6 +22,7 @@ pub mod geom;
 pub mod keybinds;
 pub mod minimap;
 pub mod persist;
+pub mod radar;
 pub mod region;
 pub mod screens;
 pub mod texture;

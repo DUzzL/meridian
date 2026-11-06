@@ -845,6 +845,28 @@ pub fn options() -> Vec<Opt> {
         toggle!("Entity Radar", Radar, radar.enabled),
         toggle!("Hide Invisible Entities", Radar, radar.hide_invisible),
         toggle!("Smooth Entity Dots", Radar, radar.smooth),
+        toggle!("Display Players", Radar, radar.players),
+        toggle!("Display Hostile Mobs", Radar, radar.hostile),
+        toggle!("Display Friendly Mobs", Radar, radar.friendly),
+        toggle!("Display Items", Radar, radar.items),
+        toggle!("Display Other Entities", Radar, radar.other),
+        toggle!("Height-Based Fade", Radar, radar.height_fade),
+        toggle!("Reverse Filter", Radar, radar.reversed),
+        Opt {
+            label: "Height Limit",
+            group: Radar,
+            value: |s| format!("{}", s.radar.height_limit),
+            step: |s, b| {
+                const STEPS: [u32; 6] = [5, 10, 20, 40, 80, 256];
+                s.radar.height_limit = cycle(&STEPS, s.radar.height_limit, b);
+            },
+        },
+        Opt {
+            label: "Dot Size",
+            group: Radar,
+            value: |s| format!("{}", s.radar.dot_size),
+            step: |s, b| s.radar.dot_size = cycle(&[1u8, 2, 3, 4], s.radar.dot_size, b),
+        },
         toggle!("Coordinates", Information, minimap.show_coords),
         toggle!("Biome", Information, minimap.show_biome),
         toggle!("Hide Under Screens", Misc, minimap.hide_under_screens),

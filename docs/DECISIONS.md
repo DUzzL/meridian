@@ -207,3 +207,23 @@ Wegpunkt-Editor (B), Wegpunktliste (U) und Einstellungen (Y) sind nach den Refer
 - Escape schließt wie im Spiel.
 - B öffnet jetzt den Editor (Name nötig, leere Koordinaten = Spielerposition, zufällige helle Farbe); Num + legt weiterhin sofort einen Wegpunkt an.
 - Einstellungen: Hauptseite wie die Referenz; Unterseiten mit „Name: Wert“-Knöpfen (Linksklick weiter, Rechtsklick zurück); Suche über alle Optionen. „Profile Name“, „Change Position“ und „Delete Profile“ sind noch deaktiviert.
+
+## D-022: Entity-Radar über die Bridge (E4 vorerst überbrückt)
+
+Horizons `client_entities` kennt keinen Entity-Typ. Die Bridge (Version 3) kopiert deshalb pro Frame die Entities des Clients, aber nur solange das Radar sie anfordert:
+
+- Mobs mit Typ, Klasse (Spieler über `remote_player_uuid`, feindlich über `MobType.category == "monster"`, sonst friedlich), Unsichtbarkeit und Namen,
+- abgelegte Items,
+- Positionen auf den Frame interpoliert.
+
+Rüstungsständer sind ausgeschlossen. Boote und Loren (Klasse „Sonstige“) fehlen noch.
+
+Die Darstellung folgt den Standard-Kategorien der Referenz (O2):
+
+- Lebewesen gelb (feindliche wie friedliche), Spieler weiß, Items rot, Sonstige violett,
+- Rauten mit schwarzem Rand, 2 Einheiten,
+- ±20 Blöcke Höhenlimit (Spieler 2050), Abdunklung nach Höhenunterschied,
+- Zeichenreihenfolge Items → Lebewesen → Feindliche → Spieler,
+- Filter pro Klasse, Umkehren per Taste.
+
+Symbole bzw. Köpfe statt Punkten (RAD-03) und Namen folgen.

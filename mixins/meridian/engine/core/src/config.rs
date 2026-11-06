@@ -304,18 +304,42 @@ impl Default for WaypointSettings {
 #[serde(default)]
 pub struct RadarSettings {
     pub enabled: bool,
+    /// Shows what the filters hide and hides what they show (the reverse key).
+    pub reversed: bool,
     pub hide_invisible: bool,
     pub smooth: bool,
     pub name_scale: f32,
+    pub players: bool,
+    pub hostile: bool,
+    pub friendly: bool,
+    pub items: bool,
+    pub other: bool,
+    /// Entities further than this above or below are left out (players: 2050).
+    pub height_limit: u32,
+    /// Darken dots by height difference.
+    pub height_fade: bool,
+    /// Dot size in minimap units.
+    pub dot_size: u8,
+    pub max_entities: u32,
 }
 
 impl Default for RadarSettings {
     fn default() -> Self {
         Self {
             enabled: true,
+            reversed: false,
             hide_invisible: true,
             smooth: true,
             name_scale: 1.0,
+            players: true,
+            hostile: true,
+            friendly: true,
+            items: true,
+            other: true,
+            height_limit: 20,
+            height_fade: true,
+            dot_size: 2,
+            max_entities: 1000,
         }
     }
 }

@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 /// Bumped when the shapes below change, so a trait mod can refuse a bridge
 /// it doesn't understand.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 /// Main-thread time per frame for chunk reads.
 const READ_BUDGET: Duration = Duration::from_micros(1500);
 
@@ -67,6 +67,31 @@ pub struct BlockLook {
     pub air: bool,
 }
 
+/// What an entity is, for the radar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EntityClass {
+    Player,
+    Hostile,
+    /// Other living things: animals, villagers, golems, water mobs.
+    Friendly,
+    Item,
+    /// Boats, minecarts and the like.
+    Other,
+}
+
+/// One entity near the player, interpolated to this frame.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EntitySnap {
+    pub id: u32,
+    /// `minecraft:zombie`, `minecraft:item`...
+    pub kind: String,
+    pub class: EntityClass,
+    pub pos: [f64; 3],
+    pub invisible: bool,
+    /// A player's name or a custom name.
+    pub name: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct BiomeLook {
     pub grass: u32,
@@ -92,6 +117,9 @@ struct Shared {
     window: Option<[u32; 2]>,
     /// The prepared game resources (`assets/minecraft/textures/...`).
     resources: Option<std::path::PathBuf>,
+    /// Entities are copied each frame only while someone wants them.
+    want_entities: bool,
+    entities: Vec<EntitySnap>,
 }
 
 static SHARED: Mutex<Option<Shared>> = Mutex::new(None);
@@ -144,6 +172,21 @@ pub fn player_biome() -> Option<String> {
     with(|s| s.player_biome.clone())
 }
 
+/// Asks for (or stops) the per-frame entity copy.
+pub fn want_entities(on: bool) {
+    with(|s| {
+        s.want_entities = on;
+        if !on {
+            s.entities.clear();
+        }
+    });
+}
+
+/// The entities of the last frame (empty unless asked for).
+pub fn entities() -> Vec<EntitySnap> {
+    with(|s| s.entities.clone())
+}
+
 /// The window's size in physical pixels.
 pub fn window_size() -> Option<[u32; 2]> {
     with(|s| s.window)
@@ -182,6 +225,9 @@ pub(super) fn frame(game: &mut super::Game<'_>) {
     }
     answer_requests(game, s);
     s.window = game.native_physical_window_size();
+    if s.want_entities {
+        s.entities = snapshot_entities(game);
+    }
     if s.resources.is_none() {
         s.resources = Some(game.options.resources.clone());
     }
@@ -357,4 +403,55 @@ fn read_chunk(
         }
     }
     Snapshot { dimension: dimension.to_owned(), pos, blocks, biomes, columns }
+}
+
+fn snapshot_entities(game: &super::Game<'_>) -> Vec<EntitySnap> {
+    let t = game.clock.fraction();
+    let lerp = |a: f64, b: f64| a + (b - a) * t;
+    let mut out = Vec::new();
+    for m in game.mobs.iter() {
+        if m.removed || !m.alive() || m.kind.id.ends_with("armor_stand") {
+            continue;
+        }
+        let player = game.remote_player_uuid(m.id).is_some();
+        let class = if player {
+            EntityClass::Player
+        } else if m.hostile() {
+            EntityClass::Hostile
+        } else {
+            EntityClass::Friendly
+        };
+        let name = if player {
+            game.remote_player_name(m.id).map(str::to_owned)
+        } else {
+            m.custom_name.clone()
+        };
+        out.push(EntitySnap {
+            id: m.id,
+            kind: m.kind.id.clone(),
+            class,
+            pos: [
+                lerp(m.previous.x, m.position.x),
+                lerp(m.previous.y, m.position.y),
+                lerp(m.previous.z, m.position.z),
+            ],
+            invisible: m.invisible || m.has_effect("minecraft:invisibility"),
+            name,
+        });
+    }
+    for item in game.dropped.iter() {
+        out.push(EntitySnap {
+            id: item.id,
+            kind: "minecraft:item".to_owned(),
+            class: EntityClass::Item,
+            pos: [
+                lerp(item.previous.x, item.position.x),
+                lerp(item.previous.y, item.position.y),
+                lerp(item.previous.z, item.position.z),
+            ],
+            invisible: false,
+            name: None,
+        });
+    }
+    out
 }

@@ -29,6 +29,7 @@ use meridian_core::keybinds::{KEY_BINDINGS, bindings_for_key};
 use meridian_core::minimap::{self, Align, Controls, DrawOp};
 use meridian_core::screens::{Action, Editor, Env, List, Screen, SettingsScreen};
 use meridian_core::persist::MapPaths;
+use meridian_core::radar;
 use meridian_core::waypoint::{self, Kind, Waypoint, WaypointBook};
 use meridian_host::{
     BiomeAppearance, BlockAppearance, ChunkPos, ChunkSnapshot, ColumnSample, DimensionId,
@@ -40,7 +41,7 @@ use parking_lot::Mutex;
 pub const MOD_ID: &str = "meridian";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The bridge shape this adapter was written for.
-const BRIDGE_VERSION: u32 = 2;
+const BRIDGE_VERSION: u32 = 3;
 
 /// The singleplayer world's folder name, set by the integrated server's
 /// thread (the window's client only knows the world's display name).
@@ -521,6 +522,16 @@ impl Meridian {
                         "waypoint.all_sets" => {
                             let w = &mut s.config.current_mut().waypoints;
                             w.all_sets = !w.all_sets;
+                            changed = true;
+                        }
+                        "radar.toggle" => {
+                            let r = &mut s.config.current_mut().radar;
+                            r.enabled = !r.enabled;
+                            changed = true;
+                        }
+                        "radar.reverse" => {
+                            let r = &mut s.config.current_mut().radar;
+                            r.reversed = !r.reversed;
                             changed = true;
                         }
                         "waypoint.toggle_world" => {
@@ -1075,6 +1086,26 @@ fn minimap_ops(s: &mut State, player: &PlayerState, gui: [f32; 2], gui_scale: f3
             image: image.clone(),
             at: Instant::now(),
         }));
+    }
+    let radar = &s.config.current().radar;
+    bridge::want_entities(radar.enabled);
+    if radar.enabled {
+        let entities: Vec<radar::Entity> = bridge::entities()
+            .into_iter()
+            .map(|e| radar::Entity {
+                id: e.id,
+                class: match e.class {
+                    bridge::EntityClass::Player => radar::Class::Player,
+                    bridge::EntityClass::Hostile => radar::Class::Hostile,
+                    bridge::EntityClass::Friendly => radar::Class::Friendly,
+                    bridge::EntityClass::Item => radar::Class::Item,
+                    bridge::EntityClass::Other => radar::Class::Other,
+                },
+                pos: e.pos,
+                invisible: e.invisible,
+            })
+            .collect();
+        ops.extend(radar::dots(&layout, player.position, player.yaw, &entities, radar));
     }
     let wp = &s.config.current().waypoints;
     if wp.on_minimap

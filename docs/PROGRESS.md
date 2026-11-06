@@ -187,3 +187,19 @@
 - Höhlenmodus, weitere Infoanzeigen (Licht, Zeit, Winkel, Dimension, Wetter), Chunkgitter, Schleimchunks, Licht-Overlay.
 - Profile (Namen, Löschen), Positionseditor, Seite 2 der Einstellungen.
 - Welt- und Dimensionsauswahl in Editor und Liste zeigen nur „(auto)“: Unterwelten folgen mit CTX-02.
+
+### Phase 3, Zwischenstand 4: Entity-Radar
+
+**Fertig und im Spiel verglichen**
+
+- Radar auf der Minimap wie die Referenz (D-022): Rauten nach Klasse, Abdunklung nach Höhe, Höhenlimit, Reihenfolge, Clipping am Kartenrand.
+- Einstellungen „Entity Radar Settings“: an/aus, Unsichtbare, Spieler, Feindliche, Friedliche, Items, Sonstige, Abdunklung, Umkehren, Höhenlimit, Punktgröße.
+- Tasten zum Ein-/Ausschalten und Umkehren (standardmäßig ungebunden, wie in der Referenz).
+
+**Build und Tests**: 97 Tests grün (95 Kern, 2 Host); Clippy sauber; Launcher-Build `native-66f3981-fe154f329614`.
+
+**Offen**
+
+- Boote, Loren und Projektile als „Sonstige“.
+- Symbole und Köpfe statt Rauten, Namen.
+- Die orangen Pfeile am Kartenrand der Referenz (vermutlich verfolgte Entities außerhalb der Karte) sind noch nicht geklärt.
