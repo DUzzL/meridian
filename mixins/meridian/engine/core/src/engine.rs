@@ -68,6 +68,14 @@ pub struct Sampler<'a> {
 }
 
 impl Sampler<'_> {
+    /// The map's data of block column (`x`, `z`), if explored.
+    pub fn column(&self, x: i32, z: i32) -> Option<crate::tile::TileColumn> {
+        let region = self.regions.get(&RegionPos::of_block(x, z))?;
+        let tile = region.tile(ChunkPos::containing(x, z))?;
+        let col = *tile.column(x.rem_euclid(16) as usize, z.rem_euclid(16) as usize);
+        (!col.empty).then_some(col)
+    }
+
     /// The ARGB pixel of block column (`x`, `z`).
     pub fn pixel(&self, x: i32, z: i32) -> u32 {
         let pos = RegionPos::of_block(x, z);

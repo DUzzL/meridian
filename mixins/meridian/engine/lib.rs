@@ -17,7 +17,7 @@ use horizon_client::mod_api::{
     ClientChatReceivedEvent, ClientDisconnectingEvent, ClientLevelLoadEvent,
     ClientLevelUnloadEvent, ClientResourcesReloadedEvent, ClientStoppingEvent, CommandEvent,
     CommandsEvent, Flow, FrameEvent, Hooks, Host, HudBatch, HudEvent, KeyEvent, ModsEvent,
-    NativeMod, PlayerDiedEvent, RenderHooks, ScreenCharTypedPreEvent, ScreenClosingEvent,
+    NativeMod, RenderHooks, ScreenCharTypedPreEvent, ScreenClosingEvent,
     ScreenKeyPressedPreEvent, ScreenMouseButtonPressedPreEvent, ScreenMouseScrolledPreEvent,
     MenuBackgroundEvent, ScreenRenderPostEvent, Text, TintSource, WorldLifecycleEvent, WorldPhase, WorldPrimitivesEvent,
 };
@@ -146,6 +146,8 @@ struct State {
     open_screen: Option<Screen>,
     /// What screen hooks (which only read the game) leave for `frame`.
     pending: Vec<Pending>,
+    /// The current death has its deathpoint (until the player plays again).
+    death_recorded: bool,
     /// Cave mode: automatic under a roof, or manual.
     cave: meridian_core::cave::CaveControl,
 }
@@ -164,6 +166,7 @@ struct MapImageKey {
     origin: [i32; 2],
     size: u32,
     revisions: u64,
+    overlay: Option<[u8; 2]>,
 }
 
 struct Meridian {
@@ -409,6 +412,7 @@ impl Meridian {
                 open_screen: None,
                 pending: Vec::new(),
                 cave: Default::default(),
+                death_recorded: false,
             }
         });
         f(state)
@@ -459,22 +463,6 @@ fn paint(host: &dyn Host, batch: &mut HudBatch, ops: &[DrawOp]) {
     }
 }
 
-/// `minecraft:plains` as "Plains".
-fn biome_label(id: &str) -> String {
-    let name = id.rsplit(':').next().unwrap_or(id);
-    let mut out = String::with_capacity(name.len());
-    for (i, word) in name.split('_').enumerate() {
-        if i > 0 {
-            out.push(' ');
-        }
-        let mut chars = word.chars();
-        if let Some(first) = chars.next() {
-            out.extend(first.to_uppercase());
-            out.push_str(chars.as_str());
-        }
-    }
-    out
-}
 
 impl Meridian {
     /// A key of ours went down or up; returns feedback for the action bar.
@@ -666,6 +654,9 @@ impl Hooks for Meridian {
         if event.screen.id == "mod" {
             self.draw_screen(host, event.batch);
         }
+        if event.screen.id == "dead" {
+            self.record_death(host);
+        }
     }
 
     fn screen_mouse_button_pressed_pre(&self, host: &dyn Host, event: &mut ScreenMouseButtonPressedPreEvent<'_>) -> Flow {
@@ -820,36 +811,6 @@ impl Hooks for Meridian {
             }
             _ => {}
         }
-    }
-
-    fn player_died(&self, host: &mut dyn Host, _event: &mut PlayerDiedEvent<'_>) {
-        // Server-side hook: in singleplayer it is the local player's death.
-        let host: &dyn Host = host;
-        if SERVER_WORLD.lock().is_none() {
-            return;
-        }
-        self.with_state(host, |s| {
-            let settings = s.config.current().waypoints.clone();
-            if !settings.deathpoints {
-                return;
-            }
-            let Some(p) = (HorizonHost {
-                host,
-                dimension: s.dimension.as_deref(),
-            })
-            .player() else {
-                return;
-            };
-            let pos = [
-                p.position[0].floor() as i32,
-                p.position[1].floor() as i32,
-                p.position[2].floor() as i32,
-            ];
-            if let Some((book, dim)) = s.book_here() {
-                book.record_death(&dim, pos, settings.keep_old_deathpoints, waypoint::now());
-            }
-            s.save_book();
-        });
     }
 
     fn client_level_load(&self, host: &mut dyn Host, event: &mut ClientLevelLoadEvent<'_>) {
@@ -1016,13 +977,17 @@ impl Hooks for Meridian {
         let gui = client.gui_size;
         let gui_scale = bridge::window_size().map_or(2.0, |w| w[1] as f32 / gui[1].max(1.0));
         self.with_state(host, |s| {
+            if host.playing() {
+                // Alive again: the next death gets its own deathpoint.
+                s.death_recorded = false;
+            }
             let map_host = HorizonHost { host, dimension: s.dimension.as_deref() };
             let Some(player) = map_host.player() else { return };
             let mut ops = Vec::new();
             world_waypoints(host, s, gui, gui_scale, &mut ops);
             let settings = &s.config.current().minimap;
             if settings.enabled && !(settings.hide_under_screens && !host.playing()) {
-                minimap_ops(s, &player, gui, gui_scale, &mut ops);
+                minimap_ops(host, s, &player, gui, gui_scale, &mut ops);
             } else {
                 gpu::set_frame(None);
             }
@@ -1073,18 +1038,36 @@ fn world_waypoints(host: &dyn Host, s: &State, gui: [f32; 2], gui_scale: f32, op
 
 /// The minimap: terrain, frame, waypoints, compass, the player's mark and
 /// the info lines.
-fn minimap_ops(s: &mut State, player: &PlayerState, gui: [f32; 2], gui_scale: f32, ops: &mut Vec<DrawOp>) {
+fn minimap_ops(
+    host: &dyn Host,
+    s: &mut State,
+    player: &PlayerState,
+    gui: [f32; 2],
+    gui_scale: f32,
+    ops: &mut Vec<DrawOp>,
+) {
     let settings = &s.config.current().minimap;
     let [px, py, pz] = player.position;
-    let mut lines = Vec::new();
-    if settings.show_coords {
-        lines.push((format!("{}, {}, {}", px.floor(), py.floor(), pz.floor()), 0xFFFF_FFFF));
-    }
-    if settings.show_biome
-        && let Some(biome) = bridge::player_biome()
-    {
-        lines.push((biome_label(&biome), 0xFFFF_FFFF));
-    }
+    let feet = [px.floor() as i32, py.floor() as i32, pz.floor() as i32];
+    let now = {
+        use chrono::Timelike;
+        let t = chrono::Local::now();
+        (t.hour(), t.minute())
+    };
+    let input = meridian_core::info::InfoInput {
+        pos: player.position,
+        yaw: player.yaw,
+        pitch: player.pitch,
+        dimension: player.dimension.as_str().to_owned(),
+        biome: if settings.show_biome { bridge::player_biome() } else { None },
+        weather: if settings.info.weather { host.weather() } else { (0.0, 0.0) },
+        light: if settings.info.light != meridian_core::config::LightInfo::Off { host.light(feet) } else { (0, 0) },
+        day_time: host.clock().map(|c| c.day_time),
+        real_time: Some(now),
+        manual_cave: s.cave.manual(),
+    };
+    let lines: Vec<(String, u32)> =
+        meridian_core::info::lines(settings, &input).into_iter().map(|l| (l, 0xFFFF_FFFF)).collect();
     let layout = minimap::layout(settings, gui, gui_scale, s.controls.enlarged(), lines.len());
     compose_map(s, &layout, player);
     let settings = &s.config.current().minimap;
@@ -1103,6 +1086,8 @@ fn minimap_ops(s: &mut State, player: &PlayerState, gui: [f32; 2], gui_scale: f3
             backdrop: [0.06, 0.06, 0.06, undiscovered],
             image: image.clone(),
             at: Instant::now(),
+            grid: settings.chunk_grid.then_some(layout.blocks_per_pixel / gui_scale.max(0.25)),
+            origin: key.origin,
         }));
     }
     let radar = &s.config.current().radar;
@@ -1165,7 +1150,9 @@ fn compose_map(s: &mut State, layout: &minimap::Layout, player: &PlayerState) {
             }
         }
     }
-    let key = MapImageKey { origin, size, revisions };
+    let minimap = &s.config.current().minimap;
+    let overlay = minimap.light_overlay.then_some(minimap.light_overlay_range);
+    let key = MapImageKey { origin, size, revisions, overlay };
     if s.map_image.as_ref().is_some_and(|(k, _)| *k == key) {
         return;
     }
@@ -1173,7 +1160,18 @@ fn compose_map(s: &mut State, layout: &minimap::Layout, player: &PlayerState) {
     let mut pixels = Vec::with_capacity((size * size) as usize);
     for z in 0..size as i32 {
         for x in 0..size as i32 {
-            pixels.push(sampler.pixel(origin[0] + x, origin[1] + z));
+            let (bx, bz) = (origin[0] + x, origin[1] + z);
+            let mut p = sampler.pixel(bx, bz);
+            if let Some([lo, hi]) = overlay
+                && p >> 24 != 0
+                && let Some(col) = sampler.column(bx, bz)
+                && col.water_depth == 0
+                && (lo..=hi).contains(&col.block_light())
+            {
+                // Spawnable ground: tinted light purple, as the reference's overlay.
+                p = 0xFF00_0000 | meridian_core::color::blend(p & 0x00FF_FFFF, 0xFF55FF, 0.45);
+            }
+            pixels.push(p);
         }
     }
     let revision = s.map_image.as_ref().map_or(0, |(_, i)| i.revision + 1);
@@ -1289,5 +1287,25 @@ impl Meridian {
             (ops, Action::None)
         });
         paint(host, batch, &ops);
+    }
+}
+
+impl Meridian {
+    /// The death screen is up: one deathpoint where the player fell, in
+    /// singleplayer and on servers alike.
+    fn record_death(&self, host: &dyn Host) {
+        let pos = HorizonHost { host, dimension: None }.player().map(|p| p.position.map(|v| v.floor() as i32));
+        self.with_state(host, |s| {
+            if s.death_recorded {
+                return;
+            }
+            s.death_recorded = true;
+            let settings = s.config.current().waypoints.clone();
+            let (Some(pos), true) = (pos, settings.deathpoints) else { return };
+            if let Some((book, dim)) = s.book_here() {
+                book.record_death(&dim, pos, settings.keep_old_deathpoints, waypoint::now());
+            }
+            s.save_book();
+        });
     }
 }

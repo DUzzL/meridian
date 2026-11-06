@@ -203,3 +203,20 @@
 - Boote, Loren und Projektile als „Sonstige“.
 - Symbole und Köpfe statt Rauten, Namen.
 - Die orangen Pfeile am Kartenrand der Referenz (vermutlich verfolgte Entities außerhalb der Karte) sind noch nicht geklärt.
+
+### Phase 3, Abschluss
+
+**Fertig und im Spiel geprüft**
+
+- Höhlenmodus: automatisch unter festem Dach (1×1/3×3/5×5, Prüfung in der Bridge), manuell per Taste, Umschaltverzögerung; Höhlen-Layer in 16er-Schritten mit eigenen Dateien (`caves/<y>/`); lesbare Höhlenschattierung (Blocklicht hellt auf).
+- Infozeilen: Koordinaten, Overworld-Koordinaten (Nether), Chunk, Winkel, Dimension, Biom, Wetter, Licht, Spielzeit, Echtzeit (12/24 h), Hinweis auf manuellen Höhlenmodus. Standard wie in der Referenz: nur Koordinaten.
+- Chunkgitter (im Shader, dreht mit, 1 physischer Pixel breit), Licht-Overlay (Blocklicht im einstellbaren Bereich, hellviolett).
+- Todespunkte im Singleplayer und Multiplayer über den Todesbildschirm (`dead`).
+
+**Build und Tests**: 106 Tests grün (104 Kern, 2 Host); Clippy sauber; Adapter-Check grün.
+
+**Offen aus Phase 3 (in Phase 6 nachziehen)**
+
+- Schleimchunks (braucht den Seed: kommt mit Seed Atlas, Phase 5).
+- Radar: Boote, Loren, Projektile; Symbole/Köpfe statt Rauten.
+- Profile (Namen, Löschen), Positionseditor.

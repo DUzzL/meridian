@@ -16,3 +16,4 @@ meridian-core = { path = "core" }
 meridian-host = { path = "host" }
 log = "=0.4.34"
 parking_lot = "=0.12.5"
+chrono = { version = "=0.4.45", default-features = false, features = ["clock", "std"] }

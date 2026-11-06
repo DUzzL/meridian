@@ -43,6 +43,10 @@ pub struct MapFrame {
     /// When the HUD asked for it: a frame the HUD stopped refreshing (F1, a
     /// screen) stops drawing.
     pub at: std::time::Instant,
+    /// The chunk grid, with its line width in blocks.
+    pub grid: Option<f32>,
+    /// The block at the image's texel (0, 0), for the grid's phase.
+    pub origin: [i32; 2],
 }
 
 static FRAME: Mutex<Option<MapFrame>> = Mutex::new(None);
@@ -63,6 +67,8 @@ struct Params {
     backdrop: vec4<f32>,
     // x: texture size, y: round, z: opacity
     misc: vec4<f32>,
+    // x: grid on, y: line width in blocks, zw: origin modulo 16
+    grid: vec4<f32>,
 }
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var map: texture_2d<f32>;
@@ -99,6 +105,13 @@ fn fs(in: Out) -> @location(0) vec4<f32> {
         let t = textureLoad(map, texel, 0);
         if (t.a > 0.0) {
             color = vec4(t.rgb, 1.0);
+        }
+    }
+    if (p.grid.x > 0.5) {
+        let f = fract((world + p.grid.zw) / 16.0) * 16.0;
+        let d = min(f, vec2(16.0) - f);
+        if (min(d.x, d.y) < p.grid.y) {
+            color = vec4(mix(color.rgb, vec3(0.1, 0.1, 0.1), 0.45), max(color.a, 0.6));
         }
     }
     return vec4(color.rgb, color.a * p.misc.z);
@@ -193,7 +206,7 @@ impl Gpu {
         });
         let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("meridian minimap"),
-            size: 64,
+            size: 80,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -277,7 +290,7 @@ impl RenderHooks for MapRenderer {
         }
         let gpu = guard.as_mut().expect("made above");
         gpu.upload(world.device, world.queue, &frame.image);
-        let params: [f32; 16] = [
+        let params: [f32; 20] = [
             frame.right[0],
             frame.right[1],
             frame.forward[0],
@@ -294,6 +307,10 @@ impl RenderHooks for MapRenderer {
             if frame.round { 1.0 } else { 0.0 },
             frame.opacity,
             0.0,
+            if frame.grid.is_some() { 1.0 } else { 0.0 },
+            frame.grid.unwrap_or(0.0),
+            frame.origin[0].rem_euclid(16) as f32,
+            frame.origin[1].rem_euclid(16) as f32,
         ];
         let bytes: Vec<u8> = params.iter().flat_map(|v| v.to_le_bytes()).collect();
         world.queue.write_buffer(&gpu.uniforms, 0, &bytes);

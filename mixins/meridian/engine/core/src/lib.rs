@@ -20,6 +20,7 @@ pub mod color;
 pub mod config;
 pub mod engine;
 pub mod geom;
+pub mod info;
 pub mod keybinds;
 pub mod minimap;
 pub mod persist;

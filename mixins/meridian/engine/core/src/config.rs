@@ -146,6 +146,40 @@ impl Default for CaveSettings {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LightInfo {
+    #[default]
+    Off,
+    Block,
+    Sky,
+    Both,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClockInfo {
+    #[default]
+    Off,
+    H24,
+    H12,
+}
+
+/// The info lines beyond coordinates and biome, off by default like the
+/// reference's (O2 `info_display_config`).
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct InfoSettings {
+    pub overworld_coords: bool,
+    pub chunk_coords: bool,
+    pub angles: bool,
+    pub dimension: bool,
+    pub weather: bool,
+    pub light: LightInfo,
+    pub game_time: ClockInfo,
+    pub real_time: ClockInfo,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MinimapSettings {
@@ -173,9 +207,13 @@ pub struct MinimapSettings {
     pub share_world_map_tiles: bool,
     pub chunk_grid: bool,
     pub slime_chunks: bool,
+    /// Mark ground whose block light is within `light_overlay_range`.
+    pub light_overlay: bool,
+    pub light_overlay_range: [u8; 2],
     /// Info lines under the map.
     pub show_coords: bool,
     pub show_biome: bool,
+    pub info: InfoSettings,
     pub terrain: TerrainStyle,
     pub cave: CaveSettings,
 }
@@ -203,8 +241,11 @@ impl Default for MinimapSettings {
             share_world_map_tiles: true,
             chunk_grid: false,
             slime_chunks: false,
+            light_overlay: false,
+            light_overlay_range: [0, 7],
             show_coords: true,
             show_biome: false,
+            info: InfoSettings::default(),
             terrain: TerrainStyle::default(),
             cave: CaveSettings::default(),
         }

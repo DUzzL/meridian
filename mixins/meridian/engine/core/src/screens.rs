@@ -6,7 +6,9 @@
 //! keys, and answers an [`Action`] for what only the host can do (close
 //! the screen, run a command, open another screen).
 
-use crate::config::{BlockColors, Corner, MinimapShape, MinimapSize, Settings, Slopes};
+use crate::config::{
+    BlockColors, ClockInfo, Corner, LightInfo, MinimapShape, MinimapSize, Settings, Slopes,
+};
 use crate::minimap::Align;
 use crate::ui::{self, Widget};
 use crate::waypoint::{self, COLORS, DimensionWaypoints, Kind, Waypoint};
@@ -738,6 +740,14 @@ impl std::fmt::Debug for Opt {
     }
 }
 
+fn clock_label(c: ClockInfo) -> String {
+    match c {
+        ClockInfo::Off => "OFF".into(),
+        ClockInfo::H24 => "24h".into(),
+        ClockInfo::H12 => "12h".into(),
+    }
+}
+
 fn on_off(b: bool) -> String {
     if b { "ON".into() } else { "OFF".into() }
 }
@@ -869,6 +879,48 @@ pub fn options() -> Vec<Opt> {
         },
         toggle!("Coordinates", Information, minimap.show_coords),
         toggle!("Biome", Information, minimap.show_biome),
+        toggle!(
+            "Overworld Coordinates",
+            Information,
+            minimap.info.overworld_coords
+        ),
+        toggle!("Chunk Coordinates", Information, minimap.info.chunk_coords),
+        toggle!("Angles", Information, minimap.info.angles),
+        toggle!("Dimension", Information, minimap.info.dimension),
+        toggle!("Weather", Information, minimap.info.weather),
+        Opt {
+            label: "Light Level",
+            group: Information,
+            value: |s| format!("{:?}", s.minimap.info.light),
+            step: |s, b| {
+                use LightInfo::*;
+                s.minimap.info.light = cycle(&[Off, Block, Sky, Both], s.minimap.info.light, b)
+            },
+        },
+        Opt {
+            label: "Game Time",
+            group: Information,
+            value: |s| clock_label(s.minimap.info.game_time),
+            step: |s, b| {
+                s.minimap.info.game_time = cycle(
+                    &[ClockInfo::Off, ClockInfo::H24, ClockInfo::H12],
+                    s.minimap.info.game_time,
+                    b,
+                )
+            },
+        },
+        Opt {
+            label: "Real Time",
+            group: Information,
+            value: |s| clock_label(s.minimap.info.real_time),
+            step: |s, b| {
+                s.minimap.info.real_time = cycle(
+                    &[ClockInfo::Off, ClockInfo::H24, ClockInfo::H12],
+                    s.minimap.info.real_time,
+                    b,
+                )
+            },
+        },
         toggle!("Hide Under Screens", Misc, minimap.hide_under_screens),
         toggle!("Hide Under F3", Misc, minimap.hide_under_debug),
         toggle!("Further Zoom Out", Misc, minimap.further_zoom_out),
@@ -916,6 +968,16 @@ pub fn options() -> Vec<Opt> {
         ),
         toggle!("Chunk Grid", Overlay, minimap.chunk_grid),
         toggle!("Slime Chunks", Overlay, minimap.slime_chunks),
+        toggle!("Light Overlay", Overlay, minimap.light_overlay),
+        Opt {
+            label: "Light Overlay Max",
+            group: Overlay,
+            value: |s| format!("{}", s.minimap.light_overlay_range[1]),
+            step: |s, b| {
+                let v = s.minimap.light_overlay_range[1] as i32 + if b { -1 } else { 1 };
+                s.minimap.light_overlay_range[1] = v.rem_euclid(16) as u8;
+            },
+        },
         toggle!("Waypoints In World", Waypoints, waypoints.in_world),
         toggle!("Waypoints On Minimap", Waypoints, waypoints.on_minimap),
         toggle!("Display All Sets", Waypoints, waypoints.all_sets),
