@@ -12,6 +12,10 @@ pub mod atlas;
 pub mod biome_noise;
 mod biome_table;
 pub mod biomes;
+mod btree18;
+mod btree19;
+mod btree192;
+mod btree20;
 mod btree21wd;
 pub mod endcity;
 pub mod finders;
@@ -20,6 +24,7 @@ pub mod mc;
 pub mod noise;
 pub mod rng;
 pub mod structures;
+pub mod surface;
 pub mod viability;
 
 pub use atlas::{Atlas, AtlasError};

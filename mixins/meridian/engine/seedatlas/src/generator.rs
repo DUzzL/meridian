@@ -52,9 +52,11 @@ impl Generator {
     /// `setupGenerator` + `applySeed` for version `mc`.
     pub fn versioned(seed: u64, dimension: Dimension, mc: i32, large_biomes: bool) -> Self {
         let noise = match dimension {
-            Dimension::Overworld => Noise::Overworld(Box::new(BiomeNoise::new(seed, large_biomes))),
+            Dimension::Overworld => {
+                Noise::Overworld(Box::new(BiomeNoise::new(seed, large_biomes, mc)))
+            }
             Dimension::Nether => Noise::Nether(NetherNoise::new(seed)),
-            Dimension::End => Noise::End(EndNoise::new(seed)),
+            Dimension::End => Noise::End(EndNoise::new(seed, mc)),
         };
         Self {
             mc,

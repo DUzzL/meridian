@@ -1,9 +1,9 @@
 //! Biome generation of the overworld (1.18+ climate noise), the Nether and
 //! the End, ported from the engine's `biomenoise.c` and the Voronoi parts of
-//! `layers.c`, for Minecraft 26.3 only.
+//! `layers.c`, for every version with climate noise (1.18+).
 
 use crate::biomes::*;
-use crate::btree21wd as bt;
+use crate::mc::*;
 use crate::noise::{DoublePerlin, Perlin};
 use crate::rng::{JavaRandom, Xoroshiro, lerp, mc_step_seed};
 
@@ -235,6 +235,8 @@ impl Splines {
 
 #[derive(Clone, Debug)]
 pub struct BiomeNoise {
+    /// The Minecraft version (`BiomeNoise.mc`), which picks the R-tree.
+    pub mc: i32,
     pub climate: [DoublePerlin; 6],
     splines: Splines,
     root: usize,
@@ -298,7 +300,8 @@ fn init_climate(xlo: u64, xhi: u64, large: bool, np: usize) -> DoublePerlin {
 }
 
 impl BiomeNoise {
-    pub fn new(seed: u64, large: bool) -> Self {
+    /// `initBiomeNoise(mc)` + `setBiomeSeed(seed, large)`.
+    pub fn new(seed: u64, large: bool, mc: i32) -> Self {
         let mut pxr = Xoroshiro::new(seed);
         let xlo = pxr.next_long();
         let xhi = pxr.next_long();
@@ -325,6 +328,7 @@ impl BiomeNoise {
         ss.add(sp, 0.25, sp3, 0.0);
         ss.add(sp, 1.00, sp4, 0.0);
         Self {
+            mc,
             climate,
             splines: ss,
             root: sp,
@@ -394,7 +398,7 @@ impl BiomeNoise {
             (10000.0f32 * w) as i64,
         ];
         let id = if flags & SAMPLE_NO_BIOME == 0 {
-            climate_to_biome(&np, dat)
+            climate_to_biome(self.mc, &np, dat)
         } else {
             crate::biomes::NONE
         };
@@ -404,13 +408,38 @@ impl BiomeNoise {
 
 // -------------------------------------------------------- biome R-tree --
 
-fn np_dist(np: &[i64; 6], idx: usize) -> u64 {
-    let node = bt::NODES[idx];
+/// One biome parameter R-tree (`BiomeTree`).
+struct Tree {
+    order: u32,
+    steps: &'static [u32],
+    param: &'static [[i32; 2]],
+    nodes: &'static [u64],
+}
+
+macro_rules! tree {
+    ($m:ident) => {
+        Tree {
+            order: crate::$m::ORDER,
+            steps: &crate::$m::STEPS,
+            param: &crate::$m::PARAM,
+            nodes: &crate::$m::NODES,
+        }
+    };
+}
+
+static BTREE18: Tree = tree!(btree18);
+static BTREE192: Tree = tree!(btree192);
+static BTREE19: Tree = tree!(btree19);
+static BTREE20: Tree = tree!(btree20);
+static BTREE21WD: Tree = tree!(btree21wd);
+
+fn np_dist(bt: &Tree, np: &[i64; 6], idx: usize) -> u64 {
+    let node = bt.nodes[idx];
     let mut ds = 0u64;
     for (i, &p) in np.iter().enumerate() {
         let k = ((node >> (8 * i)) & 0xFF) as usize;
-        let a = (p as u64).wrapping_sub(bt::PARAM[k][1] as i64 as u64);
-        let b = (bt::PARAM[k][0] as i64 as u64).wrapping_sub(p as u64);
+        let a = (p as u64).wrapping_sub(bt.param[k][1] as i64 as u64);
+        let b = (bt.param[k][0] as i64 as u64).wrapping_sub(p as u64);
         let d = if (a as i64) > 0 {
             a
         } else if (b as i64) > 0 {
@@ -423,30 +452,37 @@ fn np_dist(np: &[i64; 6], idx: usize) -> u64 {
     ds
 }
 
-fn resulting_node(np: &[i64; 6], idx: usize, alt: usize, mut ds: u64, mut depth: usize) -> usize {
-    if bt::STEPS[depth] == 0 {
+fn resulting_node(
+    bt: &Tree,
+    np: &[i64; 6],
+    idx: usize,
+    alt: usize,
+    mut ds: u64,
+    mut depth: usize,
+) -> usize {
+    if bt.steps[depth] == 0 {
         return idx;
     }
-    let len = bt::NODES.len();
+    let len = bt.nodes.len();
     let mut step;
     loop {
-        step = bt::STEPS[depth] as usize;
+        step = bt.steps[depth] as usize;
         depth += 1;
         if idx + step < len {
             break;
         }
     }
-    let node = bt::NODES[idx];
+    let node = bt.nodes[idx];
     let mut inner = (node >> 48) as u16 as usize;
     let mut leaf = alt;
-    for _ in 0..bt::ORDER {
-        let ds_inner = np_dist(np, inner);
+    for _ in 0..bt.order {
+        let ds_inner = np_dist(bt, np, inner);
         if ds_inner < ds {
-            let leaf2 = resulting_node(np, inner, leaf, ds, depth);
+            let leaf2 = resulting_node(bt, np, inner, leaf, ds, depth);
             let ds_leaf2 = if inner == leaf2 {
                 ds_inner
             } else {
-                np_dist(np, leaf2)
+                np_dist(bt, np, leaf2)
             };
             if ds_leaf2 < ds {
                 ds = ds_leaf2;
@@ -461,12 +497,13 @@ fn resulting_node(np: &[i64; 6], idx: usize, alt: usize, mut ds: u64, mut depth:
     leaf
 }
 
-fn ranges(idx: usize) -> [[i32; 2]; 6] {
-    let node = bt::NODES[idx];
-    std::array::from_fn(|i| bt::PARAM[((node >> (8 * i)) & 0xFF) as usize])
+fn ranges(bt: &Tree, idx: usize) -> [[i32; 2]; 6] {
+    let node = bt.nodes[idx];
+    std::array::from_fn(|i| bt.param[((node >> (8 * i)) & 0xFF) as usize])
 }
 
-fn is_pale_garden_point(idx: usize) -> bool {
+/// `is_21_5_pale_garden_point`.
+fn is_pale_garden_point(bt: &Tree, idx: usize) -> bool {
     const CHANGED: [[i32; 5]; 10] = [
         [3000, -7799, -3750, -10000, -9333],
         [3000, -3750, -2225, -10000, -9333],
@@ -479,7 +516,7 @@ fn is_pale_garden_point(idx: usize) -> bool {
         [3000, -7799, -3750, -4000, -2666],
         [3000, -3750, -2225, -4000, -2666],
     ];
-    let r = ranges(idx);
+    let r = ranges(bt, idx);
     if r[0] != [-1500, 2000]
         || r[1] != [3000, 10000]
         || r[2][1] != 10000
@@ -492,53 +529,68 @@ fn is_pale_garden_point(idx: usize) -> bool {
         .any(|c| r[2][0] == c[0] && r[3] == [c[1], c[2]] && r[5] == [c[3], c[4]])
 }
 
-fn is_dappled_forest_point(idx: usize) -> bool {
-    let r = ranges(idx);
+/// `is_26_3_dappled_forest_point`.
+fn is_dappled_forest_point(bt: &Tree, idx: usize) -> bool {
+    let r = ranges(bt, idx);
     r[0] == [-4500, -1500] && r[1] == [-10000, -3500] && r[5][0] >= -500
 }
 
-/// The biome nearest to a climate point (`climateToBiome` for 26.3).
-pub fn climate_to_biome(np: &[i64; 6], dat: Option<&mut u64>) -> i32 {
+/// The biome nearest to a climate point (`climateToBiome`); `dat` carries
+/// the last tree leaf between calls when given.
+pub fn climate_to_biome(mc: i32, np: &[i64; 6], dat: Option<&mut u64>) -> i32 {
+    let bt = if mc >= MC_1_21_4 {
+        &BTREE21WD
+    } else if mc >= MC_1_20_6 {
+        &BTREE20
+    } else if mc >= MC_1_19_4 {
+        &BTREE19
+    } else if mc >= MC_1_19_2 {
+        &BTREE192
+    } else {
+        &BTREE18
+    };
     let idx = match dat {
         Some(dat) => {
             let alt = *dat as i32 as usize;
-            let ds = np_dist(np, alt);
-            let idx = resulting_node(np, 0, alt, ds, 0);
+            let ds = np_dist(bt, np, alt);
+            let idx = resulting_node(bt, np, 0, alt, ds, 0);
             *dat = idx as u64;
             idx
         }
-        None => resulting_node(np, 0, 0, u64::MAX, 0),
+        None => resulting_node(bt, np, 0, 0, u64::MAX, 0),
     };
-    let mut biome = ((bt::NODES[idx] >> 48) & 0xFF) as i32;
-    if biome == DARK_FOREST && is_pale_garden_point(idx) {
+    let mut biome = ((bt.nodes[idx] >> 48) & 0xFF) as i32;
+    if mc >= MC_1_21_5 && biome == DARK_FOREST && is_pale_garden_point(bt, idx) {
         biome = PALE_GARDEN;
     }
-    if biome == PLAINS && is_dappled_forest_point(idx) {
+    if mc >= MC_26_3 && biome == PLAINS && is_dappled_forest_point(bt, idx) {
         biome = DAPPLED_FOREST;
     }
-    const SULFUR: [[i64; 2]; 6] = [
-        [-10000, 10000],
-        [-10000, 10000],
-        [-1900, 5500],
-        [4500, 10000],
-        [2000, 9000],
-        [-11000, -8500],
-    ];
-    let mut ds = 0u64;
-    for i in 0..6 {
-        let p = np[i];
-        let d = if p > SULFUR[i][1] {
-            p - SULFUR[i][1]
-        } else if p < SULFUR[i][0] {
-            SULFUR[i][0] - p
-        } else {
-            0
-        };
-        ds = ds.wrapping_add(d.wrapping_mul(d) as u64);
-    }
-    let winner = np_dist(np, idx);
-    if ds < winner || (ds == winner && biome == DEEP_DARK) {
-        biome = SULFUR_CAVES;
+    if mc >= MC_26_2 {
+        const SULFUR: [[i64; 2]; 6] = [
+            [-10000, 10000],
+            [-10000, 10000],
+            [-1900, 5500],
+            [4500, 10000],
+            [2000, 9000],
+            [-11000, -8500],
+        ];
+        let mut ds = 0u64;
+        for i in 0..6 {
+            let p = np[i];
+            let d = if p > SULFUR[i][1] {
+                p - SULFUR[i][1]
+            } else if p < SULFUR[i][0] {
+                SULFUR[i][0] - p
+            } else {
+                0
+            };
+            ds = ds.wrapping_add(d.wrapping_mul(d) as u64);
+        }
+        let winner = np_dist(bt, np, idx);
+        if ds < winner || (ds == winner && biome == DEEP_DARK) {
+            biome = SULFUR_CAVES;
+        }
     }
     biome
 }
@@ -677,6 +729,8 @@ fn fill_rad_3d(
 
 #[derive(Clone, Debug)]
 pub struct EndNoise {
+    /// The Minecraft version (`EndNoise.mc`); the outer rings exist above 1.13.
+    pub mc: i32,
     perlin: Perlin,
 }
 
@@ -723,10 +777,12 @@ fn end_biome(hx: i64, hz: i64, hmap: &[u16], start: usize, hw: usize) -> i32 {
 }
 
 impl EndNoise {
-    pub fn new(seed: u64) -> Self {
+    /// `setEndSeed`.
+    pub fn new(seed: u64, mc: i32) -> Self {
         let mut s = JavaRandom::new(seed);
         s.skip(17292);
         Self {
+            mc,
             perlin: Perlin::new_java(&mut s),
         }
     }
@@ -764,7 +820,7 @@ impl EndNoise {
                 hx = 2 * hx + 1;
                 hz = 2 * hz + 1;
                 rsq = (hx.wrapping_mul(hx)).wrapping_add(hz.wrapping_mul(hz)) as u64;
-                if (rsq as u32 as i32) < 0 {
+                if self.mc > MC_1_13 && (rsq as u32 as i32) < 0 {
                     out[o] = END_BARRENS;
                     continue;
                 }
