@@ -1,0 +1,342 @@
+//! A region's tiles and its rendered pixels.
+//!
+//! Pixels are redrawn per chunk, only for chunks marked dirty: a chunk is
+//! dirty when its tile changed or a neighbour it is shaded against (north
+//! or west) changed. Each redraw bumps [`Region::revision`] so the renderer
+//! knows to upload the texture again.
+
+use meridian_host::{CHUNK_SIZE, ChunkPos};
+
+use crate::color::{self, Shading};
+use crate::config::BlockColors;
+use crate::geom::{
+    ChunkMask, REGION_BLOCKS, REGION_CHUNK_COUNT, REGION_CHUNKS, REGION_PIXELS, RegionPos,
+    chunk_at, chunk_index,
+};
+use crate::tile::{ChunkTile, TileColumn};
+
+/// A transparent pixel: nothing explored there.
+pub const UNEXPLORED: u32 = 0;
+
+/// Heights just outside a region, which its north row and west column are
+/// shaded against. `None` entries (or `None` edges) are unknown.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RegionEdges {
+    /// The row north of the region, x = 0..512.
+    pub north: Option<Vec<Option<i16>>>,
+    /// The column west of the region, z = 0..512.
+    pub west: Option<Vec<Option<i16>>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Region {
+    pub pos: RegionPos,
+    tiles: Vec<Option<Box<ChunkTile>>>,
+    /// ARGB, row-major, 512 × 512; empty until first drawn.
+    pixels: Vec<u32>,
+    dirty: ChunkMask,
+    /// Tiles changed since the region was last saved.
+    pub unsaved: bool,
+    /// Bumped whenever pixels change.
+    pub revision: u64,
+    /// The cache's clock when last used, for eviction.
+    pub last_used: u64,
+}
+
+/// The height neighbours are shaded against: the water surface where there
+/// is water.
+fn surface(col: &TileColumn) -> Option<i16> {
+    (!col.empty).then(|| col.height.saturating_add(col.water_depth as i16))
+}
+
+impl Region {
+    pub fn new(pos: RegionPos) -> Self {
+        Self {
+            pos,
+            tiles: vec![None; REGION_CHUNK_COUNT],
+            pixels: Vec::new(),
+            dirty: ChunkMask::default(),
+            unsaved: false,
+            revision: 0,
+            last_used: 0,
+        }
+    }
+
+    pub fn tile(&self, chunk: ChunkPos) -> Option<&ChunkTile> {
+        self.tiles[chunk_index(chunk)].as_deref()
+    }
+
+    pub fn tiles(&self) -> impl Iterator<Item = &ChunkTile> {
+        self.tiles.iter().filter_map(|t| t.as_deref())
+    }
+
+    pub fn tile_count(&self) -> usize {
+        self.tiles.iter().filter(|t| t.is_some()).count()
+    }
+
+    /// Stores a tile and marks it and its south and east neighbours inside
+    /// this region dirty. Returns the neighbours that lie in other regions
+    /// (the caller marks those).
+    pub fn set_tile(&mut self, tile: ChunkTile) -> Vec<ChunkPos> {
+        debug_assert_eq!(RegionPos::of_chunk(tile.pos), self.pos);
+        let pos = tile.pos;
+        if self.tiles[chunk_index(pos)].as_deref() == Some(&tile) {
+            return Vec::new();
+        }
+        self.tiles[chunk_index(pos)] = Some(Box::new(tile));
+        self.unsaved = true;
+        let mut outside = Vec::new();
+        for chunk in [
+            pos,
+            ChunkPos::new(pos.x + 1, pos.z),
+            ChunkPos::new(pos.x, pos.z + 1),
+        ] {
+            if RegionPos::of_chunk(chunk) == self.pos {
+                self.dirty.insert(chunk_index(chunk));
+            } else {
+                outside.push(chunk);
+            }
+        }
+        outside
+    }
+
+    /// Marks one chunk of this region for redrawing.
+    pub fn mark_dirty(&mut self, chunk: ChunkPos) {
+        self.dirty.insert(chunk_index(chunk));
+    }
+
+    /// Marks every chunk with a tile for redrawing (style or light changed).
+    pub fn mark_all_dirty(&mut self) {
+        for (i, t) in self.tiles.iter().enumerate() {
+            if t.is_some() {
+                self.dirty.insert(i);
+            }
+        }
+    }
+
+    pub fn has_dirty(&self) -> bool {
+        !self.dirty.is_empty()
+    }
+
+    pub fn dirty_count(&self) -> usize {
+        self.dirty.len()
+    }
+
+    /// The region's pixels (ARGB, row-major, 512 per row); empty before the
+    /// first draw.
+    pub fn pixels(&self) -> &[u32] {
+        &self.pixels
+    }
+
+    /// Surface height at a column of this region (local 0..512).
+    pub fn height_at(&self, x: i32, z: i32) -> Option<i16> {
+        let chunk = ChunkPos::new(
+            self.pos.x * REGION_CHUNKS + x.div_euclid(CHUNK_SIZE),
+            self.pos.z * REGION_CHUNKS + z.div_euclid(CHUNK_SIZE),
+        );
+        let tile = self.tile(chunk)?;
+        surface(tile.column(
+            x.rem_euclid(CHUNK_SIZE) as usize,
+            z.rem_euclid(CHUNK_SIZE) as usize,
+        ))
+    }
+
+    /// The south row's heights, for the region below to shade against.
+    pub fn south_edge(&self) -> Vec<Option<i16>> {
+        (0..REGION_BLOCKS)
+            .map(|x| self.height_at(x, REGION_BLOCKS - 1))
+            .collect()
+    }
+
+    /// The east column's heights, for the region to the right.
+    pub fn east_edge(&self) -> Vec<Option<i16>> {
+        (0..REGION_BLOCKS)
+            .map(|z| self.height_at(REGION_BLOCKS - 1, z))
+            .collect()
+    }
+
+    /// Redraws up to `max_chunks` dirty chunks; returns how many it drew.
+    pub fn render_dirty(
+        &mut self,
+        edges: &RegionEdges,
+        shading: &Shading,
+        max_chunks: usize,
+    ) -> usize {
+        if self.dirty.is_empty() || max_chunks == 0 {
+            return 0;
+        }
+        if self.pixels.is_empty() {
+            self.pixels = vec![UNEXPLORED; REGION_PIXELS];
+        }
+        let todo: Vec<usize> = self.dirty.iter().take(max_chunks).collect();
+        for &index in &todo {
+            self.render_chunk(index, edges, shading);
+            self.dirty.remove(index);
+        }
+        self.revision += 1;
+        todo.len()
+    }
+
+    fn render_chunk(&mut self, index: usize, edges: &RegionEdges, shading: &Shading) {
+        let chunk = chunk_at(self.pos, index);
+        let (bx, bz) = chunk.min_block();
+        let (rx, rz) = self.pos.min_block();
+        let (ox, oz) = (bx - rx, bz - rz);
+        for z in 0..CHUNK_SIZE {
+            for x in 0..CHUNK_SIZE {
+                let (lx, lz) = (ox + x, oz + z);
+                let pixel = match self.tiles[index].as_deref() {
+                    None => UNEXPLORED,
+                    Some(tile) => {
+                        let col = tile.column(x as usize, z as usize);
+                        let north = if lz > 0 {
+                            self.height_at(lx, lz - 1)
+                        } else {
+                            edges.north.as_ref().and_then(|e| e[lx as usize])
+                        };
+                        let west = if lx > 0 {
+                            self.height_at(lx - 1, lz)
+                        } else {
+                            edges.west.as_ref().and_then(|e| e[lz as usize])
+                        };
+                        shade(col, north, west, shading)
+                    }
+                };
+                self.pixels[(lz * REGION_BLOCKS + lx) as usize] = pixel;
+            }
+        }
+    }
+}
+
+/// One map pixel from a column and its neighbours' heights.
+pub fn shade(col: &TileColumn, north: Option<i16>, west: Option<i16>, sh: &Shading) -> u32 {
+    if col.empty {
+        return UNEXPLORED;
+    }
+    let base = match sh.colors {
+        BlockColors::Accurate => col.accurate,
+        BlockColors::Vanilla => col.vanilla,
+    };
+    let base = color::rgb(base[0], base[1], base[2]);
+    let mut c = if col.water_depth > 0 {
+        let [r, g, b] = col.water;
+        color::water_over(base, color::rgb(r, g, b), col.water_depth, sh.transparency)
+    } else {
+        let mut f = color::slope_factor(sh.slopes, col.height, north, west);
+        if sh.depth {
+            f *= color::depth_factor(col.height);
+        }
+        color::scale(base, f)
+    };
+    if sh.lighting {
+        c = color::scale(
+            c,
+            color::light_factor(col.block_light(), col.sky_light(), sh.daylight),
+        );
+    }
+    color::opaque(c)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::TerrainStyle;
+    use crate::tile::{ColorTable, build_tile, tests::FlatHost, tests::flat_chunk};
+
+    fn tile(x: i32, z: i32) -> ChunkTile {
+        let host = FlatHost::default();
+        build_tile(&ColorTable::default().prepare(&host, flat_chunk(ChunkPos::new(x, z)), false))
+    }
+
+    fn noon() -> Shading {
+        Shading::new(&TerrainStyle::default(), Some(6_000))
+    }
+
+    #[test]
+    fn set_tile_marks_neighbours() {
+        let mut r = Region::new(RegionPos::new(0, 0));
+        assert!(r.set_tile(tile(0, 0)).is_empty());
+        assert_eq!(r.dirty_count(), 3, "itself, east and south");
+        assert!(r.unsaved);
+        let outside = r.set_tile(tile(31, 31));
+        assert_eq!(outside, [ChunkPos::new(32, 31), ChunkPos::new(31, 32)]);
+    }
+
+    #[test]
+    fn identical_tile_changes_nothing() {
+        let mut r = Region::new(RegionPos::new(0, 0));
+        r.set_tile(tile(2, 2));
+        r.render_dirty(&RegionEdges::default(), &noon(), usize::MAX);
+        r.unsaved = false;
+        let rev = r.revision;
+        r.set_tile(tile(2, 2));
+        assert!(!r.has_dirty());
+        assert!(!r.unsaved);
+        assert_eq!(r.revision, rev);
+    }
+
+    #[test]
+    fn renders_only_dirty_chunks_within_budget() {
+        let mut r = Region::new(RegionPos::new(-1, -1));
+        for x in -4..0 {
+            r.set_tile(tile(x, -1));
+        }
+        let dirty = r.dirty_count();
+        assert_eq!(r.render_dirty(&RegionEdges::default(), &noon(), 2), 2);
+        assert_eq!(r.dirty_count(), dirty - 2);
+        r.render_dirty(&RegionEdges::default(), &noon(), usize::MAX);
+        assert!(!r.has_dirty());
+        assert_eq!(r.revision, 2);
+        let (rx, rz) = r.pos.min_block();
+        let (bx, bz) = ChunkPos::new(-1, -1).min_block();
+        let p = r.pixels()[((bz - rz) * REGION_BLOCKS + (bx - rx)) as usize];
+        assert_eq!(p >> 24, 0xFF, "explored pixels are opaque");
+        assert_eq!(r.pixels()[0], UNEXPLORED);
+    }
+
+    #[test]
+    fn slope_against_north_neighbour() {
+        let col = TileColumn {
+            accurate: [100, 100, 100],
+            height: 70,
+            light: 0x0F,
+            ..Default::default()
+        };
+        let mut sh = noon();
+        sh.slopes = crate::config::Slopes::Vanilla;
+        sh.depth = false;
+        let up = shade(&col, Some(69), None, &sh);
+        let flat = shade(&col, Some(70), None, &sh);
+        let down = shade(&col, Some(71), None, &sh);
+        assert!(up > flat && flat > down);
+    }
+
+    #[test]
+    fn edges_and_heights() {
+        let mut r = Region::new(RegionPos::new(0, 0));
+        r.set_tile(tile(0, 31));
+        r.set_tile(tile(31, 0));
+        let south = r.south_edge();
+        assert_eq!(south[0], Some(64 + 15 / 8));
+        assert_eq!(south[100], None);
+        let east = r.east_edge();
+        assert_eq!(east[0], Some(64 + 15 / 8));
+        assert_eq!(r.height_at(5, 5), None);
+    }
+
+    #[test]
+    fn water_is_drawn_over_ground() {
+        let mut r = Region::new(RegionPos::new(0, 0));
+        r.set_tile(tile(1, 0));
+        r.render_dirty(&RegionEdges::default(), &noon(), usize::MAX);
+        let p = r.pixels()[16];
+        let [_, _, b] = color::channels(p);
+        let [red, _, _] = color::channels(p);
+        assert!(b > red, "lake pixels are blue");
+        assert_eq!(
+            r.height_at(16, 0),
+            Some(64),
+            "neighbours see the water surface"
+        );
+    }
+}

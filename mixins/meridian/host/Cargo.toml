@@ -1,0 +1,20 @@
+# Self-contained (no workspace inheritance): the Horizon launcher builds this
+# crate from the bundle, where the repository's workspace does not exist.
+# Versions are exact matches of Horizon's Cargo.lock.
+[package]
+name = "meridian-host"
+description = "The boundary between Meridian and the game it runs in"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "GPL-3.0-or-later"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+serde = { version = "=1.0.229", features = ["derive"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"

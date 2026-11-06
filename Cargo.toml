@@ -1,0 +1,13 @@
+[workspace]
+resolver = "3"
+members = [
+    "mixins/meridian/host",
+    "mixins/meridian/core",
+]
+# The Horizon adapter depends on the game itself and is built by the Horizon
+# launcher (or `tools/check-adapter.sh`), not by this workspace.
+exclude = ["mixins/meridian/engine"]
+
+# The crates under mixins/ are self-contained on purpose (the launcher builds
+# them from the bundle, without this file): set versions, dependencies and
+# lints in each crate's own Cargo.toml.
