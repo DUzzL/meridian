@@ -34,6 +34,8 @@ enum Noise {
 
 #[derive(Clone, Debug)]
 pub struct Generator {
+    /// The Minecraft version generated (`crate::mc`).
+    pub mc: i32,
     pub seed: u64,
     pub large_biomes: bool,
     pub dimension: Dimension,
@@ -42,13 +44,20 @@ pub struct Generator {
 }
 
 impl Generator {
+    /// The newest version's generator.
     pub fn new(seed: u64, dimension: Dimension, large_biomes: bool) -> Self {
+        Self::versioned(seed, dimension, crate::mc::MC_NEWEST, large_biomes)
+    }
+
+    /// `setupGenerator` + `applySeed` for version `mc`.
+    pub fn versioned(seed: u64, dimension: Dimension, mc: i32, large_biomes: bool) -> Self {
         let noise = match dimension {
             Dimension::Overworld => Noise::Overworld(Box::new(BiomeNoise::new(seed, large_biomes))),
             Dimension::Nether => Noise::Nether(NetherNoise::new(seed)),
             Dimension::End => Noise::End(EndNoise::new(seed)),
         };
         Self {
+            mc,
             seed,
             large_biomes,
             dimension,

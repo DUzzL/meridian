@@ -21,20 +21,29 @@ pub const MAX_AREA_SAMPLES: i64 = 4 * 1024 * 1024;
 pub struct Atlas {
     pub seed: i64,
     pub large_biomes: bool,
+    /// The Minecraft version generated (`crate::mc`).
+    pub mc: i32,
     overworld: Generator,
     nether: Generator,
     end: Generator,
 }
 
 impl Atlas {
+    /// `sax_create`: the newest version.
     pub fn new(seed: i64, large_biomes: bool) -> Self {
+        Self::versioned(seed, large_biomes, crate::mc::MC_NEWEST)
+    }
+
+    /// `sax_create_versioned` with a version already resolved (`mc::str2mc`).
+    pub fn versioned(seed: i64, large_biomes: bool, mc: i32) -> Self {
         let s = seed as u64;
         Self {
             seed,
             large_biomes,
-            overworld: Generator::new(s, Dimension::Overworld, large_biomes),
-            nether: Generator::new(s, Dimension::Nether, large_biomes),
-            end: Generator::new(s, Dimension::End, large_biomes),
+            mc,
+            overworld: Generator::versioned(s, Dimension::Overworld, mc, large_biomes),
+            nether: Generator::versioned(s, Dimension::Nether, mc, large_biomes),
+            end: Generator::versioned(s, Dimension::End, mc, large_biomes),
         }
     }
 
@@ -612,5 +621,56 @@ impl Atlas {
             }
         }
         Ok(out)
+    }
+}
+
+// ------------------------------------------------- terrain (ABI 6, 1.18+) --
+
+impl Atlas {
+    /// `sax_height_area_sampled`. TODO(port).
+    #[allow(clippy::too_many_arguments)]
+    pub fn height_area(
+        &self,
+        dimension: Dimension,
+        ox: i32,
+        oz: i32,
+        step: i32,
+        w: i32,
+        h: i32,
+    ) -> Result<Vec<f32>, AtlasError> {
+        let _ = (dimension, ox, oz, step, w, h);
+        Err(AtlasError::Unsupported)
+    }
+
+    /// `sax_nether_floor_area_sampled`. TODO(port).
+    #[allow(clippy::too_many_arguments)]
+    pub fn nether_floor_area(
+        &self,
+        ox: i32,
+        oz: i32,
+        y: i32,
+        step: i32,
+        w: i32,
+        h: i32,
+    ) -> Result<Vec<f32>, AtlasError> {
+        let _ = (ox, oz, y, step, w, h);
+        Err(AtlasError::Unsupported)
+    }
+
+    /// `sax_nether_floor_area_carved_sampled`: two mask words a sample, bit
+    /// y marks carved air. TODO(port).
+    #[allow(clippy::too_many_arguments)]
+    pub fn nether_floor_area_carved(
+        &self,
+        ox: i32,
+        oz: i32,
+        y: i32,
+        step: i32,
+        w: i32,
+        h: i32,
+        carved: &[u64],
+    ) -> Result<Vec<f32>, AtlasError> {
+        let _ = (ox, oz, y, step, w, h, carved);
+        Err(AtlasError::Unsupported)
     }
 }

@@ -96,3 +96,17 @@ pub fn by_name(name: &str) -> Option<i32> {
     let name = name.strip_prefix("minecraft:").unwrap_or(name);
     (0..256).find(|&id| exists(id) && BIOMES[id as usize].1 == name)
 }
+
+/// The biome's name in version `mc` (`biome2str`), if it exists there.
+/// TODO(port): per-version names and existence (`biomeExists`, `biome2str`).
+pub fn name_in(mc: i32, id: i32) -> Option<&'static str> {
+    let _ = mc;
+    name(id)
+}
+
+/// The biome's colour in version `mc` (`sax_context_biome_color`).
+/// TODO(port): per-version existence.
+pub fn color_in(mc: i32, id: i32) -> u32 {
+    let _ = mc;
+    color(id)
+}
