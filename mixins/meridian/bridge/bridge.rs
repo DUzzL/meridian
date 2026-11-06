@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 /// Bumped when the shapes below change, so a trait mod can refuse a bridge
 /// it doesn't understand.
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 /// Main-thread time per frame for chunk reads.
 const READ_BUDGET: Duration = Duration::from_micros(1500);
 
@@ -120,6 +120,10 @@ struct Shared {
     /// Entities are copied each frame only while someone wants them.
     want_entities: bool,
     entities: Vec<EntitySnap>,
+    /// Columns either side of the player a roof must cover (cave mode), or
+    /// none when nobody asks.
+    roof_radius: Option<u8>,
+    under_roof: bool,
 }
 
 static SHARED: Mutex<Option<Shared>> = Mutex::new(None);
@@ -187,6 +191,21 @@ pub fn entities() -> Vec<EntitySnap> {
     with(|s| s.entities.clone())
 }
 
+/// Asks for the roof check around the player (or stops it).
+pub fn set_roof_probe(radius: Option<u8>) {
+    with(|s| {
+        s.roof_radius = radius;
+        if radius.is_none() {
+            s.under_roof = false;
+        }
+    });
+}
+
+/// Whether the player was under a solid roof covering the asked area.
+pub fn under_roof() -> bool {
+    with(|s| s.under_roof)
+}
+
 /// The window's size in physical pixels.
 pub fn window_size() -> Option<[u32; 2]> {
     with(|s| s.window)
@@ -227,6 +246,9 @@ pub(super) fn frame(game: &mut super::Game<'_>) {
     s.window = game.native_physical_window_size();
     if s.want_entities {
         s.entities = snapshot_entities(game);
+    }
+    if let Some(r) = s.roof_radius {
+        s.under_roof = under_roof_check(game, r);
     }
     if s.resources.is_none() {
         s.resources = Some(game.options.resources.clone());
@@ -454,4 +476,27 @@ fn snapshot_entities(game: &super::Game<'_>) -> Vec<EntitySnap> {
         });
     }
     out
+}
+
+/// Every column within `r` of the player's has a block that blocks light
+/// above the player's eyes (`can_occlude`), up to the top of its chunk.
+fn under_roof_check(game: &super::Game<'_>, r: u8) -> bool {
+    use horizon_world::registry::BlockStateId;
+    let Some(p) = game.native_player() else { return false };
+    let (px, pz) = (p.x.floor() as i32, p.z.floor() as i32);
+    let eye = (p.y + 1.62).floor() as i32;
+    let facts = game.res.facts();
+    let r = r as i32;
+    for dx in -r..=r {
+        for dz in -r..=r {
+            let (x, z) = (px + dx, pz + dz);
+            let Some(chunk) = game.world.chunks.get(&(x >> 4, z >> 4)) else { return false };
+            let top = chunk.max_y();
+            let covered = (eye + 1..top).any(|y| facts.get(BlockStateId(chunk.get(x & 15, y, z & 15))).can_occlude);
+            if !covered {
+                return false;
+            }
+        }
+    }
+    true
 }

@@ -231,7 +231,12 @@ pub fn shade(col: &TileColumn, north: Option<i16>, west: Option<i16>, sh: &Shadi
     if sh.lighting {
         c = color::scale(
             c,
-            color::light_factor(col.block_light(), col.sky_light(), sh.daylight),
+            if sh.cave {
+                // Caves are lit by the map, not the sky: torches still brighten.
+                0.7 + 0.3 * col.block_light() as f32 / 15.0
+            } else {
+                color::light_factor(col.block_light(), col.sky_light(), sh.daylight)
+            },
         );
     }
     color::opaque(c)

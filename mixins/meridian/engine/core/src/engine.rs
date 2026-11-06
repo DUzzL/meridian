@@ -118,6 +118,8 @@ pub struct MapEngine {
     failures: HashMap<ChunkPos, u8>,
     /// Chunks the client holds, whatever map is open.
     loaded_chunks: HashSet<ChunkPos>,
+    /// The cave layer shown, `None` for the surface.
+    layer: Option<i32>,
     ticks: u64,
     colors: ColorTable,
     shading: Option<Shading>,
@@ -142,6 +144,7 @@ impl MapEngine {
             in_flight: HashMap::new(),
             failures: HashMap::new(),
             loaded_chunks: HashSet::new(),
+            layer: None,
             ticks: 0,
             colors: ColorTable::default(),
             shading: None,
@@ -168,6 +171,34 @@ impl MapEngine {
         if old.world_map.terrain != self.settings.world_map.terrain {
             // Redrawn on the next tick, when the new shading is computed.
             self.shading = None;
+        }
+    }
+
+    /// The cave layer the map shows (its ceiling Y), or `None` for the
+    /// surface.
+    pub fn layer(&self) -> Option<i32> {
+        self.layer
+    }
+
+    /// Switches between the surface and a cave layer: the current one is
+    /// saved, and the loaded chunks are read again for the new one (which
+    /// keeps its own files).
+    pub fn set_layer(&mut self, layer: Option<i32>) {
+        if self.layer == layer {
+            return;
+        }
+        self.flush();
+        self.layer = layer;
+        self.generation += 1;
+        self.regions.clear();
+        self.loading.clear();
+        self.waiting_tiles.clear();
+        self.in_flight.clear();
+        self.failures.clear();
+        self.shading = None;
+        if let Some(active) = &mut self.active {
+            active.paths = active.paths.with_layer(layer);
+            self.pending_reads = self.loaded_chunks.clone();
         }
     }
 
@@ -262,6 +293,7 @@ impl MapEngine {
             &context.dimension,
         );
         self.active = Some(ActiveMap { context, paths });
+        self.layer = None;
         if self.settings.world_map.load_new_chunks {
             self.pending_reads
                 .extend(self.loaded_chunks.iter().copied());
@@ -479,13 +511,17 @@ impl MapEngine {
             .saturating_sub(self.in_flight.len());
         for chunk in self.next_reads(focus, budget) {
             self.pending_reads.remove(&chunk);
-            host.request_chunk(chunk, ReadMode::Surface);
+            host.request_chunk(
+                chunk,
+                self.layer.map_or(ReadMode::Surface, ReadMode::CaveFrom),
+            );
             self.in_flight.insert(chunk, ticks);
             report.chunks_requested += 1;
         }
 
         // 3. Redraw, nearest regions first.
-        let shading = Shading::new(&self.settings.world_map.terrain, host.day_time());
+        let shading = Shading::new(&self.settings.world_map.terrain, host.day_time())
+            .for_cave(self.layer.is_some());
         if self.shading.is_none_or(|s| s.differs(&shading)) {
             self.shading = Some(shading);
             for r in self.regions.values_mut() {
@@ -860,6 +896,39 @@ mod tests {
             9,
             "a style change redraws without rereading"
         );
+    }
+
+    #[test]
+    fn cave_layers_read_again_and_keep_their_own_files() {
+        let world = World::new("engine_caves");
+        let mut e = engine(&world);
+        e.handle(&world, HostEvent::LevelLoaded(overworld()));
+        load_square(&mut e, &world, 1);
+        settle(&mut e, &world);
+        assert_eq!(world.reads.get(), 9);
+        e.set_layer(Some(32));
+        assert_eq!(e.layer(), Some(32));
+        settle(&mut e, &world);
+        assert_eq!(
+            world.reads.get(),
+            18,
+            "every loaded chunk read again for the cave layer"
+        );
+        e.set_layer(None);
+        settle(&mut e, &world);
+        let paths = MapPaths::new(
+            &world.data_dir(),
+            &overworld().source,
+            DEFAULT_MAP,
+            &overworld().dimension,
+        );
+        assert!(
+            paths
+                .with_layer(Some(32))
+                .region_file(RegionPos::new(0, 0))
+                .exists()
+        );
+        assert!(paths.region_file(RegionPos::new(0, 0)).exists());
     }
 
     #[test]

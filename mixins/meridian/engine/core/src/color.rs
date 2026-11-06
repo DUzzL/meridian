@@ -87,6 +87,8 @@ pub struct Shading {
     pub transparency: bool,
     /// Sky brightness 0..=1 (1 at noon).
     pub daylight: f32,
+    /// A cave layer: dark floors stay readable.
+    pub cave: bool,
 }
 
 impl Shading {
@@ -98,7 +100,14 @@ impl Shading {
             lighting: style.lighting,
             transparency: style.block_transparency,
             daylight: day_time.map_or(1.0, daylight),
+            cave: false,
         }
+    }
+
+    /// The same shading for a cave layer.
+    pub fn for_cave(mut self, cave: bool) -> Self {
+        self.cave = cave;
+        self
     }
 
     /// Whether two shadings give different pixels (and the map must be
@@ -111,6 +120,7 @@ impl Shading {
             || self.depth != other.depth
             || self.lighting != other.lighting
             || self.transparency != other.transparency
+            || self.cave != other.cave
             || (self.lighting && step(self.daylight) != step(other.daylight))
     }
 }

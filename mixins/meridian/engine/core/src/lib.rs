@@ -14,6 +14,7 @@
 //! - [`engine`]: ties it together under a per-frame time budget
 #![forbid(unsafe_code)]
 
+pub mod cave;
 pub mod codec;
 pub mod color;
 pub mod config;

@@ -41,7 +41,7 @@ use parking_lot::Mutex;
 pub const MOD_ID: &str = "meridian";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The bridge shape this adapter was written for.
-const BRIDGE_VERSION: u32 = 3;
+const BRIDGE_VERSION: u32 = 4;
 
 /// The singleplayer world's folder name, set by the integrated server's
 /// thread (the window's client only knows the world's display name).
@@ -146,6 +146,8 @@ struct State {
     open_screen: Option<Screen>,
     /// What screen hooks (which only read the game) leave for `frame`.
     pending: Vec<Pending>,
+    /// Cave mode: automatic under a roof, or manual.
+    cave: meridian_core::cave::CaveControl,
 }
 
 /// Work a screen asked for that needs the game's write access.
@@ -406,6 +408,7 @@ impl Meridian {
                 screen: None,
                 open_screen: None,
                 pending: Vec::new(),
+                cave: Default::default(),
             }
         });
         f(state)
@@ -528,6 +531,12 @@ impl Meridian {
                             let r = &mut s.config.current_mut().radar;
                             r.enabled = !r.enabled;
                             changed = true;
+                        }
+                        "cave.toggle_manual" => {
+                            if let Some(p) = &player {
+                                s.cave.toggle_manual(p.position[1] + 1.62);
+                                s.notice = Some(if s.cave.manual() { "Cave mode: manual" } else { "Cave mode: auto" }.to_owned());
+                            }
                         }
                         "radar.reverse" => {
                             let r = &mut s.config.current_mut().radar;
@@ -934,6 +943,15 @@ impl Hooks for Meridian {
                 let here = RegionPos::of_block(p.position[0] as i32, p.position[2] as i32);
                 s.engine
                     .request_area(here.offset(-1, -1), here.offset(1, 1));
+            }
+            // Cave mode: the roof check runs in the bridge, the decision here.
+            let cave = s.config.current().minimap.cave.clone();
+            bridge::set_roof_probe(meridian_core::cave::roof_radius(cave.auto));
+            if let Some(p) = &player {
+                let dim = s.dimension.as_deref().unwrap_or("");
+                let allowed = cave.allowed_dimensions.is_empty() || cave.allowed_dimensions.iter().any(|d| d == dim);
+                let layer = s.cave.update(&cave, allowed, bridge::under_roof(), p.position[1] + 1.62, Instant::now());
+                s.engine.set_layer(layer);
             }
             let budget =
                 Duration::from_micros(s.config.current().performance.frame_budget_us as u64);

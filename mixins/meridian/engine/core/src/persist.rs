@@ -102,6 +102,8 @@ pub fn source_key(source: &WorldSource) -> String {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MapPaths {
     root: PathBuf,
+    /// A cave layer (`caves/<y>/`) instead of the surface.
+    layer: Option<i32>,
 }
 
 impl MapPaths {
@@ -111,7 +113,19 @@ impl MapPaths {
             .join(source_key(source))
             .join(escape_component(map))
             .join(escape_component(dimension.as_str()));
-        Self { root }
+        Self { root, layer: None }
+    }
+
+    /// The same map's cave layer starting at `y` (or its surface).
+    pub fn with_layer(&self, layer: Option<i32>) -> Self {
+        Self {
+            root: self.root.clone(),
+            layer,
+        }
+    }
+
+    pub fn layer(&self) -> Option<i32> {
+        self.layer
     }
 
     pub fn root(&self) -> &Path {
@@ -126,7 +140,10 @@ impl MapPaths {
     }
 
     pub fn regions_dir(&self) -> PathBuf {
-        self.root.join("regions")
+        match self.layer {
+            None => self.root.join("regions"),
+            Some(y) => self.root.join("caves").join(y.to_string()).join("regions"),
+        }
     }
 
     pub fn region_file(&self, region: RegionPos) -> PathBuf {
@@ -208,6 +225,23 @@ mod tests {
                 "/data/worlds/sp-new%20world/default/minecraft%3Athe_nether/regions/-1_2.mrg"
             )
         );
+    }
+
+    #[test]
+    fn cave_layers_have_their_own_folders() {
+        let p = MapPaths::new(
+            Path::new("/d"),
+            &WorldSource::Singleplayer { world: "w".into() },
+            "default",
+            &DimensionId::new("minecraft:overworld"),
+        );
+        let cave = p.with_layer(Some(-16));
+        assert_eq!(
+            cave.regions_dir(),
+            Path::new("/d/worlds/sp-w/default/minecraft%3Aoverworld/caves/-16/regions")
+        );
+        assert_eq!(cave.map_dir(), p.map_dir());
+        assert_eq!(cave.with_layer(None), p);
     }
 
     #[test]
