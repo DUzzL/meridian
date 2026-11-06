@@ -196,3 +196,14 @@ Flächen-Rechtecke reichen für die Detaildichte der Referenz (rund 270 Blöcke 
 - Läuft das HUD nicht (F1, Screens), verfällt das Bild nach 200 ms.
 
 Einschränkung: Der Hook läuft vor Horizons Nachbearbeitung. Morgens und abends dunkelt Horizon die Karte deshalb mit der Welt ab, die Referenz nicht. Eine saubere Lösung braucht eine HUD-Textur-API (E3).
+
+## D-021: Screens im Layout der Referenz
+
+Wegpunkt-Editor (B), Wegpunktliste (U) und Einstellungen (Y) sind nach den Referenzaufnahmen (O3) in GUI-Pixeln um die Bildschirmmitte gesetzt (`core/src/screens.rs`, Tests prüfen die gemessenen Positionen bei 432×246).
+
+- Optik: Vanilla-Knöpfe aus den GUI-Sprites des Spielers (`gui/sprites/widget/button*`, nine-slice über Horizons `gui_nine_slice`); schwarze Felder und Auswahlboxen mit grauem Rand; Platzhalter in Grau; Farbname in seiner Farbe.
+- Hintergrund: Meridian fordert über `menu_background` die normale Menü-Unschärfe an (Wert aus den Spieleinstellungen) und dunkelt leicht ab, wie die Menüs im Spiel.
+- Eingaben laufen über Horizons Screen-Hooks, die nur lesen dürfen. Schließen, Teleport und Teilen stellt Meridian deshalb in eine Warteschlange, die der nächste `frame`-Hook abarbeitet.
+- Escape schließt wie im Spiel.
+- B öffnet jetzt den Editor (Name nötig, leere Koordinaten = Spielerposition, zufällige helle Farbe); Num + legt weiterhin sofort einen Wegpunkt an.
+- Einstellungen: Hauptseite wie die Referenz; Unterseiten mit „Name: Wert“-Knöpfen (Linksklick weiter, Rechtsklick zurück); Suche über alle Optionen. „Profile Name“, „Change Position“ und „Delete Profile“ sind noch deaktiviert.

@@ -158,3 +158,32 @@
 - Bei Sonnenauf- und -untergang ist die Karte dunkler als bei der Referenz (Nachbearbeitung, D-020).
 - Die Farbe neuer Wegpunkte weicht ab: Meridian beginnt mit Rot, die Referenz wählt zufällig.
 - Die Prism-Referenzinstanz wurde für die Aufnahmen verändert: Welt `MeridianTest` hinzugefügt und `pauseOnLostFocus:false` gesetzt.
+
+### Phase 3, Zwischenstand 3: Screens
+
+**Fertig und im Spiel mit der Referenz verglichen**
+
+- Wegpunkt-Editor (B):
+  - Welt/Dimension, Reset, Set, Farbe (Links-/Rechtsklick), Name, X/Y/Z/Yaw mit Platzhaltern,
+  - Lokal/Global, Kürzel, Aktiviert/Deaktiviert,
+  - Bestätigen (erst mit Namen), Abbrechen,
+  - Tab wechselt das Feld, Enter bestätigt.
+- Wegpunktliste (U):
+  - Welt/Dimension, Optionen, Set wechseln, Set leeren (mit Rückfrage), Filter,
+  - Einträge mit farbigem Kürzel-Quadrat, Auswahl,
+  - Hinzufügen/Bearbeiten, Teleport (auch Taste T), Teilen, Aktivieren/Deaktivieren, Löschen (auch Entf), Fertig, Scrollen.
+- Einstellungen (Y):
+  - Hauptseite wie die Referenz,
+  - Unterseiten Ansicht, Blockkarte, Entity-Radar, Overlay, Info, Wegpunkte, Sonstiges,
+  - Suche; Änderungen wirken sofort und werden gespeichert.
+
+**Build und Tests**
+
+- `cargo test --workspace --locked`: 93 Tests grün (91 Kern, 2 Host); Clippy sauber; Adapter-Check grün; Launcher-Build `native-66f3981-e01e5b5aa87b`.
+
+**Offen in Phase 3**
+
+- Entity-Radar (braucht E4 bzw. ein Bridge-Stück für Entity-Typen und den Singleplayer).
+- Höhlenmodus, weitere Infoanzeigen (Licht, Zeit, Winkel, Dimension, Wetter), Chunkgitter, Schleimchunks, Licht-Overlay.
+- Profile (Namen, Löschen), Positionseditor, Seite 2 der Einstellungen.
+- Welt- und Dimensionsauswahl in Editor und Liste zeigen nur „(auto)“: Unterwelten folgen mit CTX-02.

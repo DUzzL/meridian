@@ -17,8 +17,9 @@ use horizon_client::mod_api::{
     ClientChatReceivedEvent, ClientDisconnectingEvent, ClientLevelLoadEvent,
     ClientLevelUnloadEvent, ClientResourcesReloadedEvent, ClientStoppingEvent, CommandEvent,
     CommandsEvent, Flow, FrameEvent, Hooks, Host, HudBatch, HudEvent, KeyEvent, ModsEvent,
-    NativeMod, PlayerDiedEvent, RenderHooks, Text, TintSource, WorldLifecycleEvent, WorldPhase,
-    WorldPrimitivesEvent,
+    NativeMod, PlayerDiedEvent, RenderHooks, ScreenCharTypedPreEvent, ScreenClosingEvent,
+    ScreenKeyPressedPreEvent, ScreenMouseButtonPressedPreEvent, ScreenMouseScrolledPreEvent,
+    MenuBackgroundEvent, ScreenRenderPostEvent, Text, TintSource, WorldLifecycleEvent, WorldPhase, WorldPrimitivesEvent,
 };
 use meridian_core::MapEngine;
 use meridian_core::config::{ConfigFile, ConfigStore};
@@ -26,6 +27,7 @@ use meridian_core::engine::DEFAULT_MAP;
 use meridian_core::geom::RegionPos;
 use meridian_core::keybinds::{KEY_BINDINGS, bindings_for_key};
 use meridian_core::minimap::{self, Align, Controls, DrawOp};
+use meridian_core::screens::{Action, Editor, Env, List, Screen, SettingsScreen};
 use meridian_core::persist::MapPaths;
 use meridian_core::waypoint::{self, Kind, Waypoint, WaypointBook};
 use meridian_host::{
@@ -137,6 +139,19 @@ struct State {
     notice: Option<String>,
     /// The minimap's composed image and what it was composed from.
     map_image: Option<(MapImageKey, std::sync::Arc<gpu::MapImage>)>,
+    /// The open screen of ours, if any.
+    screen: Option<Screen>,
+    /// A screen to open from the next hook that may (`key`).
+    open_screen: Option<Screen>,
+    /// What screen hooks (which only read the game) leave for `frame`.
+    pending: Vec<Pending>,
+}
+
+/// Work a screen asked for that needs the game's write access.
+#[derive(Debug)]
+enum Pending {
+    CloseScreen,
+    Chat(String),
 }
 
 /// What a minimap image depends on: its origin and size, and the regions'
@@ -387,6 +402,9 @@ impl Meridian {
                 next_color: 12,
                 notice: None,
                 map_image: None,
+                screen: None,
+                open_screen: None,
+                pending: Vec::new(),
             }
         });
         f(state)
@@ -412,6 +430,7 @@ fn paint(host: &dyn Host, batch: &mut HudBatch, ops: &[DrawOp]) {
         match op {
             DrawOp::Fill { rect, argb } => host.fill(batch, *rect, *argb),
             DrawOp::Quad { points, argb } => host.quad(batch, *points, *argb),
+            DrawOp::NineSlice { sprite, rect, argb } => host.gui_nine_slice(batch, sprite, *rect, *argb),
             DrawOp::Text { x, y, text, argb, align, scale } => {
                 let w = host.text_width(text) * scale;
                 let x = match align {
@@ -477,13 +496,21 @@ impl Meridian {
                 for id in &hits {
                     match *id {
                         // The editor screen comes later; both add at the player for now.
-                        "waypoint.instant" | "waypoint.new" => {
+                        "waypoint.instant" => {
                             if let Some(p) = &player
                                 && let Some(name) = s.quick_waypoint(p)
                             {
                                 s.notice = Some(format!("Added {name}"));
                             }
                         }
+                        "waypoint.new" => {
+                            if let Some((book, dim)) = s.book_here() {
+                                let editor = Editor::new(book.dimension_mut(&dim), waypoint::now(), false);
+                                s.open_screen = Some(Screen::Editor(editor));
+                            }
+                        }
+                        "waypoint.menu" => s.open_screen = Some(Screen::List(List::default())),
+                        "settings" => s.open_screen = Some(Screen::Settings(SettingsScreen::default())),
                         "waypoint.next_set" => {
                             if let Some((book, dim)) = s.book_here() {
                                 let name = book.dimension_mut(&dim).next_set().to_owned();
@@ -615,6 +642,70 @@ impl Hooks for Meridian {
         Some(&self.renderer)
     }
 
+    fn screen_render_post(&self, host: &dyn Host, event: &mut ScreenRenderPostEvent<'_>) {
+        if event.screen.id == "mod" {
+            self.draw_screen(host, event.batch);
+        }
+    }
+
+    fn screen_mouse_button_pressed_pre(&self, host: &dyn Host, event: &mut ScreenMouseButtonPressedPreEvent<'_>) -> Flow {
+        if host.mod_screen() != Some(MOD_ID) || event.button > 1 {
+            return Flow::Continue;
+        }
+        let at = host.cursor();
+        let right = event.button == 1;
+        self.with_screen(host, |screen, env| ((), screen.click(at, right, env)));
+        Flow::Cancel
+    }
+
+    fn screen_char_typed_pre(&self, host: &dyn Host, event: &mut ScreenCharTypedPreEvent<'_>) -> Flow {
+        if host.mod_screen() != Some(MOD_ID) {
+            return Flow::Continue;
+        }
+        let c = event.c;
+        self.with_screen(host, |screen, env| {
+            screen.typed(c, env);
+            ((), Action::None)
+        });
+        Flow::Cancel
+    }
+
+    fn screen_key_pressed_pre(&self, host: &dyn Host, event: &mut ScreenKeyPressedPreEvent<'_>) -> Flow {
+        // Escape still closes the screen as the game does.
+        if host.mod_screen() != Some(MOD_ID) || event.key == "key.keyboard.escape" {
+            return Flow::Continue;
+        }
+        let key = event.key.to_owned();
+        self.with_screen(host, |screen, env| ((), screen.key(&key, env)));
+        Flow::Cancel
+    }
+
+    fn screen_mouse_scrolled_pre(&self, host: &dyn Host, event: &mut ScreenMouseScrolledPreEvent<'_>) -> Flow {
+        if host.mod_screen() != Some(MOD_ID) {
+            return Flow::Continue;
+        }
+        let lines = event.scroll[1] as f32;
+        self.with_screen(host, |screen, _| {
+            screen.scroll(lines);
+            ((), Action::None)
+        });
+        Flow::Cancel
+    }
+
+    fn menu_background(&self, host: &dyn Host, event: &mut MenuBackgroundEvent<'_>) {
+        // Our screens blur the world behind them as the game's menus do.
+        if host.mod_screen() == Some(MOD_ID) && event.radius.is_none() {
+            let blur = host.client_state().map_or(5.0, |c| c.menu_blur);
+            *event.radius = Some(blur.max(1.0));
+        }
+    }
+
+    fn screen_closing(&self, host: &dyn Host, event: &mut ScreenClosingEvent<'_>) {
+        if event.screen.id == "mod" && host.mod_screen() == Some(MOD_ID) {
+            self.with_state(host, |s| s.screen = None);
+        }
+    }
+
     fn mods(&self, _host: &mut dyn Host, event: &mut ModsEvent<'_>) {
         event.mods.push(NativeMod {
             id: MOD_ID.to_owned(),
@@ -634,6 +725,12 @@ impl Hooks for Meridian {
         let notice = self.on_key(&*host, event.key, event.pressed);
         if let Some(text) = notice {
             host.client_action_bar(Text::literal(text), false);
+        }
+        let open = self.with_state(&*host, |s| s.open_screen.take());
+        if let Some(screen) = open
+            && host.mod_screen_open(MOD_ID)
+        {
+            self.with_state(&*host, |s| s.screen = Some(screen));
         }
     }
 
@@ -785,6 +882,20 @@ impl Hooks for Meridian {
     }
 
     fn frame(&self, host: &mut dyn Host, _event: &mut FrameEvent) {
+        let pending = self.with_state(&*host, |s| std::mem::take(&mut s.pending));
+        for p in pending {
+            match p {
+                Pending::CloseScreen => {
+                    host.mod_screen_close(MOD_ID);
+                    self.with_state(&*host, |s| s.screen = None);
+                }
+                Pending::Chat(line) => {
+                    if let Err(e) = host.send_chat(&line) {
+                        host.client_action_bar(Text::literal(format!("Meridian: {e}")), false);
+                    }
+                }
+            }
+        }
         let host: &dyn Host = host;
         self.with_state(host, |s| {
             let map_host = HorizonHost {
@@ -1018,4 +1129,116 @@ fn compose_map(s: &mut State, layout: &minimap::Layout, player: &PlayerState) {
     }
     let revision = s.map_image.as_ref().map_or(0, |(_, i)| i.revision + 1);
     s.map_image = Some((key, std::sync::Arc::new(gpu::MapImage { size, pixels, revision })));
+}
+
+/// "MeridianTest (auto)" / "overworld (auto)" for the screens' selectors.
+fn context_labels(s: &State) -> (String, String) {
+    let world = match s.engine.context().map(|c| &c.source) {
+        Some(WorldSource::Singleplayer { world }) => world.clone(),
+        Some(WorldSource::Multiplayer { address }) => address.clone(),
+        None => "-".to_owned(),
+    };
+    let dim = s.dimension.as_deref().unwrap_or("-");
+    let dim = dim.rsplit(':').next().unwrap_or(dim);
+    (format!("{world} (auto)"), format!("{dim} (auto)"))
+}
+
+impl Meridian {
+    /// Runs `f` on our open screen with its environment, then applies what
+    /// it changed and what it asks for. Nothing when our screen isn't open.
+    fn with_screen<R: Default>(
+        &self,
+        host: &dyn Host,
+        f: impl FnOnce(&mut Screen, &mut Env<'_>) -> (R, Action),
+    ) -> R {
+        if host.mod_screen() != Some(MOD_ID) {
+            return R::default();
+        }
+        let gui = host.client_state().map_or([0.0, 0.0], |c| c.gui_size);
+        let player_block = HorizonHost { host, dimension: None }
+            .player()
+            .map_or([0, 0, 0], |p| p.position.map(|v| v.floor() as i32));
+        self.with_state(host, |s| {
+            let Some(mut screen) = s.screen.take() else { return R::default() };
+            let (world_label, dim_label) = context_labels(s);
+            let Some(dim) = s.dimension.clone() else {
+                s.screen = Some(screen);
+                return R::default();
+            };
+            let Some((_, book)) = &mut s.book else {
+                s.screen = Some(screen);
+                return R::default();
+            };
+            let mut settings = s.config.current().clone();
+            let (result, action, waypoints_changed, settings_changed) = {
+                let waypoints = book.dimension_mut(&dim);
+                let mut env = Env {
+                    gui,
+                    world_label: &world_label,
+                    dimension_label: &dim_label,
+                    player_block,
+                    waypoints,
+                    settings: &mut settings,
+                    waypoints_changed: false,
+                    settings_changed: false,
+                };
+                let (result, action) = f(&mut screen, &mut env);
+                (result, action, env.waypoints_changed, env.settings_changed)
+            };
+            if waypoints_changed {
+                book.dirty = true;
+            }
+            if settings_changed {
+                *s.config.current_mut() = settings;
+                s.engine.set_settings(s.config.current().clone());
+                s.save_config();
+            }
+            s.screen = Some(screen);
+            match action {
+                Action::None => {}
+                Action::Close => s.pending.push(Pending::CloseScreen),
+                Action::Open(next) => s.screen = Some(next),
+                Action::Save { edit, set, waypoint } => {
+                    if let Some((book, _)) = s.book.as_mut().map(|(_, b)| (b, ())) {
+                        book.save_edit(&dim, edit, &set, waypoint, waypoint::now());
+                    }
+                    if let Some(Screen::Editor(editor)) = &s.screen {
+                        match editor.after_save() {
+                            Action::Open(next) => s.screen = Some(next),
+                            _ => s.pending.push(Pending::CloseScreen),
+                        }
+                    }
+                }
+                Action::Teleport(id) => {
+                    let tp = s.config.current().waypoints.teleport_format.clone();
+                    if let Some(w) = s.book.as_ref().and_then(|(_, b)| b.dimension(&dim)?.find(id).cloned()) {
+                        s.pending.push(Pending::CloseScreen);
+                        s.pending.push(Pending::Chat(waypoint::command(&tp, &w, &dim)));
+                    }
+                }
+                Action::Share(id) => {
+                    if let Some(w) = s.book.as_ref().and_then(|(_, b)| b.dimension(&dim)?.find(id).cloned()) {
+                        s.pending.push(Pending::Chat(waypoint::share_text(&w, &dim)));
+                    }
+                }
+            }
+            result
+        })
+    }
+}
+
+/// Our screens' drawing and input (Horizon's screen hooks, over every
+/// screen: each checks that ours is the one open).
+impl Meridian {
+    fn draw_screen(&self, host: &dyn Host, batch: &mut HudBatch) {
+        let mouse = host.cursor();
+        let ops: Vec<DrawOp> = self.with_screen(host, |screen, env| {
+            let widgets = screen.widgets(env);
+            // The game's in-world menu darkening over the blur.
+            let mut ops = vec![DrawOp::Fill { rect: [0.0, 0.0, env.gui[0], env.gui[1]], argb: 0x5000_0000 }];
+            ops.extend(meridian_core::ui::draw(&widgets, mouse));
+            (ops, Action::None)
+        });
+        paint(host, batch, &ops);
+    }
 }

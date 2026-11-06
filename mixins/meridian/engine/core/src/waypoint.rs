@@ -318,6 +318,46 @@ impl WaypointBook {
         self.dimensions.entry(dimension.to_owned()).or_default()
     }
 
+    /// Saves what an editor produced: replaces waypoint `edit` (keeping its
+    /// id, kind and creation time, moving it to `set` if needed) or adds a
+    /// new one to `set`. Returns the waypoint's id.
+    pub fn save_edit(
+        &mut self,
+        dimension: &str,
+        edit: Option<u64>,
+        set: &str,
+        mut w: Waypoint,
+        now: u64,
+    ) -> u64 {
+        let dim = self.dimension_mut(dimension);
+        if let Some(id) = edit
+            && let Some(old) = dim.remove(id)
+        {
+            w.id = old.id;
+            w.created = old.created;
+            w.kind = old.kind;
+            dim.sets.entry(set.to_owned()).or_default().insert(0, w);
+            self.dirty = true;
+            return id;
+        }
+        w.id = self.next_id;
+        self.next_id += 1;
+        if w.created == 0 {
+            w.created = now;
+        }
+        if w.initials.is_empty() {
+            w.initials = initials_of(&w.name);
+        }
+        let id = w.id;
+        self.dimension_mut(dimension)
+            .sets
+            .entry(set.to_owned())
+            .or_default()
+            .insert(0, w);
+        self.dirty = true;
+        id
+    }
+
     /// Adds a waypoint to the dimension's current set; returns its id.
     pub fn add(&mut self, dimension: &str, mut w: Waypoint, to_bottom: bool, now: u64) -> u64 {
         w.id = self.next_id;
@@ -536,5 +576,30 @@ mod tests {
         let book = WaypointBook::load(&dir);
         assert!(book.dimensions.is_empty());
         assert!(dir.join("waypoints.json.broken").exists());
+    }
+}
+
+#[cfg(test)]
+mod save_tests {
+    use super::*;
+
+    #[test]
+    fn save_adds_and_replaces() {
+        let mut book = WaypointBook::default();
+        let id = book.save_edit("d", None, "mine", Waypoint::new("A", [1, 2, 3], 4), 10);
+        let dim = book.dimension("d").unwrap();
+        assert_eq!(dim.sets["mine"][0].name, "A");
+        assert_eq!(dim.sets["mine"][0].created, 10);
+        let mut changed = Waypoint::new("B", [0, 0, 0], 1);
+        changed.created = 99;
+        assert_eq!(book.save_edit("d", Some(id), DEFAULT_SET, changed, 20), id);
+        let dim = book.dimension("d").unwrap();
+        assert!(dim.sets["mine"].is_empty(), "moved to another set");
+        let w = dim.find(id).unwrap();
+        assert_eq!(
+            (w.name.as_str(), w.created),
+            ("B", 10),
+            "keeps its creation time"
+        );
     }
 }

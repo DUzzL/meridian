@@ -57,6 +57,13 @@ pub enum DrawOp {
         /// GUI pixels per font pixel.
         scale: f32,
     },
+    /// One of the game's own GUI sprites (`widget/button`), stretched
+    /// nine-slice into `rect`.
+    NineSlice {
+        sprite: &'static str,
+        rect: [f32; 4],
+        argb: u32,
+    },
 }
 
 /// Where and how big the map is this frame.
@@ -661,10 +668,7 @@ mod tests {
         let l = layout(&s, gui, 2.0, false, 1);
         let u = 1.0f32;
         assert_eq!(l.size, 166.0);
-        assert_eq!(
-            (l.x, l.y),
-            ((9.0 * u).round(), (9.0 * u).round())
-        );
+        assert_eq!((l.x, l.y), ((9.0 * u).round(), (9.0 * u).round()));
         assert!(l.info_below && l.rotate && !l.round);
         assert!(
             (l.blocks_per_pixel - 2.0).abs() < 1e-6,
