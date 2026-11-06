@@ -204,7 +204,7 @@ pub fn build_tile(chunk: &PreparedChunk) -> ChunkTile {
 pub(crate) mod tests {
     use super::*;
     use meridian_host::{ColumnSample, ReadMode, Tint, WorldContext};
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
     use std::path::PathBuf;
 
     /// A host whose world is a flat grass plain at y 64 with a lake in
@@ -213,6 +213,7 @@ pub(crate) mod tests {
     pub(crate) struct FlatHost {
         pub lookups: Cell<usize>,
         pub data: PathBuf,
+        pub requests: RefCell<Vec<ChunkPos>>,
     }
 
     impl MapHost for FlatHost {
@@ -222,8 +223,15 @@ pub(crate) mod tests {
         fn player(&self) -> Option<meridian_host::PlayerState> {
             None
         }
-        fn read_chunk(&self, chunk: ChunkPos, _mode: ReadMode) -> Option<ChunkSnapshot> {
-            Some(flat_chunk(chunk))
+        fn request_chunk(&self, chunk: ChunkPos, _mode: ReadMode) {
+            self.requests.borrow_mut().push(chunk);
+        }
+        fn take_chunks(&self) -> Vec<ChunkSnapshot> {
+            self.requests
+                .borrow_mut()
+                .drain(..)
+                .map(flat_chunk)
+                .collect()
         }
         fn block_appearance(&self, block: &str) -> BlockAppearance {
             self.lookups.set(self.lookups.get() + 1);

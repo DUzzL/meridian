@@ -3,12 +3,57 @@
 [mod]
 id = "meridian"
 version = "0.1.0"
+priority = 100
 
-# The installed Nightly (2026-11-05). Phase 2 uses catalog hooks only; the
-# transitional mixins for chunk reading (docs/HORIZON_API.md E1/E2) will need
-# this exact commit.
+# The installed Nightly (2026-11-05). The bridge below injects into Horizon
+# internals (not catalog hooks), so it needs this exact commit.
 [compatibility]
 horizon_revision = "66f3981f522b24c250b21523a70080965b940424"
 
 [api]
 path = "engine"
+
+# --- Transitional bridge for docs/HORIZON_API.md E1/E2 ----------------------
+# Replaced by upstream hooks once they exist (docs/DECISIONS.md D-005).
+
+[[module]]
+id = "changes"
+file = "crates/horizon-client-render/src/world.rs"
+name = "meridian_changes"
+visibility = "pub"
+source = "bridge/changes.rs"
+
+[[injection]]
+id = "world-set"
+kind = "HEAD"
+target = "horizon_client_render::world::World::set"
+helper = "bridge/world_set.rs"
+bindings = [
+  { name = "x", ty = "i32", value = "x" },
+  { name = "z", ty = "i32", value = "z" },
+]
+
+[[injection]]
+id = "edit-runs"
+kind = "HEAD"
+target = "horizon_client_render::block_edit::World::edit_runs"
+helper = "bridge/edit_runs.rs"
+bindings = [
+  { name = "runs", ty = "&[crate::block_edit::Run]", value = "runs" },
+]
+
+[[module]]
+id = "bridge"
+file = "crates/horizon-client/src/game.rs"
+name = "meridian_bridge"
+visibility = "pub"
+source = "bridge/bridge.rs"
+
+[[injection]]
+id = "frame"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::Game<'_>::native_frame"
+helper = "bridge/frame.rs"
+bindings = [
+  { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
+]

@@ -32,6 +32,10 @@ use crate::worker::WorkerPool;
 pub const DEFAULT_MAP: &str = "default";
 /// Chunks redrawn per batch between deadline checks.
 const RENDER_BATCH: usize = 32;
+/// Ticks a chunk request may stay unanswered before it is asked again.
+const REQUEST_TIMEOUT: u64 = 200;
+/// Unanswered requests before a chunk waits for its next load or change.
+const MAX_ATTEMPTS: u8 = 3;
 
 #[derive(Debug)]
 enum WorkResult {
@@ -56,9 +60,39 @@ struct ActiveMap {
     paths: MapPaths,
 }
 
+/// See [`MapEngine::sampler`].
+#[derive(Debug)]
+pub struct Sampler<'a> {
+    regions: &'a HashMap<RegionPos, Region>,
+    last: std::cell::Cell<Option<(RegionPos, Option<&'a Region>)>>,
+}
+
+impl Sampler<'_> {
+    /// The ARGB pixel of block column (`x`, `z`).
+    pub fn pixel(&self, x: i32, z: i32) -> u32 {
+        let pos = RegionPos::of_block(x, z);
+        let region = match self.last.get() {
+            Some((p, r)) if p == pos => r,
+            _ => {
+                let r = self.regions.get(&pos);
+                self.last.set(Some((pos, r)));
+                r
+            }
+        };
+        let Some(region) = region else { return 0 };
+        let pixels = region.pixels();
+        if pixels.is_empty() {
+            return 0;
+        }
+        let (rx, rz) = pos.min_block();
+        pixels[((z - rz) * crate::geom::REGION_BLOCKS + (x - rx)) as usize]
+    }
+}
+
 /// What one tick did; for tests and the debug overlay.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TickReport {
+    pub chunks_requested: usize,
     pub chunks_read: usize,
     pub tiles_applied: usize,
     pub regions_loaded: usize,
@@ -78,7 +112,13 @@ pub struct MapEngine {
     loading: HashSet<RegionPos>,
     waiting_tiles: HashMap<RegionPos, Vec<ChunkTile>>,
     pending_reads: HashSet<ChunkPos>,
+    /// Asked of the host and not answered yet, with the tick they were asked.
+    in_flight: HashMap<ChunkPos, u64>,
+    /// Requests that went unanswered, per chunk.
+    failures: HashMap<ChunkPos, u8>,
+    /// Chunks the client holds, whatever map is open.
     loaded_chunks: HashSet<ChunkPos>,
+    ticks: u64,
     colors: ColorTable,
     shading: Option<Shading>,
     workers: WorkerPool<WorkResult>,
@@ -99,7 +139,10 @@ impl MapEngine {
             loading: HashSet::new(),
             waiting_tiles: HashMap::new(),
             pending_reads: HashSet::new(),
+            in_flight: HashMap::new(),
+            failures: HashMap::new(),
             loaded_chunks: HashSet::new(),
+            ticks: 0,
             colors: ColorTable::default(),
             shading: None,
             workers,
@@ -142,6 +185,16 @@ impl MapEngine {
         self.regions.len()
     }
 
+    /// Reads drawn map pixels by block column; transparent where nothing is
+    /// explored or drawn yet. Remembers the last region, so sampling an area
+    /// row by row costs one hash lookup per region, not per pixel.
+    pub fn sampler(&self) -> Sampler<'_> {
+        Sampler {
+            regions: &self.regions,
+            last: std::cell::Cell::new(None),
+        }
+    }
+
     /// Asks for the regions in a rectangle (inclusive) to be loaded and kept;
     /// the renderer calls this each frame for what it shows.
     pub fn request_area(&mut self, min: RegionPos, max: RegionPos) {
@@ -158,23 +211,37 @@ impl MapEngine {
     pub fn handle(&mut self, host: &dyn MapHost, event: HostEvent) {
         match event {
             HostEvent::LevelLoaded(context) => self.open(context),
-            HostEvent::LevelUnloaded | HostEvent::Disconnected => self.close(),
+            HostEvent::LevelUnloaded => self.close(),
+            HostEvent::Disconnected => {
+                self.close();
+                self.loaded_chunks.clear();
+            }
             HostEvent::ChunkLoaded(chunk) => {
-                if self.active.is_some() {
-                    self.loaded_chunks.insert(chunk);
-                    if self.settings.world_map.load_new_chunks {
-                        self.pending_reads.insert(chunk);
-                    }
+                // Kept even before a map opens: the level hook and the first
+                // chunks may arrive in either order.
+                self.loaded_chunks.insert(chunk);
+                self.failures.remove(&chunk);
+                if self.active.is_some() && self.settings.world_map.load_new_chunks {
+                    self.pending_reads.insert(chunk);
                 }
             }
             HostEvent::ChunkChanged(chunk) => {
                 if self.active.is_some() && self.settings.world_map.update_chunks {
+                    self.failures.remove(&chunk);
                     self.pending_reads.insert(chunk);
                 }
             }
             HostEvent::ChunkUnloaded(chunk) => {
                 self.loaded_chunks.remove(&chunk);
                 self.pending_reads.remove(&chunk);
+                self.in_flight.remove(&chunk);
+                self.failures.remove(&chunk);
+            }
+            HostEvent::ChunksReset => {
+                self.loaded_chunks.clear();
+                self.pending_reads.clear();
+                self.in_flight.clear();
+                self.failures.clear();
             }
             HostEvent::ResourcesReloaded => {
                 self.colors.clear();
@@ -195,6 +262,10 @@ impl MapEngine {
             &context.dimension,
         );
         self.active = Some(ActiveMap { context, paths });
+        if self.settings.world_map.load_new_chunks {
+            self.pending_reads
+                .extend(self.loaded_chunks.iter().copied());
+        }
     }
 
     /// Saves what changed and forgets the current world.
@@ -206,7 +277,7 @@ impl MapEngine {
         self.loading.clear();
         self.waiting_tiles.clear();
         self.pending_reads.clear();
-        self.loaded_chunks.clear();
+        self.in_flight.clear();
     }
 
     /// Starts saving every changed region.
@@ -364,22 +435,20 @@ impl MapEngine {
             }
         }
 
-        // 2. Read the nearest changed chunks.
-        let reads = self.next_reads(focus, self.settings.performance.chunk_reads_per_tick);
+        // 2. Chunks the host read since last tick become tiles on workers;
+        //    then ask for the nearest changed ones.
+        self.ticks += 1;
         let generation = self.generation;
         let vanilla_biomes = self.settings.world_map.terrain.biome_colors_in_vanilla;
-        for chunk in reads {
-            self.pending_reads.remove(&chunk);
-            let Some(snapshot) = host.read_chunk(chunk, ReadMode::Surface) else {
-                continue;
-            };
-            if snapshot.pos != chunk {
-                log::warn!(
-                    "meridian: host answered chunk {:?} for {chunk:?}",
-                    snapshot.pos
-                );
+        let dimension = self.active.as_ref().map(|a| a.context.dimension.clone());
+        for snapshot in host.take_chunks() {
+            self.in_flight.remove(&snapshot.pos);
+            self.failures.remove(&snapshot.pos);
+            if Some(&snapshot.dimension) != dimension.as_ref() {
+                // Read from a level the map no longer shows.
                 continue;
             }
+            let chunk = snapshot.pos;
             let prepared = self.colors.prepare(host, snapshot, vanilla_biomes);
             self.ensure_region(RegionPos::of_chunk(chunk));
             self.workers.submit(move || WorkResult::TileBuilt {
@@ -387,9 +456,32 @@ impl MapEngine {
                 tile: build_tile(&prepared),
             });
             report.chunks_read += 1;
-            if Instant::now() >= deadline {
-                break;
+        }
+        let ticks = self.ticks;
+        let expired: Vec<ChunkPos> = self
+            .in_flight
+            .iter()
+            .filter(|(_, asked)| ticks - **asked > REQUEST_TIMEOUT)
+            .map(|(c, _)| *c)
+            .collect();
+        for chunk in expired {
+            self.in_flight.remove(&chunk);
+            let failures = self.failures.entry(chunk).or_insert(0);
+            *failures += 1;
+            if *failures < MAX_ATTEMPTS && self.loaded_chunks.contains(&chunk) {
+                self.pending_reads.insert(chunk);
             }
+        }
+        let budget = self
+            .settings
+            .performance
+            .chunk_reads_per_tick
+            .saturating_sub(self.in_flight.len());
+        for chunk in self.next_reads(focus, budget) {
+            self.pending_reads.remove(&chunk);
+            host.request_chunk(chunk, ReadMode::Surface);
+            self.in_flight.insert(chunk, ticks);
+            report.chunks_requested += 1;
         }
 
         // 3. Redraw, nearest regions first.
@@ -477,6 +569,7 @@ impl MapEngine {
     /// No reads, background jobs, loads or redraws left.
     pub fn is_idle(&self) -> bool {
         self.pending_reads.is_empty()
+            && self.in_flight.is_empty()
             && self.workers.outstanding() == 0
             && self.loading.is_empty()
             && self.regions.values().all(|r| !r.has_dirty())
@@ -509,6 +602,7 @@ mod tests {
         flat: FlatHost,
         player: RefCell<[f64; 3]>,
         reads: Cell<usize>,
+        requested: RefCell<Vec<ChunkPos>>,
         /// Chunks the host refuses to read.
         unreadable: RefCell<HashSet<ChunkPos>>,
     }
@@ -522,6 +616,7 @@ mod tests {
                 },
                 player: RefCell::new([8.0, 64.0, 8.0]),
                 reads: Cell::new(0),
+                requested: RefCell::default(),
                 unreadable: RefCell::default(),
             }
         }
@@ -539,12 +634,19 @@ mod tests {
                 dimension: DimensionId::new(DimensionId::OVERWORLD),
             })
         }
-        fn read_chunk(&self, chunk: ChunkPos, mode: ReadMode) -> Option<ChunkSnapshot> {
-            if self.unreadable.borrow().contains(&chunk) {
-                return None;
-            }
-            self.reads.set(self.reads.get() + 1);
-            self.flat.read_chunk(chunk, mode)
+        fn request_chunk(&self, chunk: ChunkPos, _mode: ReadMode) {
+            self.requested.borrow_mut().push(chunk);
+        }
+        fn take_chunks(&self) -> Vec<ChunkSnapshot> {
+            let asked: Vec<ChunkPos> = self.requested.borrow_mut().drain(..).collect();
+            asked
+                .into_iter()
+                .filter(|c| !self.unreadable.borrow().contains(c))
+                .map(|c| {
+                    self.reads.set(self.reads.get() + 1);
+                    flat_chunk(c)
+                })
+                .collect()
         }
         fn block_appearance(&self, block: &str) -> BlockAppearance {
             self.flat.block_appearance(block)
@@ -635,7 +737,10 @@ mod tests {
         ring.sort();
         assert_eq!(ring, [ChunkPos::new(-1, 0), ChunkPos::new(1, 0)]);
         let r = e.tick(&world, Duration::from_secs(1));
-        assert_eq!(r.chunks_read, 5);
+        assert_eq!(r.chunks_requested, 5);
+        assert_eq!(world.requested.borrow().len(), 5);
+        let r = e.tick(&world, Duration::from_secs(1));
+        assert_eq!(r.chunks_read, 5, "answers arrive a tick later");
         assert_eq!(world.reads.get(), 5);
         settle(&mut e, &world);
         assert_eq!(world.reads.get(), 7);

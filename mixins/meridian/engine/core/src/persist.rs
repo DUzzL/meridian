@@ -118,6 +118,13 @@ impl MapPaths {
         &self.root
     }
 
+    /// The map's folder (all dimensions): where its waypoints live.
+    pub fn map_dir(&self) -> &Path {
+        self.root
+            .parent()
+            .expect("a dimension folder inside a map folder")
+    }
+
     pub fn regions_dir(&self) -> PathBuf {
         self.root.join("regions")
     }

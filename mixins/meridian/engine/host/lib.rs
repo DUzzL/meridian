@@ -213,6 +213,9 @@ pub enum HostEvent {
     ChunkChanged(ChunkPos),
     /// A chunk left the client (E1).
     ChunkUnloaded(ChunkPos),
+    /// What the map knew about loaded chunks is void; the loaded ones follow
+    /// as `ChunkLoaded` (E1).
+    ChunksReset,
     /// One of the mod's key bindings, by id.
     Key { id: &'static str, pressed: bool },
     /// Resource packs were reloaded: block colours may have changed.
@@ -228,9 +231,13 @@ pub trait MapHost {
     /// The local player, if any.
     fn player(&self) -> Option<PlayerState>;
 
-    /// A top-down copy of a loaded client chunk (E2). `None` when the chunk
-    /// is not loaded or the host cannot read chunks yet.
-    fn read_chunk(&self, chunk: ChunkPos, mode: ReadMode) -> Option<ChunkSnapshot>;
+    /// Asks for a top-down copy of a loaded client chunk (E2). The answer
+    /// comes through [`MapHost::take_chunks`], possibly a frame later; a
+    /// chunk that is no longer loaded then is never answered.
+    fn request_chunk(&self, chunk: ChunkPos, mode: ReadMode);
+
+    /// The chunks read since the last call.
+    fn take_chunks(&self) -> Vec<ChunkSnapshot>;
 
     /// How a block state looks; asked once per name and resource reload.
     fn block_appearance(&self, block: &str) -> BlockAppearance;

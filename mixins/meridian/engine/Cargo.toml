@@ -12,7 +12,7 @@ path = "lib.rs"
 # The launcher points this at the Horizon source it builds the game from. Any
 # other dependency must be a crate and version in Horizon's Cargo.lock.
 horizon-client = { git = "https://github.com/horizon-rust/horizon", rev = "66f3981f522b24c250b21523a70080965b940424" }
-meridian-core = { path = "../core" }
-meridian-host = { path = "../host" }
+meridian-core = { path = "core" }
+meridian-host = { path = "host" }
 log = "=0.4.34"
 parking_lot = "=0.12.5"
