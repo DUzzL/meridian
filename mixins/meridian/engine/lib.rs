@@ -1491,6 +1491,7 @@ impl Meridian {
                     settings: &mut settings,
                     waypoints_changed: false,
                     settings_changed: false,
+                    seed_atlas: Default::default(),
                 };
                 let (result, action) = f(&mut screen, &mut env);
                 (result, action, env.waypoints_changed, env.settings_changed)
