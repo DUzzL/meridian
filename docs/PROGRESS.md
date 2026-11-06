@@ -293,3 +293,29 @@
 
 - Erledigte Strukturen markieren und ausblenden (Fabric: Kontextmenü), Wegpunkt aus Struktur (SA-07).
 - Biom-Ebene optional auf der Minimap, Prefetch über die Sicht hinaus.
+
+## Phase 5, Nachtrag: Seed Atlas auf dem Stand von main (2.0.0)
+
+- **Engine:** alle Versionen von 1.1 bis 26.3 portiert (D-026). Die Parität für alle 38 Versionen ist mit Fixtures aus der echten nativen Bibliothek belegt.
+- **Gelände-Look:** wie in der Fabric-Version, mit Wasser-, Relief-, End- und Nether-Darstellung und Biom-Hervorhebung.
+- **Detailgelände:** Kacheln der Oberwelt bis Schrittweite 4 nutzen die echte Basisoberfläche aus Horizons Weltgenerierung (`terrain_sampler.rs`), der Nether die Höhlenmaske der Carver.
+- **Zustand und Befehle:**
+  - eigene Seeds für Nether und End, Minecraft-Version pro Welt;
+  - alle `/seedatlas`-Befehle mit dem Wortlaut der Fabric-Version;
+  - erledigte Strukturen (ausblenden, Abzeichen, zurücksetzen), Markergröße.
+- **Weltkarte:**
+  - Knöpfe M und SA oben links, SA-Umschalter unten links;
+  - im Rechtsklickmenü auf Markern „Mark as completed“, „Create waypoint“ und „Create temporary waypoint“.
+- **Screens:** nächstes Biom bzw. nächste Struktur (Suche im Hintergrund, Karte springt hin, Wegpunkt nach Wahl), Biom-Hervorhebung, Weltgenerierung (Version, Welttyp), Zurücksetzen bestätigen.
+- **Im Spiel geprüft:**
+  - Gelände-Look in unerkundeten Gebieten;
+  - Knöpfe und Einstellungsseite;
+  - `/seedatlas status`;
+  - Suche „Abandoned Camp“ (Karte springt hin, temporärer Wegpunkt).
+- **Build und Tests:** 164 Kern-Tests, 2 Host-Tests, 8 Engine-Tests und der Paritätstest (alle Versionen) grün; Clippy sauber, Adapter-Check grün.
+
+**Offen**
+
+- Die Marker-Icons aus Minecraft-Texturen (Fabric 2.0 nutzt Mob-Köpfe, Truhe, weinenden Obsidian): Meridian zeigt weiter die Seed-Atlas-Icons.
+- Hintergrund-Prefetch über die Sicht hinaus.
+- Ein Vergleich des Gelände-Looks Pixel für Pixel mit der Fabric-Version steht aus.

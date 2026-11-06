@@ -783,7 +783,7 @@ impl Hooks for Meridian {
         let at = host.cursor();
         let right = event.button == 1;
         if self.map_open(host) {
-            let (layer_button, settings_button) = seed_atlas_buttons(Self::map_view(host).gui);
+            let (layer_button, settings_button, map_settings_button) = seed_atlas_buttons(Self::map_view(host).gui);
             let on = self.with_state(host, |s| s.config.current().seed_atlas.enabled);
             if on && !right && inside(layer_button, at) {
                 self.with_state(host, |s| {
@@ -795,9 +795,11 @@ impl Hooks for Meridian {
                 return Flow::Cancel;
             }
             if on && !right && inside(settings_button, at) {
-                self.with_state(host, |s| {
-                    s.open_from_map(Screen::Settings(SettingsScreen::group(meridian_core::screens::Group::SeedAtlas)))
-                });
+                self.with_state(host, |s| s.open_from_map(Screen::Settings(SettingsScreen::seed_atlas())));
+                return Flow::Cancel;
+            }
+            if on && !right && inside(map_settings_button, at) {
+                self.with_state(host, |s| s.open_from_map(Screen::Settings(SettingsScreen::default())));
                 return Flow::Cancel;
             }
             self.map_input(host, |s, view, map_data| {
@@ -1887,21 +1889,22 @@ impl Meridian {
             });
             // Seed Atlas: the switch and settings buttons, and tooltips.
             if sa_settings.enabled {
-                let (layer_button, settings_button) = seed_atlas_buttons(gui);
-                for (rect, label, color) in [
-                    (layer_button, "SA", if sa_settings.biome_layer { 0xFF55_FF55 } else { 0xFFAA_AAAA }),
-                    (settings_button, "...", 0xFFFF_FFFF),
+                let (layer_button, settings_button, map_settings_button) = seed_atlas_buttons(gui);
+                for (rect, label, color, tip) in [
+                    (
+                        layer_button,
+                        "SA",
+                        if sa_settings.biome_layer { 0xFF55_FF55 } else { 0xFFAA_AAAA },
+                        format!("Seed map layer: {}", if sa_settings.biome_layer { "On" } else { "Off" }),
+                    ),
+                    (map_settings_button, "M", 0xFFFF_FFFF, "Map Settings".to_owned()),
+                    (settings_button, "SA", 0xFFFF_FFFF, "Seed Atlas Settings".to_owned()),
                 ] {
                     let hover = inside(rect, mouse);
                     let sprite = if hover { "gui/sprites/widget/button_highlighted" } else { "gui/sprites/widget/button" };
                     ops.push(DrawOp::NineSlice { sprite, rect, argb: 0xFFFF_FFFF });
                     ops.push(DrawOp::Text { x: rect[0] + rect[2] / 2.0, y: rect[1] + 6.0, text: label.into(), argb: color, align: Align::Center, scale: 1.0 });
                     if hover {
-                        let tip = if label == "SA" {
-                            format!("Seed map layer: {}", if sa_settings.biome_layer { "On" } else { "Off" })
-                        } else {
-                            "Seed Atlas Settings".into()
-                        };
                         tooltip(&mut ops, mouse, gui, &[tip]);
                     }
                 }
@@ -1911,6 +1914,7 @@ impl Meridian {
                     && let Some(dim) = sa_dim
                     && !inside(layer_button, mouse)
                     && !inside(settings_button, mouse)
+                    && !inside(map_settings_button, mouse)
                     && s.map.menu.is_none()
                 {
                     let y = sa::sample_y(&sa_settings, dim);
@@ -2306,10 +2310,11 @@ fn structure_key(
     }
 }
 
-/// The Seed Atlas buttons at the map's left edge: the layer switch and the
-/// settings.
-fn seed_atlas_buttons(gui: [f32; 2]) -> ([f32; 4], [f32; 4]) {
-    ([0.0, (gui[1] - 20.0).max(0.0), 20.0, 20.0], [0.0, (gui[1] - 80.0).max(0.0), 20.0, 20.0])
+/// The Seed Atlas buttons on the map, where the Fabric version 2.0 puts
+/// them: the layer switch at the bottom left; the map settings ("M") and
+/// the Seed Atlas settings ("SA") compact in the top left corner.
+fn seed_atlas_buttons(gui: [f32; 2]) -> ([f32; 4], [f32; 4], [f32; 4]) {
+    ([0.0, (gui[1] - 20.0).max(0.0), 20.0, 20.0], [22.0, 0.0, 20.0, 20.0], [0.0, 0.0, 20.0, 20.0])
 }
 
 fn inside(r: [f32; 4], p: [f32; 2]) -> bool {

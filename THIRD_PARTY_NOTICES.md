@@ -12,3 +12,14 @@ Biome colours follow the engine's table, which is inspired by Amidst (GPLv3).
 The development tools in `tools/seedatlas-fixtures/` compile against a local
 checkout of those sources to produce test fixtures; no C code ships with the
 mod.
+
+## Seed Atlas for Xaero's World Map (Fabric)
+
+The Seed Atlas features (terrain look, commands, options, screens, marker
+types) follow DUzzL/seed-atlas-xaero main (GPLv3), ported to Rust. Its
+structure icons come from the Seed Atlas project.
+
+## Horizon
+
+The Nether cave mask in `mixins/meridian/engine/terrain_sampler.rs` follows
+Horizon's port of the vanilla cave carver (MIT, https://github.com/horizon-rust/horizon).
