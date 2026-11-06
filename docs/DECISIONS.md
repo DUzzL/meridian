@@ -262,3 +262,4 @@ Die Fabric-Version rechnet mit einer C-Bibliothek (Seed-Atlas-Engine, aus cubiom
   - drei Dimensionen, normale und große Biome, sechs Seeds.
 - Gleitkomma: Die Fabric-Bibliothek für Apple Silicon ist mit clang gebaut, das `a*b + c` zu FMA zusammenzieht. Weit draußen im End (über rund 78.000 Blöcke) ändert das die Inselgewichte. Meridian rechnet dort mit `mul_add` wie dieser Build. Auf x86-Builds der Fabric-Version können End-Biome so weit draußen abweichen.
 - Biomnamen, Farben und Existenz kommen generiert aus der Engine (`biome_table.c`), der Biom-Suchbaum aus ihrer Tabelle (`btree_table.py`).
+- Strukturen: Positionen, Biom- und Geländeprüfung, Varianten, Festungsringe, Spawn, Schleimchunks, Erzadern, End-Inseln, End-Gateways und End-Schiffe (Teile der End-Stadt) sind portiert. Die Paritätstests vergleichen jeden Treffer der Fabric-Schnittstelle für 25 Strukturtypen mit und ohne Biomprüfung, über fünf Seeds (`structures.txt.gz`).

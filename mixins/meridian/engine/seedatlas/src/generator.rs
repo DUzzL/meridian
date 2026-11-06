@@ -57,6 +57,13 @@ impl Generator {
         }
     }
 
+    pub fn end_noise(&self) -> Option<&EndNoise> {
+        match &self.noise {
+            Noise::End(en) => Some(en),
+            _ => None,
+        }
+    }
+
     pub fn overworld(&self) -> Option<&BiomeNoise> {
         match &self.noise {
             Noise::Overworld(bn) => Some(bn),

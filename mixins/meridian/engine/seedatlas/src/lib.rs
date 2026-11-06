@@ -12,9 +12,13 @@ pub mod biome_noise;
 mod biome_table;
 pub mod biomes;
 mod btree21wd;
+pub mod endcity;
+pub mod finders;
 pub mod generator;
 pub mod noise;
 pub mod rng;
+pub mod structures;
+pub mod viability;
 
 pub use atlas::{Atlas, AtlasError};
 pub use biome_noise::Range;

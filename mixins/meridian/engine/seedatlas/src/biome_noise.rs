@@ -29,6 +29,7 @@ pub const NP_WEIRDNESS: usize = 5;
 
 pub const SAMPLE_NO_SHIFT: u32 = 0x1;
 pub const SAMPLE_NO_DEPTH: u32 = 0x2;
+pub const SAMPLE_NO_BIOME: u32 = 0x4;
 
 // ------------------------------------------------------------- splines --
 
@@ -330,9 +331,39 @@ impl BiomeNoise {
         }
     }
 
+    /// The depth parameter at a quarter cell without the shift noise, as
+    /// `sampleClimatePara` with `NP_DEPTH` (y 0) puts it in `np[4]`.
+    pub fn climate_depth(&self, x: f64, z: f64) -> i64 {
+        let c = self.climate[NP_CONTINENTALNESS].sample(x, 0.0, z) as f32;
+        let e = self.climate[NP_EROSION].sample(x, 0.0, z) as f32;
+        let w = self.climate[NP_WEIRDNESS].sample(x, 0.0, z) as f32;
+        let vals = [
+            c,
+            e,
+            -3.0f32 * ((w.abs() - 0.666_666_7_f32).abs() - 0.333_333_34_f32),
+            w,
+        ];
+        let off = (self.splines.get(self.root, &vals) + 0.015f32) as f64;
+        let d = (1.0 - 0.0 / 128.0 - 83.0 / 160.0 + off) as f32;
+        (10000.0f32 * d) as i64
+    }
+
     /// The biome at a quarter-resolution cell (`sampleBiomeNoise`); `dat`
     /// carries the last tree leaf between calls when given.
     pub fn sample(&self, x: i32, y: i32, z: i32, dat: Option<&mut u64>, flags: u32) -> i32 {
+        self.sample_np(x, y, z, dat, flags).0
+    }
+
+    /// `sampleBiomeNoise` with its climate point; `SAMPLE_NO_BIOME` skips
+    /// the biome lookup (the id is then `NONE`).
+    pub fn sample_np(
+        &self,
+        x: i32,
+        y: i32,
+        z: i32,
+        dat: Option<&mut u64>,
+        flags: u32,
+    ) -> (i32, [i64; 6]) {
         let (mut px, mut pz) = (x as f64, z as f64);
         if flags & SAMPLE_NO_SHIFT == 0 {
             px += self.climate[NP_SHIFT].sample(x as f64, 0.0, z as f64) * 4.0;
@@ -362,7 +393,12 @@ impl BiomeNoise {
             (10000.0f32 * d) as i64,
             (10000.0f32 * w) as i64,
         ];
-        climate_to_biome(&np, dat)
+        let id = if flags & SAMPLE_NO_BIOME == 0 {
+            climate_to_biome(&np, dat)
+        } else {
+            crate::biomes::NONE
+        };
+        (id, np)
     }
 }
 
