@@ -1,0 +1,18 @@
+[package]
+name = "meridian-horizon"
+description = "Meridian's adapter to Horizon's native mod API"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+# The launcher points this at the Horizon source it builds the game from. Any
+# other dependency must be a crate and version in Horizon's Cargo.lock.
+horizon-client = { git = "https://github.com/horizon-rust/horizon", rev = "66f3981f522b24c250b21523a70080965b940424" }
+meridian-core = { path = "../core" }
+meridian-host = { path = "../host" }
+log = "=0.4.34"
+parking_lot = "=0.12.5"

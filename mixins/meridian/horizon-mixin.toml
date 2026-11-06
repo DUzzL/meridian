@@ -1,0 +1,14 @@
+# Meridian: minimap, world map and Seed Atlas for Horizon (a native trait mod).
+# Build: horizon-launcher native-build <this folder> --instance <instance> --trust-native-code
+[mod]
+id = "meridian"
+version = "0.1.0"
+
+# The installed Nightly (2026-11-05). Phase 2 uses catalog hooks only; the
+# transitional mixins for chunk reading (docs/HORIZON_API.md E1/E2) will need
+# this exact commit.
+[compatibility]
+horizon_revision = "66f3981f522b24c250b21523a70080965b940424"
+
+[api]
+path = "engine"
