@@ -30,6 +30,9 @@ use crate::worker::WorkerPool;
 
 /// The map used until map selection (sub-worlds) arrives.
 pub const DEFAULT_MAP: &str = "default";
+/// Explored chunks kept in memory at most (a full region is 1024 and takes
+/// about 5 MB with its pixels): about 500 MB, whatever the region limit.
+pub const MAX_CACHED_CHUNKS: usize = 96 * 1024;
 /// Chunks redrawn per batch between deadline checks.
 const RENDER_BATCH: usize = 32;
 /// Ticks a chunk request may stay unanswered before it is asked again.
@@ -142,6 +145,9 @@ pub struct MapEngine {
     workers: WorkerPool<WorkResult>,
     last_save: Instant,
     save_errors: usize,
+    /// The cache clock when the last tick ended: regions used since are
+    /// shown now and are not evicted.
+    frame_start: u64,
 }
 
 impl MapEngine {
@@ -154,6 +160,7 @@ impl MapEngine {
             generation: 0,
             regions: HashMap::new(),
             clock: 0,
+            frame_start: 0,
             loading: HashSet::new(),
             waiting_tiles: HashMap::new(),
             pending_reads: HashSet::new(),
@@ -603,24 +610,34 @@ impl MapEngine {
 
     fn evict(&mut self, focus: RegionPos) -> usize {
         let limit = self.settings.world_map.max_loaded_regions.max(9);
-        if self.regions.len() <= limit {
+        let chunks: usize = self.regions.values().map(Region::tile_count).sum();
+        if self.regions.len() <= limit && chunks <= MAX_CACHED_CHUNKS {
+            self.frame_start = self.clock;
             return 0;
         }
         let mut by_age: Vec<(u64, RegionPos)> = self
             .regions
             .values()
-            // Never drop the player's own neighbourhood.
+            // Never drop the player's own neighbourhood, nor what is shown now.
             .filter(|r| (r.pos.x - focus.x).abs() > 1 || (r.pos.z - focus.z).abs() > 1)
+            .filter(|r| r.last_used <= self.frame_start)
             .map(|r| (r.last_used, r.pos))
             .collect();
         by_age.sort();
-        let excess = self.regions.len() - limit;
+        let (mut count, mut chunks) = (self.regions.len(), chunks);
+        self.frame_start = self.clock;
         let mut evicted = 0;
-        for (_, pos) in by_age.into_iter().take(excess) {
+        for (_, pos) in by_age {
+            if count <= limit && chunks <= MAX_CACHED_CHUNKS {
+                break;
+            }
             if self.regions[&pos].unsaved {
                 self.save(pos);
             }
-            self.regions.remove(&pos);
+            if let Some(r) = self.regions.remove(&pos) {
+                chunks -= r.tile_count();
+            }
+            count -= 1;
             evicted += 1;
         }
         evicted
@@ -965,6 +982,9 @@ mod tests {
         for x in 0..12 {
             e.handle(&world, HostEvent::ChunkLoaded(ChunkPos::new(x * 32, 0)));
         }
+        settle(&mut e, &world);
+        // Regions shown since the last tick stay one more tick.
+        e.tick(&world, std::time::Duration::from_millis(50));
         settle(&mut e, &world);
         assert!(e.loaded_region_count() <= 9);
         let paths = MapPaths::new(

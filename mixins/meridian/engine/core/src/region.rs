@@ -41,6 +41,8 @@ pub struct Region {
     pub revision: u64,
     /// The cache's clock when last used, for eviction.
     pub last_used: u64,
+    /// Chunks with a tile.
+    count: usize,
 }
 
 /// The height neighbours are shaded against: the water surface where there
@@ -59,6 +61,7 @@ impl Region {
             unsaved: false,
             revision: 0,
             last_used: 0,
+            count: 0,
         }
     }
 
@@ -71,7 +74,7 @@ impl Region {
     }
 
     pub fn tile_count(&self) -> usize {
-        self.tiles.iter().filter(|t| t.is_some()).count()
+        self.count
     }
 
     /// Stores a tile and marks it and its south and east neighbours inside
@@ -82,6 +85,9 @@ impl Region {
         let pos = tile.pos;
         if self.tiles[chunk_index(pos)].as_deref() == Some(&tile) {
             return Vec::new();
+        }
+        if self.tiles[chunk_index(pos)].is_none() {
+            self.count += 1;
         }
         self.tiles[chunk_index(pos)] = Some(Box::new(tile));
         self.unsaved = true;
