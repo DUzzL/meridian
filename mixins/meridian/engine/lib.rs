@@ -9,6 +9,7 @@
 
 mod gpu;
 mod gpu_map;
+mod terrain_sampler;
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
