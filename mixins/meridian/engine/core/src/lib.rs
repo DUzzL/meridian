@@ -20,9 +20,11 @@ pub mod config;
 pub mod engine;
 pub mod geom;
 pub mod keybinds;
+pub mod minimap;
 pub mod persist;
 pub mod region;
 pub mod tile;
+pub mod waypoint;
 pub mod worker;
 
 pub use engine::{MapEngine, TickReport};
