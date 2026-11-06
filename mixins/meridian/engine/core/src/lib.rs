@@ -29,6 +29,7 @@ pub mod radar;
 pub mod region;
 pub mod screens;
 pub mod seedatlas;
+pub mod seedatlas_look;
 pub mod texture;
 pub mod tile;
 pub mod ui;

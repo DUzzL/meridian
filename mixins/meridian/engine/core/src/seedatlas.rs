@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::SeedAtlasSettings;
 use crate::geom::RegionPos;
 use crate::persist;
+use crate::seedatlas_look::{self, BiomeLooks, HeightsRequest, TileInput, VanillaLooks};
 
 /// Minecraft's seed parsing (`WorldOptions.parseSeed`): a number, else the
 /// text's Java `hashCode`; blank is no seed.
@@ -359,9 +360,16 @@ pub struct Tile {
 
 const MAX_TILES: usize = 1200;
 
+/// How tiles are coloured: the terrain look and the biome data it reads.
+#[derive(Clone)]
+struct TileLook {
+    terrain: bool,
+    looks: Arc<dyn BiomeLooks>,
+}
+
 /// Work sent to the threads: the generation it belongs to, the seed's
-/// generators, the marker kinds wanted and the job.
-type Work = (u64, Arc<Atlas>, Vec<i32>, Job);
+/// generators, the marker kinds wanted, the tile look and the job.
+type Work = (u64, Arc<Atlas>, Vec<i32>, TileLook, Job);
 
 pub struct SeedService {
     atlas: Option<Arc<Atlas>>,
@@ -370,6 +378,7 @@ pub struct SeedService {
     tiles: HashMap<Job, (Tile, u64)>,
     markers: HashMap<Job, Arc<Vec<Hit>>>,
     pending: HashSet<Job>,
+    look: TileLook,
     clock: u64,
     jobs: Option<mpsc::Sender<Work>>,
     done: mpsc::Receiver<(u64, Done)>,
@@ -398,6 +407,10 @@ impl Default for SeedService {
             tiles: HashMap::new(),
             markers: HashMap::new(),
             pending: HashSet::new(),
+            look: TileLook {
+                terrain: true,
+                looks: Arc::new(VanillaLooks),
+            },
             clock: 0,
             jobs: None,
             done,
@@ -407,25 +420,72 @@ impl Default for SeedService {
     }
 }
 
-fn run(atlas: &Atlas, kinds: &[i32], job: Job) -> Done {
+/// The colours of a region's biome tile. With the terrain look on (and a
+/// version that has terrain) the heights the Java tile worker requests are
+/// computed here, with a one-sample halo, and the tile gets its relief.
+fn tile_pixels(atlas: &Atlas, look: &TileLook, job: Job) -> Vec<u32> {
+    let Job::Tile {
+        dimension,
+        region,
+        step,
+        y,
+    } = job
+    else {
+        return Vec::new();
+    };
+    let n = 512 / step;
+    let (x0, z0) = region.min_block();
+    let ids = atlas
+        .biome_area(dimension, x0, z0, y, step, n, n)
+        .unwrap_or_default();
+    let argb: Vec<u32> = ids
+        .iter()
+        .map(|&id| meridian_seedatlas::biomes::color(id))
+        .collect();
+    let size = n as usize;
+    let terrain_style = look.terrain && atlas.has_terrain();
+    if !terrain_style || ids.len() != size * size {
+        return argb;
+    }
+    // Meridian computes a tile in one pass, so every tile is the refinement pass.
+    let request = seedatlas_look::heights_request(
+        dimension,
+        step,
+        terrain_style,
+        false,
+        true,
+        false,
+        atlas.has_terrain(),
+    );
+    let (hx, hz, hn) = (x0 - step, z0 - step, n + 2);
+    let heights = match request {
+        HeightsRequest::None => None,
+        HeightsRequest::Heights => atlas.height_area(dimension, hx, hz, step, hn, hn).ok(),
+        // Carved masks are not available here: the plain floor.
+        HeightsRequest::NetherFloor => atlas.nether_floor_area(hx, hz, y, step, hn, hn).ok(),
+    };
+    seedatlas_look::style_tile(&TileInput {
+        looks: look.looks.as_ref(),
+        mc: atlas.mc,
+        dimension,
+        origin_x: x0,
+        origin_z: z0,
+        step,
+        size,
+        seed: atlas.seed,
+        terrain_style,
+        refining: true,
+        ids: &ids,
+        argb: &argb,
+        heights: heights.as_deref(),
+        surface: None,
+        highlight: &[],
+    })
+}
+
+fn run(atlas: &Atlas, kinds: &[i32], look: &TileLook, job: Job) -> Done {
     match job {
-        Job::Tile {
-            dimension,
-            region,
-            step,
-            y,
-        } => {
-            let n = 512 / step;
-            let (x0, z0) = region.min_block();
-            let ids = atlas
-                .biome_area(dimension, x0, z0, y, step, n, n)
-                .unwrap_or_default();
-            let pixels = ids
-                .iter()
-                .map(|&id| meridian_seedatlas::biomes::color(id))
-                .collect();
-            Done::Tile(job, Arc::new(pixels))
-        }
+        Job::Tile { .. } => Done::Tile(job, Arc::new(tile_pixels(atlas, look, job))),
         Job::Markers { dimension, region } => {
             let (x0, z0) = region.min_block();
             let b = [x0, z0, x0 + 511, z0 + 511];
@@ -489,6 +549,10 @@ impl SeedService {
             self.markers.clear();
             self.pending.retain(|j| matches!(j, Job::Tile { .. }));
         }
+        if s.terrain_look != self.look.terrain {
+            self.look.terrain = s.terrain_look;
+            self.invalidate();
+        }
         let workers = if s.worker_threads == 0 {
             std::thread::available_parallelism()
                 .map_or(2, |n| n.get().saturating_sub(2).clamp(1, 4))
@@ -511,10 +575,13 @@ impl SeedService {
                 .spawn(move || {
                     loop {
                         let next = rx.lock().recv();
-                        let Ok((generation, atlas, kinds, job)) = next else {
+                        let Ok((generation, atlas, kinds, look, job)) = next else {
                             break;
                         };
-                        if done.send((generation, run(&atlas, &kinds, job))).is_err() {
+                        if done
+                            .send((generation, run(&atlas, &kinds, &look, job)))
+                            .is_err()
+                        {
                             break;
                         }
                     }
@@ -525,6 +592,20 @@ impl SeedService {
         }
         self.jobs = Some(tx);
         self.workers = workers;
+        self.pending.clear();
+    }
+
+    /// Sets the biome data the terrain look reads (tints, water colour);
+    /// tiles computed with the old data are dropped.
+    pub fn set_looks(&mut self, looks: Arc<dyn BiomeLooks>) {
+        self.look.looks = looks;
+        self.invalidate();
+    }
+
+    fn invalidate(&mut self) {
+        self.generation += 1;
+        self.tiles.clear();
+        self.markers.clear();
         self.pending.clear();
     }
 
@@ -584,7 +665,13 @@ impl SeedService {
             return;
         }
         if tx
-            .send((self.generation, atlas.clone(), self.kinds.clone(), job))
+            .send((
+                self.generation,
+                atlas.clone(),
+                self.kinds.clone(),
+                self.look.clone(),
+                job,
+            ))
             .is_ok()
         {
             self.pending.insert(job);

@@ -409,6 +409,9 @@ pub struct SeedAtlasSettings {
     pub overworld_y: i32,
     pub nether_y: i32,
     pub end_y: i32,
+    /// Terrain look for seed-only tiles: relief shading, water depth, End
+    /// islands and Nether floors instead of flat biome colours.
+    pub terrain_look: bool,
     /// Marker kinds by id (`village`, `stronghold`...); missing ids use
     /// their default.
     pub markers: std::collections::BTreeMap<String, bool>,
@@ -429,6 +432,7 @@ impl Default for SeedAtlasSettings {
             overworld_y: 255,
             nether_y: 64,
             end_y: 128,
+            terrain_look: true,
             markers: std::collections::BTreeMap::new(),
         }
     }
