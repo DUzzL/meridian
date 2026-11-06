@@ -309,9 +309,8 @@ fn dimension_of_kind(structure: i32) -> Dimension {
         marker::STRONGHOLD | marker::SPAWN | marker::SLIME_CHUNK | marker::ORE_VEIN => {
             Dimension::Overworld
         }
-        k => {
-            meridian_seedatlas::structures::config(k).map_or(Dimension::Overworld, |c| c.dimension)
-        }
+        k => meridian_seedatlas::structures::config(k, meridian_seedatlas::mc::MC_NEWEST)
+            .map_or(Dimension::Overworld, |c| c.dimension),
     }
 }
 

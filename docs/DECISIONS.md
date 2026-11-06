@@ -263,3 +263,14 @@ Die Fabric-Version rechnet mit einer C-Bibliothek (Seed-Atlas-Engine, aus cubiom
 - Gleitkomma: Die Fabric-Bibliothek für Apple Silicon ist mit clang gebaut, das `a*b + c` zu FMA zusammenzieht. Weit draußen im End (über rund 78.000 Blöcke) ändert das die Inselgewichte. Meridian rechnet dort mit `mul_add` wie dieser Build. Auf x86-Builds der Fabric-Version können End-Biome so weit draußen abweichen.
 - Biomnamen, Farben und Existenz kommen generiert aus der Engine (`biome_table.c`), der Biom-Suchbaum aus ihrer Tabelle (`btree_table.py`).
 - Strukturen: Positionen, Biom- und Geländeprüfung, Varianten, Festungsringe, Spawn, Schleimchunks, Erzadern, End-Inseln, End-Gateways und End-Schiffe (Teile der End-Stadt) sind portiert. Die Paritätstests vergleichen jeden Treffer der Fabric-Schnittstelle für 25 Strukturtypen mit und ohne Biomprüfung, über fünf Seeds (`structures.txt.gz`).
+
+## D-026: Seed Atlas auf dem Stand von main, alle Minecraft-Versionen
+
+Der Port folgt jetzt DUzzL/Seed-Atlas main (Engine, identisch mit fc2c628) und DUzzL/seed-atlas-xaero main (Glue ABI 6, Version 2.0.0). Wie in der Fabric-Version sind alle wählbaren Versionen von 1.1 bis 26.3 portiert:
+
+- Layer-Stack bis 1.17, Klima-Bäume ab 1.18;
+- Nether und End je Version;
+- Strukturen, Festungen und Spawn je Version;
+- die neuen Funktionen für Geländehöhen und den Nether-Boden (mit und ohne Carving-Maske).
+
+Fixtures liegen pro Version in `seedatlas/tests/fixtures/<version>.txt.gz`. Sie stammen aus der echten Glue-Schicht (`tools/seedatlas-fixtures/build.sh`). `tests/parity.rs` prüft jede Zeile aller 38 Versionen, alle stimmen exakt überein. Die Arbeit lief in getrennten Teilaufgaben (Layer, Klima, Gelände, Strukturpositionen, Strukturprüfungen). Die Regeln dafür stehen in `docs/SEEDATLAS_PORT.md`.

@@ -179,6 +179,6 @@ mod tests {
         assert_eq!(str2mc("1.16.1"), MC_1_16_1);
         assert_eq!(mc2str(MC_1_16), "1.16");
         assert_eq!(str2mc("0.9"), MC_UNDEF);
-        assert!(MC_1_17 < MC_1_18 && MC_B1_8 < MC_1_0);
+        const { assert!(MC_1_17 < MC_1_18 && MC_B1_8 < MC_1_0) };
     }
 }
