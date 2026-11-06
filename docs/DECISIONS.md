@@ -52,3 +52,52 @@ Seed Atlas (`seed-atlas-xaero`) steht unter GPLv3. Seine Engine stammt aus `DUzz
 ## D-007: Name Meridian (entschieden 2026-11-06)
 
 **Entschieden: Meridian** (Minimap + Weltkarte), ohne Bezug zu Xaero.
+
+## D-008: Repo-Layout = Bundle-Layout
+
+Das Repo enthält das native Bundle direkt unter `mixins/meridian/`:
+
+- `horizon-mixin.toml` (Manifest des Bundles),
+- `engine/` (das `[api]`-Crate `meridian-horizon`, der Horizon-Adapter),
+- `core/` (`meridian-core`) und `host/` (`meridian-host`).
+
+Der Launcher baut den Ordner so, wie er ist. Es gibt keinen Kopier- oder Generierungsschritt.
+
+Folge: Die Crates dürfen **nichts aus dem Repo-Workspace erben** (`version.workspace`, `[workspace.dependencies]`, `[workspace.lints]`). Im Bundle existiert dieser Workspace nicht. Jedes Crate führt seine Versionen und Lints selbst. Der Root-`Cargo.toml` listet nur die Mitglieder auf und schließt `engine/` aus.
+
+## D-009: Nur Crates in Horizons Versionen
+
+Native Mods dürfen nur Crates und Versionen aus Horizons `Cargo.lock` nutzen. Daraus folgt:
+
+- Der Repo-Lockfile wird aus Horizons Lockfile erzeugt (kopieren, dann von Cargo kürzen lassen).
+- `tools/check_lock.py` prüft das in CI.
+- Abhängigkeiten werden exakt gepinnt (`=x.y.z`).
+- Erlaubt sind derzeit serde, serde_json, toml, flate2, parking_lot, log und thiserror. Für Threads gibt es kein crossbeam und kein rayon; der Worker-Pool nutzt `std::sync::mpsc`.
+
+## D-010: Adapter-Prüfung außerhalb des Repos
+
+`tools/check-adapter.sh` holt den gepinnten Horizon-Commit nach `~/.cache/meridian/horizon-<rev>`. Innerhalb des Repos würde Cargo unseren Workspace für Horizons halten.
+
+Geprüft wird mit Horizons Lockfile und Horizons `[patch.crates-io]` (wgpu-hal, naga, libmimalloc-sys), also so, wie der Launcher das Spiel baut. Dauer lokal etwa 25 s inkrementell.
+
+## D-011: Eigenes Regionsformat, gespeichert werden Tiles statt Pixel
+
+- Region = 32×32 Chunks = 512×512 Blöcke.
+- Gespeichert werden pro Spalte die Farben beider Stile, Höhe, Wasser und Licht (14 Byte), zlib-komprimiert (`.mrg`, Details in `core/src/codec.rs`).
+- Pixel werden nach dem Laden neu gezeichnet. Ein Stilwechsel (Farben, Schattierung, Licht) braucht also weder Neu-Lesen noch Dateikonvertierung.
+- Pfad: `horizon-mods/.horizon-mod-data/meridian/worlds/<sp-welt|mp-adresse>/<karte>/<dimension>/regions/x_z.mrg`. Jeder Teil ist escaped (Windows-sicher, Groß-/Kleinschreibung-neutral).
+
+## D-012: Standardwerte mit Unsicherheit
+
+- `minimap_block_colors = 0` in der Referenzkonfiguration ist als „genau“ (Texturfarben) interpretiert, nicht als „Vanilla“.
+- `minimap_auto_cave_mode = 2` ist als „Dach ≥ 3×3“ interpretiert.
+
+Beides ist im Spiel zu bestätigen (O3, `KEYBINDS.md`).
+
+## D-013: Was der Adapter bis Phase 3 nicht kann
+
+Chunk-Ereignisse (E1) und das Lesen von Chunks samt Blockfarben (E2) fehlen noch:
+
+- `HorizonHost::read_chunk` liefert `None`.
+- Engine, Speicherung, Tasten, Einstellungen und Welt-/Dimensionswechsel laufen bereits.
+- Die Übergangs-Mixins für E1/E2 kommen in Phase 3. Sie brauchen den Pin `horizon_revision`, der bereits auf die installierte Nightly gesetzt ist.

@@ -36,3 +36,53 @@
 **Bekannte Probleme**
 
 - Die öffentlichen Seiten nennen I/O als Zoomtasten; die installierten Versionen haben keine Belegung. Maßgeblich ist `options.txt`.
+
+## Phase 2: Grundgerüst (abgeschlossen)
+
+**Fertig**
+
+- Workspace, GPLv3-Lizenz, CI (`.github/workflows/ci.yml`):
+  - fmt, clippy `-D warnings` und Tests mit Rust 1.95 auf Linux, Windows und macOS,
+  - Lockfile-Prüfung gegen Horizon,
+  - Adapter-Check gegen die gepinnte Nightly (nur `main` und manuell).
+- `meridian-host`: die abgegrenzte Schnittstelle `MapHost` + `HostEvent` (D-003), inklusive der fehlenden Fähigkeiten E1/E2.
+- `meridian-core`:
+  - `config`: Einstellungen aller Bereiche mit Standardwerten aus O2, Profile, TOML-Datei; kaputte Datei wird beiseitegelegt.
+  - `keybinds`: 30 Belegungen, Abgleich roher Tasten mit der Wahl des Spielers.
+  - `persist`: atomares Schreiben, escapte Pfade pro Welt/Server/Karte/Dimension.
+  - `geom`, `tile`, `region`: Datenmodell Chunk → Tile → Region; inkrementelles Neuzeichnen nur der geänderten Chunks und ihrer Süd-/Ost-Nachbarn, auch über Regionsgrenzen.
+  - `color`: Vanilla- und Texturfarben, Biom-Tints, drei Hangmodi, Höhentiefe, Wasser nach Tiefe, Tag/Nacht- und Blocklicht.
+  - `codec`: Regionsdateien, versioniert, gegen kaputte Dateien abgesichert.
+  - `worker`: Thread-Pool; Panics in Jobs stoppen ihn nicht; beim Beenden werden offene Speicher-Jobs abgearbeitet.
+  - `engine`:
+    - Chunks lesen: nächste zuerst, begrenzt pro Tick;
+    - Tiles werden auf Workern gebaut;
+    - Regionen asynchron laden und speichern;
+    - Zeichnen mit Zeitbudget pro Frame;
+    - LRU-Verdrängung, verdrängte Regionen werden vorher gespeichert;
+    - veraltete Ergebnisse nach Dimensionswechsel werden verworfen.
+- `meridian-horizon` (Adapter, Trait-Mod):
+  - registriert die Mod mit allen Tasten unter Optionen > Mods,
+  - leitet Tasten, Welt laden/entladen, Trennen, Ressourcen-Reload und Beenden an die Engine weiter,
+  - tickt die Engine pro Frame im Budget,
+  - Welt-/Server-Erkennung über `client_state().server_address` bzw. `world_dir()`.
+- `tools/check-adapter.sh`, `tools/check_lock.py`.
+
+**Build und Tests**
+
+- `cargo test --workspace --locked`: 55 Tests grün (53 Kern, 2 Host).
+- `cargo clippy --workspace --all-targets -- -D warnings`: sauber.
+- `tools/check-adapter.sh`: Der Adapter kompiliert gegen Horizon `66f3981` (installierte Nightly) mit dessen Lockfile und Patches; keine fremden Crates.
+
+**Offen**
+
+- E1/E2 als Übergangs-Mixins (Phase 3): Bis dahin schreibt die Mod im Spiel noch keine Kartendaten (D-013).
+- Noch nicht im Spiel gebaut (`horizon-launcher native-build`) und gestartet. Das kommt mit Phase 3, sobald es etwas zu sehen gibt.
+- CI ist nicht auf GitHub gelaufen: Es gibt noch kein Remote (`gh` nicht angemeldet). Die Pakete für den Adapter-Job unter Ubuntu sind nicht verifiziert.
+- Mit Rust 1.95 (MSRV) wurde nur in CI geplant, lokal ist 1.97.1 installiert.
+- Die Minimap braucht eventuell einen eigenen Terrain-Stil neben dem der Weltkarte; die Engine zeichnet derzeit nach dem Weltkarten-Stil (Phase 3).
+
+**Bekannte Probleme / Risiken**
+
+- Speicher: eine voll erkundete Region braucht etwa 3,6 MB Tiles + 1 MB Pixel. Bei 300 geladenen Regionen sind das im Extremfall rund 1,4 GB. Eine Messung und gegebenenfalls ein Speicherbudget zusätzlich zum Regionslimit folgen in Phase 6.
+- Ob der Launcher Pfad-Abhängigkeiten zwischen Crates im Bundle (`engine` → `../core`) akzeptiert, ist dokumentiert, aber noch nicht praktisch getestet. Rückfalloption: `core`/`host` per `#[path]` als Module in `engine` einbinden.
