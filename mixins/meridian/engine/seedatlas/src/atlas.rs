@@ -1,5 +1,5 @@
 //! The Seed Atlas API, matching the Fabric version's native interface
-//! (`seedatlas_xaero.h`, ABI 4) call for call, so parity tests can compare
+//! (`seedatlas_xaero.h`, ABI 6) call for call, so parity tests can compare
 //! them directly.
 
 use crate::biome_noise::Range;
@@ -218,13 +218,42 @@ impl Atlas {
 
 // ----------------------------------------------------------- structures --
 
-use crate::endcity::{EndSurface, end_city_has_ship, end_city_terrain};
+use crate::endcity::{EndSurface, end_city_has_ship};
 use crate::noise::DoublePerlin;
 use crate::rng::Xoroshiro;
 use crate::structures::{
     config, end_islands, fixed_end_gateways, is_slime_chunk, kind, structure_pos,
 };
-use crate::viability::{variant, viable_structure_pos};
+use crate::viability::viable_structure_pos;
+
+// TEMP shim: forwards to the engine files that do not take the version yet.
+fn variant(
+    structure: i32,
+    _mc: i32,
+    seed: u64,
+    x: i32,
+    z: i32,
+    biome: i32,
+) -> Option<crate::viability::Variant> {
+    crate::viability::variant(structure, seed, x, z, biome)
+}
+
+// TEMP shim.
+fn strongholds(seed: u64, _mc: i32, g: Option<&Generator>) -> Vec<crate::finders::Stronghold> {
+    crate::finders::strongholds(seed, g)
+}
+
+// TEMP shim.
+fn end_city_terrain(
+    _mc: i32,
+    seed: u64,
+    en: &crate::biome_noise::EndNoise,
+    sn: &EndSurface,
+    x: i32,
+    z: i32,
+) -> i32 {
+    crate::endcity::end_city_terrain(seed, en, sn, x, z)
+}
 
 /// Marker kinds beyond the engine's structures (the Fabric interface's).
 pub mod marker {
@@ -381,6 +410,9 @@ impl Atlas {
         if range_too_large(mx0, mz0, mx1, mz1) {
             return Err(AtlasError::RangeTooLarge);
         }
+        if self.mc < crate::terrain::TERRAIN_MC {
+            return Ok(Vec::new());
+        }
         let noise = OreNoise::new(self.seed as u64);
         let mut out = Vec::new();
         for mz in mz0..=mz1 {
@@ -441,6 +473,10 @@ impl Atlas {
         if range_too_large(x0, z0, x1, z1) {
             return Err(AtlasError::RangeTooLarge);
         }
+        // `getEndIslands` yields nothing without the structure.
+        if config(kind::END_ISLAND, self.mc).is_none() {
+            return Ok(Vec::new());
+        }
         let mut out = Vec::new();
         for cz in z0..=z1 {
             for cx in x0..=x1 {
@@ -451,7 +487,7 @@ impl Atlas {
                     }
                     flags = RESULT_BIOME_CHECKED | RESULT_BIOME_VIABLE;
                 }
-                for i in end_islands(self.seed as u64, cx, cz) {
+                for i in end_islands(self.mc, self.seed as u64, cx, cz) {
                     if in_box(i.x, i.z, b) {
                         out.push(Hit {
                             kind: kind::END_ISLAND,
@@ -496,11 +532,18 @@ impl Atlas {
         } else {
             structure
         };
-        let c = (1..kind::COUNT)
-            .contains(&engine)
-            .then(|| config(engine))
-            .flatten()
-            .ok_or(AtlasError::Unsupported)?;
+        if !(1..kind::COUNT).contains(&engine) {
+            return Err(AtlasError::Unsupported);
+        }
+        let Some(c) = config(engine, self.mc) else {
+            // Known to the newest version but not generated in this one
+            // (Trial Chambers before 1.21...): nothing to show.
+            return if config(engine, crate::mc::MC_NEWEST).is_some() {
+                Ok(Vec::new())
+            } else {
+                Err(AtlasError::Unsupported)
+            };
+        };
         let size = c.region_size as i32 * 16;
         let (rx0, rz0, rx1, rz1) = (
             floordiv(b[0], size),
@@ -516,7 +559,7 @@ impl Atlas {
         let surface = (check_biome && engine == kind::END_CITY).then(|| self.end_surface());
         let mut out = Vec::new();
         if structure == kind::END_GATEWAY {
-            for (i, (x, z)) in fixed_end_gateways(seed).into_iter().enumerate() {
+            for (i, (x, z)) in fixed_end_gateways(self.mc, seed).into_iter().enumerate() {
                 if in_box(x, z, b) {
                     out.push(Hit {
                         kind: structure,
@@ -531,7 +574,7 @@ impl Atlas {
         }
         for rz in rz0..=rz1 {
             for rx in rx0..=rx1 {
-                let Some((x, z)) = structure_pos(engine, seed, rx, rz) else {
+                let Some((x, z)) = structure_pos(engine, self.mc, seed, rx, rz) else {
                     continue;
                 };
                 if !in_box(x, z, b) {
@@ -550,14 +593,20 @@ impl Atlas {
                     }
                     if engine == kind::ABANDONED_CAMP {
                         detail = biome & CAMP_BIOME_MASK;
-                        if variant(engine, seed, x, z, biome).is_some_and(|v| v.special) {
+                        if variant(engine, self.mc, seed, x, z, biome).is_some_and(|v| v.special) {
                             detail |= CAMP_SPECIAL_LOOT;
                         }
                     }
                     if engine == kind::END_CITY {
                         let en = self.end.end_noise().expect("the End generator");
-                        if end_city_terrain(seed, en, surface.as_ref().expect("made above"), x, z)
-                            == 0
+                        if end_city_terrain(
+                            self.mc,
+                            seed,
+                            en,
+                            surface.as_ref().expect("made above"),
+                            x,
+                            z,
+                        ) == 0
                         {
                             continue;
                         }
@@ -593,8 +642,14 @@ impl Atlas {
         if b[0] > b[2] || b[1] > b[3] {
             return Err(AtlasError::Argument);
         }
-        let list =
-            crate::finders::strongholds(self.seed as u64, check_biome.then_some(&self.overworld));
+        // Up to 1.19.2 the ring positions depend on the biome search itself,
+        // so every position is exact.
+        let check_biome = check_biome || self.mc <= crate::mc::MC_1_19_2;
+        let list = strongholds(
+            self.seed as u64,
+            self.mc,
+            check_biome.then_some(&self.overworld),
+        );
         let flags = if check_biome {
             RESULT_BIOME_CHECKED | RESULT_BIOME_VIABLE
         } else {

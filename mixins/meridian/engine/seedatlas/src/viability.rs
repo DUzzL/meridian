@@ -439,12 +439,12 @@ pub fn viable_structure_pos(structure: i32, g: &Generator, x: i32, z: i32, flags
                 return 1;
             }
             if structure == FORTRESS {
-                let c = config(FORTRESS).expect("configured");
+                let c = config(FORTRESS, g.mc).expect("configured");
                 let (rx, rz) = (
                     floordiv(x, (c.region_size as i32) << 4),
                     floordiv(z, (c.region_size as i32) << 4),
                 );
-                if structure_pos(BASTION, g.seed, rx, rz).is_none() {
+                if structure_pos(BASTION, g.mc, g.seed, rx, rz).is_none() {
                     return 1;
                 }
                 return (viable_structure_pos(BASTION, g, x, z, flags) == 0) as i32;
@@ -518,7 +518,7 @@ pub fn viable_structure_pos(structure: i32, g: &Generator, x: i32, z: i32, flags
             if rng.next_int(5) != 0 {
                 return 0;
             }
-            let vc = config(VILLAGE).expect("configured");
+            let vc = config(VILLAGE, g.mc).expect("configured");
             let (cx0, cx1, cz0, cz1) = (
                 cx as i32 - 10,
                 cx as i32 + 10,

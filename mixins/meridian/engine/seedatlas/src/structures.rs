@@ -1,11 +1,14 @@
 //! Where structures may start, from the seed alone (`getStructureConfig`,
-//! `getStructurePos` and their helpers in the engine's `finders.c`, 26.3).
+//! `getStructurePos` and their helpers in the engine's `finders.c`).
 
 use crate::generator::Dimension;
+use crate::mc::{MC_1_13, MC_1_16, MC_1_16_1, MC_1_17, MC_1_18};
 use crate::rng::{JavaRandom, Xoroshiro};
 
 /// The engine's structure numbers (also the Fabric interface's, 1..25).
 pub mod kind {
+    /// Pre-1.13 temple generation attempts.
+    pub const FEATURE: i32 = 0;
     pub const DESERT_PYRAMID: i32 = 1;
     pub const JUNGLE_TEMPLE: i32 = 2;
     pub const SWAMP_HUT: i32 = 3;
@@ -63,38 +66,151 @@ const fn sc(
     }
 }
 
-/// The 26.3 placement of a structure kind.
-pub fn config(kind: i32) -> Option<StructureConfig> {
+/// `getStructureConfig`: the placement of a structure kind in version `mc`,
+/// or `None` when the version does not generate it.
+pub fn config(kind: i32, mc: i32) -> Option<StructureConfig> {
+    use crate::mc::*;
     use Dimension::*;
     use kind::*;
-    Some(match kind {
-        DESERT_PYRAMID => sc(14357617, 32, 24, kind, Overworld, 0.0),
-        JUNGLE_TEMPLE => sc(14357619, 32, 24, kind, Overworld, 0.0),
-        SWAMP_HUT => sc(14357620, 32, 24, kind, Overworld, 0.0),
-        IGLOO => sc(14357618, 32, 24, kind, Overworld, 0.0),
-        VILLAGE => sc(10387312, 34, 26, kind, Overworld, 0.0),
-        OCEAN_RUIN => sc(14357621, 20, 12, kind, Overworld, 0.0),
-        SHIPWRECK => sc(165745295, 24, 20, kind, Overworld, 0.0),
-        MONUMENT => sc(10387313, 32, 27, kind, Overworld, 0.0),
-        MANSION => sc(10387319, 80, 60, kind, Overworld, 0.0),
-        OUTPOST => sc(165745296, 32, 24, kind, Overworld, 0.0),
-        RUINED_PORTAL => sc(34222645, 40, 25, kind, Overworld, 0.0),
-        RUINED_PORTAL_NETHER => sc(34222645, 40, 25, RUINED_PORTAL, Nether, 0.0),
-        ANCIENT_CITY => sc(20083232, 24, 16, kind, Overworld, 0.0),
-        BURIED_TREASURE => sc(10387320, 1, 1, kind, Overworld, 0.0),
-        MINESHAFT => sc(0, 1, 1, kind, Overworld, 0.0),
-        DESERT_WELL => sc(40002, 1, 1, kind, Overworld, 1.0 / 1000.0),
-        GEODE => sc(20002, 1, 1, kind, Overworld, 1.0 / 24.0),
-        FORTRESS => sc(30084232, 27, 23, kind, Nether, 0.0),
-        BASTION => sc(30084232, 27, 23, kind, Nether, 0.0),
-        END_CITY => sc(10387313, 20, 9, kind, End, 0.0),
-        END_GATEWAY => sc(40000, 1, 1, kind, End, 1.0 / 700.0),
-        END_ISLAND => sc(0, 1, 1, kind, End, 1.0 / 14.0),
-        TRAIL_RUINS => sc(83469867, 34, 26, kind, Overworld, 0.0),
-        TRIAL_CHAMBERS => sc(94251327, 34, 22, kind, Overworld, 0.0),
-        ABANDONED_CAMP => sc(91231127, 37, 29, kind, Overworld, 0.0),
+    let (avail, c) = match kind {
+        FEATURE => (mc <= MC_1_12, sc(14357617, 32, 24, kind, Overworld, 0.0)),
+        DESERT_PYRAMID => (mc >= MC_1_3, sc(14357617, 32, 24, kind, Overworld, 0.0)),
+        JUNGLE_TEMPLE => (
+            mc >= MC_1_3,
+            sc(
+                if mc <= MC_1_12 { 14357617 } else { 14357619 },
+                32,
+                24,
+                kind,
+                Overworld,
+                0.0,
+            ),
+        ),
+        SWAMP_HUT => (
+            mc >= MC_1_4,
+            sc(
+                if mc <= MC_1_12 { 14357617 } else { 14357620 },
+                32,
+                24,
+                kind,
+                Overworld,
+                0.0,
+            ),
+        ),
+        IGLOO => (
+            mc >= MC_1_9,
+            sc(
+                if mc <= MC_1_12 { 14357617 } else { 14357618 },
+                32,
+                24,
+                kind,
+                Overworld,
+                0.0,
+            ),
+        ),
+        VILLAGE => (
+            mc >= MC_B1_8,
+            if mc <= MC_1_17 {
+                sc(10387312, 32, 24, kind, Overworld, 0.0)
+            } else {
+                sc(10387312, 34, 26, kind, Overworld, 0.0)
+            },
+        ),
+        OCEAN_RUIN => (
+            mc >= MC_1_13,
+            if mc <= MC_1_15 {
+                sc(14357621, 16, 8, kind, Overworld, 0.0)
+            } else {
+                sc(14357621, 20, 12, kind, Overworld, 0.0)
+            },
+        ),
+        SHIPWRECK => (
+            mc >= MC_1_13,
+            if mc <= MC_1_15 {
+                sc(165745295, 16, 8, kind, Overworld, 0.0)
+            } else {
+                sc(165745295, 24, 20, kind, Overworld, 0.0)
+            },
+        ),
+        MONUMENT => (mc >= MC_1_8, sc(10387313, 32, 27, kind, Overworld, 0.0)),
+        MANSION => (mc >= MC_1_11, sc(10387319, 80, 60, kind, Overworld, 0.0)),
+        OUTPOST => (mc >= MC_1_14, sc(165745296, 32, 24, kind, Overworld, 0.0)),
+        RUINED_PORTAL => (mc >= MC_1_16_1, sc(34222645, 40, 25, kind, Overworld, 0.0)),
+        RUINED_PORTAL_NETHER => (
+            mc >= MC_1_16_1,
+            if mc <= MC_1_17 {
+                sc(34222645, 25, 15, RUINED_PORTAL_NETHER, Nether, 0.0)
+            } else {
+                sc(34222645, 40, 25, RUINED_PORTAL, Nether, 0.0)
+            },
+        ),
+        ANCIENT_CITY => (mc >= MC_1_19_2, sc(20083232, 24, 16, kind, Overworld, 0.0)),
+        BURIED_TREASURE => (mc >= MC_1_13, sc(10387320, 1, 1, kind, Overworld, 0.0)),
+        MINESHAFT => (mc >= MC_B1_8, sc(0, 1, 1, kind, Overworld, 0.0)),
+        DESERT_WELL => (
+            mc >= MC_1_13,
+            sc(
+                if mc <= MC_1_15 {
+                    30010
+                } else if mc <= MC_1_17 {
+                    40013
+                } else {
+                    40002
+                },
+                1,
+                1,
+                kind,
+                Overworld,
+                1.0 / 1000.0,
+            ),
+        ),
+        GEODE => (
+            mc >= MC_1_17,
+            sc(
+                if mc <= MC_1_17 { 20000 } else { 20002 },
+                1,
+                1,
+                kind,
+                Overworld,
+                1.0 / 24.0,
+            ),
+        ),
+        FORTRESS => (
+            mc >= MC_1_0,
+            if mc <= MC_1_15 {
+                sc(0, 16, 8, kind, Nether, 0.0)
+            } else {
+                sc(30084232, 27, 23, kind, Nether, 0.0)
+            },
+        ),
+        BASTION => (mc >= MC_1_16_1, sc(30084232, 27, 23, kind, Nether, 0.0)),
+        END_CITY => (mc >= MC_1_9, sc(10387313, 20, 9, kind, End, 0.0)),
+        END_GATEWAY => (
+            mc >= MC_1_13,
+            if mc <= MC_1_15 {
+                sc(30000, 1, 1, kind, End, 700.0)
+            } else if mc <= MC_1_16 {
+                sc(40013, 1, 1, kind, End, 700.0)
+            } else if mc <= MC_1_17 {
+                sc(40013, 1, 1, kind, End, 1.0 / 700.0)
+            } else {
+                sc(40000, 1, 1, kind, End, 1.0 / 700.0)
+            },
+        ),
+        END_ISLAND => (
+            mc >= MC_1_13,
+            if mc <= MC_1_16 {
+                sc(0, 1, 1, kind, End, 14.0)
+            } else {
+                sc(0, 1, 1, kind, End, 1.0 / 14.0)
+            },
+        ),
+        TRAIL_RUINS => (mc >= MC_1_20, sc(83469867, 34, 26, kind, Overworld, 0.0)),
+        TRIAL_CHAMBERS => (mc >= MC_1_21_1, sc(94251327, 34, 22, kind, Overworld, 0.0)),
+        ABANDONED_CAMP => (mc >= MC_26_3, sc(91231127, 37, 29, kind, Overworld, 0.0)),
         _ => return None,
-    })
+    };
+    avail.then_some(c)
 }
 
 fn region_seed(seed: u64, rx: i32, rz: i32, salt: i32) -> JavaRandom {
@@ -143,15 +259,26 @@ fn attempt_seed(seed: u64, cx: i32, cz: i32) -> JavaRandom {
     r
 }
 
-/// `getPopulationSeed` for 1.18+.
-pub fn population_seed(ws: u64, x: i32, z: i32) -> u64 {
-    let mut xr = Xoroshiro::new(ws);
-    let a = xr.next_long_j() | 1;
-    let b = xr.next_long_j() | 1;
-    ((x as i64 as u64)
-        .wrapping_mul(a)
-        .wrapping_add((z as i64 as u64).wrapping_mul(b)))
-        ^ ws
+/// `getPopulationSeed`.
+pub fn population_seed(mc: i32, ws: u64, x: i32, z: i32) -> u64 {
+    let (mut a, mut b);
+    if mc >= MC_1_18 {
+        let mut xr = Xoroshiro::new(ws);
+        a = xr.next_long_j();
+        b = xr.next_long_j();
+    } else {
+        let mut s = JavaRandom::new(ws);
+        a = s.next_long();
+        b = s.next_long();
+    }
+    if mc >= MC_1_13 {
+        a |= 1;
+        b |= 1;
+    } else {
+        a = (a as i64 / 2).wrapping_mul(2).wrapping_add(1) as u64;
+        b = (b as i64 / 2).wrapping_mul(2).wrapping_add(1) as u64;
+    }
+    ((x as i64 as u64).wrapping_mul(a)).wrapping_add((z as i64 as u64).wrapping_mul(b)) ^ ws
 }
 
 /// `chunkGenerateRnd`.
@@ -162,15 +289,30 @@ pub fn chunk_generate_rnd(ws: u64, cx: i32, cz: i32) -> JavaRandom {
     JavaRandom::new(a ^ b ^ ws)
 }
 
+/// `getRegPos`: like `feature_pos`, but also returns the generator.
+fn reg_pos(c: &StructureConfig, seed: u64, rx: i32, rz: i32) -> ((i32, i32), JavaRandom) {
+    let mut s = region_seed(seed, rx, rz, c.salt);
+    let x = s.next_int(c.chunk_range as i32);
+    let z = s.next_int(c.chunk_range as i32);
+    (
+        (
+            to_block(rx, c.region_size, x),
+            to_block(rz, c.region_size, z),
+        ),
+        s,
+    )
+}
+
 /// `getStructurePos`: the start of `kind` in region (`rx`, `rz`), if one
-/// may generate there by the seed alone.
-pub fn structure_pos(kind: i32, seed: u64, rx: i32, rz: i32) -> Option<(i32, i32)> {
+/// may generate there by the seed alone. `None` as well when the version
+/// does not have the structure.
+pub fn structure_pos(kind: i32, mc: i32, seed: u64, rx: i32, rz: i32) -> Option<(i32, i32)> {
     use kind::*;
-    let c = config(kind)?;
+    let c = config(kind, mc)?;
     match kind {
-        DESERT_PYRAMID | JUNGLE_TEMPLE | SWAMP_HUT | IGLOO | VILLAGE | OCEAN_RUIN | SHIPWRECK
-        | RUINED_PORTAL | RUINED_PORTAL_NETHER | ANCIENT_CITY | TRAIL_RUINS | TRIAL_CHAMBERS
-        | ABANDONED_CAMP | FORTRESS => Some(feature_pos(&c, seed, rx, rz)),
+        FEATURE | DESERT_PYRAMID | JUNGLE_TEMPLE | SWAMP_HUT | IGLOO | VILLAGE | OCEAN_RUIN
+        | SHIPWRECK | RUINED_PORTAL | RUINED_PORTAL_NETHER | ANCIENT_CITY | TRAIL_RUINS
+        | TRIAL_CHAMBERS | ABANDONED_CAMP => Some(feature_pos(&c, seed, rx, rz)),
         MONUMENT | MANSION => Some(large_structure_pos(&c, seed, rx, rz)),
         END_CITY => {
             let p = large_structure_pos(&c, seed, rx, rz);
@@ -189,35 +331,96 @@ pub fn structure_pos(kind: i32, seed: u64, rx: i32, rz: i32) -> Option<(i32, i32
             let mut s = region_seed(seed, rx, rz, c.salt);
             ((s.next_float() as f64) < 0.01).then_some(p)
         }
-        MINESHAFT => mineshaft(seed, rx, rz).then_some((rx.wrapping_mul(16), rz.wrapping_mul(16))),
+        MINESHAFT => {
+            mineshaft(mc, seed, rx, rz).then_some((rx.wrapping_mul(16), rz.wrapping_mul(16)))
+        }
+        FORTRESS => {
+            if mc >= MC_1_18 {
+                // Fortresses generate where bastions do not (biome dependent).
+                Some(feature_pos(&c, seed, rx, rz))
+            } else if mc >= MC_1_16_1 {
+                let (p, mut s) = reg_pos(&c, seed, rx, rz);
+                (s.next_int(5) < 2).then_some(p)
+            } else {
+                let mut s = attempt_seed(seed, rx.wrapping_mul(16), rz.wrapping_mul(16));
+                let valid = s.next_int(3) == 0;
+                let x = rx
+                    .wrapping_mul(16)
+                    .wrapping_add(s.next_int(8))
+                    .wrapping_add(4);
+                let z = rz
+                    .wrapping_mul(16)
+                    .wrapping_add(s.next_int(8))
+                    .wrapping_add(4);
+                valid.then_some((x.wrapping_mul(16), z.wrapping_mul(16)))
+            }
+        }
         BASTION => {
-            let p = feature_pos(&c, seed, rx, rz);
-            let mut s = chunk_generate_rnd(seed, p.0 >> 4, p.1 >> 4);
-            (s.next_int(5) >= 2).then_some(p)
+            if mc >= MC_1_18 {
+                let p = feature_pos(&c, seed, rx, rz);
+                let mut s = chunk_generate_rnd(seed, p.0 >> 4, p.1 >> 4);
+                (s.next_int(5) >= 2).then_some(p)
+            } else {
+                let (p, mut s) = reg_pos(&c, seed, rx, rz);
+                (s.next_int(5) >= 2).then_some(p)
+            }
         }
         END_GATEWAY | END_ISLAND | DESERT_WELL | GEODE => {
+            // Decorator features.
             let (x, z) = (rx.wrapping_mul(16), rz.wrapping_mul(16));
-            let s = population_seed(seed, x, z);
-            let mut xr = Xoroshiro::new(s.wrapping_add(c.salt as i64 as u64));
-            if xr.next_float() >= c.rarity {
-                return None;
+            let s = population_seed(mc, seed, x, z);
+            let salted = s.wrapping_add(c.salt as i64 as u64);
+            if mc >= MC_1_18 {
+                let mut xr = Xoroshiro::new(salted);
+                if xr.next_float() >= c.rarity {
+                    return None;
+                }
+                let dx = xr.next_int_j(16);
+                let dz = xr.next_int_j(16);
+                Some((x.wrapping_add(dx), z.wrapping_add(dz)))
+            } else {
+                let mut r = JavaRandom::new(salted);
+                if c.rarity < 1.0 {
+                    if r.next_float() >= c.rarity {
+                        return None;
+                    }
+                } else if r.next_int(c.rarity as i32) != 0 {
+                    return None;
+                }
+                let dx = r.next_int(16);
+                let dz = r.next_int(16);
+                Some((x.wrapping_add(dx), z.wrapping_add(dz)))
             }
-            let dx = xr.next_int_j(16);
-            let dz = xr.next_int_j(16);
-            Some((x + dx, z + dz))
         }
         _ => None,
     }
 }
 
-/// `getMineshafts` for one chunk (1.13+).
-fn mineshaft(seed: u64, cx: i32, cz: i32) -> bool {
+/// `getMineshafts` for one chunk.
+fn mineshaft(mc: i32, seed: u64, cx: i32, cz: i32) -> bool {
     let mut s = JavaRandom::new(seed);
     let a = s.next_long();
     let b = s.next_long();
     let aix = (cx as i64 as u64).wrapping_mul(a) ^ seed;
     let mut s = JavaRandom::new(aix ^ (cz as i64 as u64).wrapping_mul(b));
-    s.next_double() < 0.004
+    if mc >= MC_1_13 {
+        return s.next_double() < 0.004;
+    }
+    s.skip(1);
+    if s.next_double() < 0.004 {
+        let mut d = cx;
+        if cx.wrapping_neg() > d {
+            d = cx.wrapping_neg();
+        }
+        if cz > d {
+            d = cz;
+        }
+        if cz.wrapping_neg() > d {
+            d = cz.wrapping_neg();
+        }
+        return d >= 80 || s.next_int(80) < d;
+    }
+    false
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -228,49 +431,88 @@ pub struct EndIsland {
     pub r: i32,
 }
 
-/// `getEndIslands` (1.18+): the small islands a chunk's decorator places.
-pub fn end_islands(seed: u64, cx: i32, cz: i32) -> Vec<EndIsland> {
-    let c = config(kind::END_ISLAND).expect("configured");
-    let (x, z) = (cx.wrapping_mul(16), cz.wrapping_mul(16));
-    let rng = population_seed(seed, x, z);
-    let mut xr = Xoroshiro::new(rng.wrapping_add(c.salt as i64 as u64));
-    if xr.next_float() >= c.rarity {
+/// `for (r = radius; r > 0.5; r -= draw() + 0.5);` with a float `r`: only
+/// consumes the generator.
+fn shrink_radius(radius: i32, mut draw: impl FnMut() -> i32) {
+    let mut r = radius as f32;
+    while r as f64 > 0.5 {
+        r = (r as f64 - (draw() as f64 + 0.5)) as f32;
+    }
+}
+
+/// `getEndIslands`: the small islands a chunk's decorator places (none
+/// before 1.13).
+pub fn end_islands(mc: i32, seed: u64, cx: i32, cz: i32) -> Vec<EndIsland> {
+    let Some(c) = config(kind::END_ISLAND, mc) else {
         return Vec::new();
-    }
-    let second = xr.next_int_j(4) == 3;
-    let mut first = EndIsland {
-        x: 0,
-        y: 0,
-        z: 0,
-        r: 0,
     };
-    first.x = xr.next_int_j(16) + x;
-    first.z = xr.next_int_j(16) + z;
-    first.y = xr.next_int_j(16) + 55;
-    first.r = xr.next_int_j(3) + 4;
-    if !second {
-        return vec![first];
+    let (x, z) = (cx.wrapping_mul(16), cz.wrapping_mul(16));
+    let rng = population_seed(mc, seed, x, z);
+    let salted = rng.wrapping_add(c.salt as i64 as u64);
+    let isl = |x: i32, y: i32, z: i32, r: i32| EndIsland { x, y, z, r };
+    if mc <= MC_1_16 {
+        let mut r = JavaRandom::new(salted);
+        if r.next_int(c.rarity as i32) != 0 {
+            return Vec::new();
+        }
+        let x0 = r.next_int(16).wrapping_add(x);
+        let y0 = r.next_int(16) + 55;
+        let z0 = r.next_int(16).wrapping_add(z);
+        if r.next_int(4) != 0 {
+            let r0 = r.next_int(3) + 4;
+            return vec![isl(x0, y0, z0, r0)];
+        }
+        let x1 = r.next_int(16).wrapping_add(x);
+        let y1 = r.next_int(16) + 55;
+        let z1 = r.next_int(16).wrapping_add(z);
+        let r0 = r.next_int(3) + 4;
+        shrink_radius(r0, || r.next_int(2));
+        let r1 = r.next_int(3) + 4;
+        vec![isl(x0, y0, z0, r0), isl(x1, y1, z1, r1)]
+    } else if mc <= MC_1_17 {
+        let mut r = JavaRandom::new(salted);
+        if r.next_float() >= c.rarity {
+            return Vec::new();
+        }
+        let second = r.next_int(4) == 0;
+        let x0 = r.next_int(16).wrapping_add(x);
+        let z0 = r.next_int(16).wrapping_add(z);
+        let y0 = r.next_int(16) + 55;
+        let r0 = r.next_int(3) + 4;
+        shrink_radius(r0, || r.next_int(2));
+        if !second {
+            return vec![isl(x0, y0, z0, r0)];
+        }
+        let x1 = r.next_int(16).wrapping_add(x);
+        let z1 = r.next_int(16).wrapping_add(z);
+        let y1 = r.next_int(16) + 55;
+        let r1 = r.next_int(3) + 4;
+        vec![isl(x0, y0, z0, r0), isl(x1, y1, z1, r1)]
+    } else {
+        let mut xr = Xoroshiro::new(salted);
+        if xr.next_float() >= c.rarity {
+            return Vec::new();
+        }
+        let second = xr.next_int_j(4) == 3;
+        let x0 = xr.next_int_j(16).wrapping_add(x);
+        let z0 = xr.next_int_j(16).wrapping_add(z);
+        let y0 = xr.next_int_j(16) + 55;
+        let r0 = xr.next_int_j(3) + 4;
+        if !second {
+            return vec![isl(x0, y0, z0, r0)];
+        }
+        shrink_radius(r0, || xr.next_int_j(2));
+        let x1 = xr.next_int_j(16).wrapping_add(x);
+        let z1 = xr.next_int_j(16).wrapping_add(z);
+        let y1 = xr.next_int_j(16) + 55;
+        let r1 = xr.next_int_j(3) + 4;
+        vec![isl(x0, y0, z0, r0), isl(x1, y1, z1, r1)]
     }
-    let mut r = first.r as f32;
-    while r > 0.5 {
-        r = (r as f64 - (xr.next_int_j(2) as f64 + 0.5)) as f32;
-    }
-    let mut island = EndIsland {
-        x: 0,
-        y: 0,
-        z: 0,
-        r: 0,
-    };
-    island.x = xr.next_int_j(16) + x;
-    island.z = xr.next_int_j(16) + z;
-    island.y = xr.next_int_j(16) + 55;
-    island.r = xr.next_int_j(3) + 4;
-    vec![first, island]
 }
 
 /// `getFixedEndGateways`: the 20 gateways around the exit portal, in the
 /// order the dragon fights open them.
-pub fn fixed_end_gateways(seed: u64) -> [(i32, i32); 20] {
+pub fn fixed_end_gateways(_mc: i32, seed: u64) -> [(i32, i32); 20] {
     const FIXED: [(i32, i32); 20] = [
         (96, 0),
         (91, 29),
