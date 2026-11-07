@@ -5,7 +5,8 @@
 //! things yellow, players white, items red, other entities purple; dots
 //! two units across, entities more than 20 blocks above or below left out
 //! (players almost never), darker the further up or down they are; items
-//! drawn first, then living things, hostile ones, players last.
+//! drawn first, then living things, hostile ones, players last. Past the
+//! cap, the farthest entities on the map are left out.
 
 use crate::config::{NameMode, RadarSettings};
 use crate::minimap::{Axes, DrawOp, Layout};
@@ -60,8 +61,9 @@ pub struct Entity {
     pub kind: String,
     /// A player's name or a custom name.
     pub name: Option<String>,
-    /// Its face, when the radar shows faces (see [`face_for`]).
-    pub face: Option<Face>,
+    /// Its face, when the radar shows faces (see [`face_for`]); shared, as
+    /// the host keeps one per kind.
+    pub face: Option<std::sync::Arc<Face>>,
     /// A tamed animal: drawn over the wild ones.
     pub tamed: bool,
 }
@@ -252,6 +254,49 @@ pub fn faded(rgb: u32, dy: f64, limit: f64) -> u32 {
     crate::color::scale(rgb, f as f32)
 }
 
+/// The entities a radar draws around `center`, in drawing order: those the
+/// filters show within the height limit and `inside` the map, the nearest
+/// `max_entities` of them, then by render order (the reference's
+/// `entityNumber` keeps the nearest). The minimap and the world map share it.
+pub fn select<'a>(
+    entities: &'a [Entity],
+    center: [f64; 3],
+    s: &RadarSettings,
+    inside: impl Fn(&Entity) -> bool,
+) -> Vec<&'a Entity> {
+    if !s.enabled {
+        return Vec::new();
+    }
+    let mut visible: Vec<&Entity> = entities
+        .iter()
+        .filter(|e| shown(e, s))
+        .filter(|e| (e.pos[1] - center[1]).abs() <= e.class.height_limit(s))
+        .filter(|e| inside(e))
+        .collect();
+    let distance = |e: &Entity| (e.pos[0] - center[0]).powi(2) + (e.pos[2] - center[2]).powi(2);
+    if visible.len() > s.max_entities as usize {
+        visible.sort_by(|a, b| distance(a).total_cmp(&distance(b)).then(a.id.cmp(&b.id)));
+        visible.truncate(s.max_entities as usize);
+    }
+    visible.sort_by_key(|e| (e.order(), e.id));
+    visible
+}
+
+/// An entity's colour on the radar: its category's, darkened with the
+/// height difference to `y` when the fade is on.
+pub fn color(e: &Entity, y: f64, s: &RadarSettings) -> u32 {
+    if s.height_fade {
+        faded(e.class.rgb(), e.pos[1] - y, e.class.height_limit(s))
+    } else {
+        e.class.rgb()
+    }
+}
+
+/// The tint a face is drawn with so it fades like a dot.
+pub fn face_tint(e: &Entity, y: f64, s: &RadarSettings) -> u32 {
+    0xFF00_0000 | rgb_to_shade(e.class.rgb(), color(e, y, s))
+}
+
 /// The radar's dots for `entities` around the player at `center`.
 pub fn dots(
     layout: &Layout,
@@ -268,35 +313,27 @@ pub fn dots(
     let r = s.dot_size.max(1) as f32 * u;
     let half = layout.size as f64 / 2.0 - r as f64;
     let [cx, cy] = layout.center();
-    let mut visible: Vec<&Entity> = entities
-        .iter()
-        .filter(|e| shown(e, s))
-        .filter(|e| (e.pos[1] - center[1]).abs() <= e.class.height_limit(s))
-        .collect();
-    visible.sort_by_key(|e| (e.order(), e.id));
-    visible.truncate(s.max_entities as usize);
-    let mut ops = Vec::with_capacity(visible.len() * 2);
-    for e in visible {
-        let [dx, dy] = axes.to_screen(
+    let to_screen = |e: &Entity| {
+        axes.to_screen(
             e.pos[0] - center[0],
             e.pos[2] - center[2],
             layout.blocks_per_pixel as f64,
-        );
-        let inside = if layout.round {
+        )
+    };
+    let inside = |e: &Entity| {
+        let [dx, dy] = to_screen(e);
+        if layout.round {
             (dx * dx + dy * dy).sqrt() <= half
         } else {
             dx.abs() <= half && dy.abs() <= half
-        };
-        if !inside {
-            continue;
         }
+    };
+    let visible = select(entities, center, s, inside);
+    let mut ops = Vec::with_capacity(visible.len() * 2);
+    for e in visible {
+        let [dx, dy] = to_screen(e);
         let (x, y) = (cx + dx as f32, cy + dy as f32);
-        let height = e.pos[1] - center[1];
-        let rgb = if s.height_fade {
-            faded(e.class.rgb(), height, e.class.height_limit(s))
-        } else {
-            e.class.rgb()
-        };
+        let rgb = color(e, center[1], s);
         let face = if s.faces { e.face.as_ref() } else { None };
         if let Some(face) = face {
             // The face, a little larger than a dot, on a dark rim.
@@ -311,13 +348,12 @@ pub fn dots(
                 ],
                 argb: 0xFF00_0000,
             });
-            let shade = rgb_to_shade(e.class.rgb(), rgb);
             ops.push(DrawOp::Blit {
                 texture: face.texture.clone(),
                 rect: [x - half, y - half, 2.0 * half, 2.0 * half],
                 uv: face.uv,
                 base: face.base,
-                argb: 0xFF00_0000 | shade,
+                argb: face_tint(e, center[1], s),
             });
         } else {
             let diamond = |r: f32| [[x, y - r], [x + r, y], [x, y + r], [x - r, y]];
@@ -387,7 +423,7 @@ mod tests {
             invisible: false,
             kind: "minecraft:zombie".into(),
             name: None,
-            face: face_for("minecraft:zombie", None),
+            face: face_for("minecraft:zombie", None).map(std::sync::Arc::new),
             tamed: false,
         }
     }
@@ -469,6 +505,43 @@ mod tests {
     }
 
     #[test]
+    fn the_cap_keeps_the_nearest_on_the_map() {
+        let s = RadarSettings {
+            max_entities: 3,
+            ..RadarSettings::default()
+        };
+        let ents = [
+            e(1, Class::Item, [1.0, 64.0, 0.0]),
+            e(2, Class::Item, [2.0, 64.0, 0.0]),
+            e(3, Class::Item, [3.0, 64.0, 0.0]),
+            e(4, Class::Player, [40.0, 64.0, 0.0]),
+            // Off the map: never counted against the cap.
+            e(5, Class::Item, [0.0, 64.0, 900.0]),
+            e(6, Class::Item, [0.0, 64.0, -900.0]),
+        ];
+        let inside = |e: &Entity| e.pos[2].abs() < 100.0;
+        let ids: Vec<u32> = select(&ents, [0.0, 64.0, 0.0], &s, inside)
+            .iter()
+            .map(|e| e.id)
+            .collect();
+        assert_eq!(ids, [1, 2, 3], "the far player goes, not the near items");
+        let near_player = [
+            e(4, Class::Player, [0.5, 64.0, 0.0]),
+            ents[0].clone(),
+            ents[1].clone(),
+            ents[2].clone(),
+        ];
+        let ids: Vec<u32> = select(&near_player, [0.0, 64.0, 0.0], &s, inside)
+            .iter()
+            .map(|e| e.id)
+            .collect();
+        assert_eq!(ids, [1, 2, 4], "players still drawn last");
+        // The minimap: entities off the map leave room for those on it.
+        let ops = dots(&layout(), [0.0, 64.0, 0.0], 0.0, &ents, &s);
+        assert_eq!(ops.len(), 6, "three dots");
+    }
+
+    #[test]
     fn tamed_animals_over_wild_ones() {
         let s = RadarSettings::default();
         let mut dog = e(1, Class::Friendly, [1.0, 64.0, 0.0]);
@@ -513,7 +586,8 @@ mod tests {
         let mut steve = e(2, Class::Player, [-5.0, 64.0, 0.0]);
         steve.kind = "minecraft:player".into();
         steve.name = Some("Steve".into());
-        steve.face = face_for("minecraft:player", Some("entity/player/slim/alex"));
+        steve.face =
+            face_for("minecraft:player", Some("entity/player/slim/alex")).map(std::sync::Arc::new);
         zombie.name = Some("Bob".into());
         let ops =
             |s: &RadarSettings, list: &[Entity]| dots(&layout(), [0.0, 64.0, 0.0], 0.0, list, s);

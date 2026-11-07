@@ -231,7 +231,7 @@ impl Region {
 
 /// One map pixel from a column and its neighbours' heights.
 pub fn shade(col: &TileColumn, north: Option<i16>, west: Option<i16>, sh: &Shading) -> u32 {
-    if col.empty {
+    if col.empty || sh.floor.is_some_and(|f| i32::from(col.height) < f) {
         return UNEXPLORED;
     }
     let base = match sh.colors {
@@ -386,6 +386,13 @@ mod tests {
         assert!(
             lum(shade(&lit, Some(20), Some(20), &base.for_cave(true, false))) > lum(dark),
             "torches light dark caves"
+        );
+        // Cave depth: ground deeper below the layer is left out.
+        let deep = base.for_cave(true, true).with_floor(Some(25));
+        assert_eq!(shade(&col, Some(20), Some(20), &deep), UNEXPLORED);
+        assert_ne!(
+            shade(&col, Some(20), Some(20), &deep.with_floor(Some(20))),
+            UNEXPLORED
         );
     }
 }

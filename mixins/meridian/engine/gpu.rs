@@ -1,26 +1,38 @@
 //! The minimap's terrain on the GPU.
 //!
-//! The game thread composes a north-up image of the map around the player,
-//! one texel per block, and hands it over with where and how to draw it
-//! ([`MapFrame`]). The render thread (`RenderHooks::world_drawn`, after the
-//! world and before the HUD) uploads it when it changed and draws one quad
-//! into the minimap's rectangle: the shader turns the map with the player,
-//! keeps the player's sub-block position, cuts a round map to its circle and
-//! fills unexplored texels with the backdrop. The HUD then draws the frame,
-//! compass, marks and text over it.
-
-use std::sync::Arc;
+//! The game thread composes a north-up image of the map around the player
+//! (`meridian_core::minimap_image`: a texture that wraps around, updated a
+//! cell at a time) and hands over what changed ([`send`]) and where and how
+//! to draw it ([`MapFrame`]). The render thread (`RenderHooks::world_drawn`,
+//! after the world and before the HUD) uploads the changed cells and draws
+//! one quad into the minimap's rectangle: the shader turns the map with the
+//! player, keeps the player's sub-texel position, cuts a round map to its
+//! circle and fills unexplored texels with the backdrop. The HUD then draws
+//! the frame, compass, marks and text over it.
 
 use horizon_client::mod_api::{RenderHooks, WorldDrawnEvent, wgpu};
+use meridian_core::minimap_image::CELL;
 use parking_lot::Mutex;
 
-/// A north-up image of the map: `size` x `size` ARGB texels around the
-/// player (`MapFrame::center` places the player in it).
-#[derive(Debug)]
-pub struct MapImage {
+/// Texels for the render thread to upload, oldest first.
+#[derive(Debug, Default)]
+pub struct Uploads {
+    /// The texture's side, texels.
     pub size: u32,
-    pub pixels: Vec<u32>,
-    pub revision: u64,
+    /// The whole image (ARGB, row-major): after a reset, or when asked for.
+    pub full: Option<Vec<u32>>,
+    /// Cells: their corner in the texture (texels) and `CELL` x `CELL` texels.
+    pub cells: Vec<([u32; 2], Vec<u32>)>,
+    /// The render thread has nothing to draw from (a new texture): the game
+    /// thread sends the whole image.
+    pub want_full: bool,
+}
+
+static UPLOADS: Mutex<Uploads> = Mutex::new(Uploads { size: 0, full: None, cells: Vec::new(), want_full: false });
+
+/// Hands texels to the render thread.
+pub fn send(f: impl FnOnce(&mut Uploads)) {
+    f(&mut UPLOADS.lock());
 }
 
 /// What to draw this frame.
@@ -32,20 +44,24 @@ pub struct MapFrame {
     /// World directions (x, z) of the screen's right and up.
     pub right: [f32; 2],
     pub forward: [f32; 2],
-    /// The player's position relative to the image's texel (0, 0), blocks.
+    /// The player's position from the window's north-west texel, texels.
     pub center: [f32; 2],
     pub blocks_per_gui_px: f32,
+    /// Blocks per texel.
+    pub scale: f32,
+    /// The texture's side, and where the window's north-west texel is in it.
+    pub size: u32,
+    pub wrap: [u32; 2],
     pub round: bool,
     pub opacity: f32,
     /// Unexplored texels, premultiplied-free RGBA 0..1.
     pub backdrop: [f32; 4],
-    pub image: Arc<MapImage>,
     /// When the HUD asked for it: a frame the HUD stopped refreshing (F1, a
     /// screen) stops drawing.
     pub at: std::time::Instant,
     /// The chunk grid, with its line width in blocks.
     pub grid: Option<f32>,
-    /// The block at the image's texel (0, 0), for the grid's phase.
+    /// The block at the window's north-west texel, for the grid's phase.
     pub origin: [i32; 2],
 }
 
@@ -61,14 +77,16 @@ struct Params {
     right: vec2<f32>,
     forward: vec2<f32>,
     center: vec2<f32>,
-    // Blocks per physical pixel, the rectangle's half size in physical pixels.
-    blocks_per_px: f32,
+    // Texels per physical pixel, the rectangle's half size in physical pixels.
+    texels_per_px: f32,
     half: f32,
     backdrop: vec4<f32>,
-    // x: texture size, y: round, z: opacity
+    // x: texture size, y: round, z: opacity, w: blocks per texel
     misc: vec4<f32>,
     // x: grid on, y: line width in blocks, zw: origin modulo 16
     grid: vec4<f32>,
+    // xy: the window's north-west texel in the texture (it wraps around)
+    wrap: vec4<f32>,
 }
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var map: texture_2d<f32>;
@@ -97,18 +115,18 @@ fn fs(in: Out) -> @location(0) vec4<f32> {
     if (p.misc.y > 0.5 && length(in.local) > p.half) {
         discard;
     }
-    let world = (p.right * in.local.x - p.forward * in.local.y) * p.blocks_per_px + p.center;
+    let world = (p.right * in.local.x - p.forward * in.local.y) * p.texels_per_px + p.center;
     let size = p.misc.x;
     let texel = vec2<i32>(floor(world));
     var color = p.backdrop;
     if (texel.x >= 0 && texel.y >= 0 && f32(texel.x) < size && f32(texel.y) < size) {
-        let t = textureLoad(map, texel, 0);
+        let t = textureLoad(map, (texel + vec2<i32>(p.wrap.xy)) % i32(size), 0);
         if (t.a > 0.0) {
             color = vec4(t.rgb, 1.0);
         }
     }
     if (p.grid.x > 0.5) {
-        let f = fract((world + p.grid.zw) / 16.0) * 16.0;
+        let f = fract((world * p.misc.w + p.grid.zw) / 16.0) * 16.0;
         let d = min(f, vec2(16.0) - f);
         if (min(d.x, d.y) < p.grid.y) {
             color = vec4(mix(color.rgb, vec3(0.1, 0.1, 0.1), 0.45), max(color.a, 0.6));
@@ -124,7 +142,8 @@ struct Gpu {
     layout: wgpu::BindGroupLayout,
     uniforms: wgpu::Buffer,
     texture: Option<(wgpu::Texture, wgpu::BindGroup, u32)>,
-    revision: Option<(usize, u64)>,
+    /// The texture holds a whole image.
+    ready: bool,
 }
 
 /// The render-thread half; `Hooks::render` hands it to Horizon.
@@ -207,22 +226,37 @@ impl Gpu {
         });
         let uniforms = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("meridian minimap"),
-            size: 80,
+            size: 96,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        Self { format, pipeline, layout, uniforms, texture: None, revision: None }
+        Self { format, pipeline, layout, uniforms, texture: None, ready: false }
     }
 
-    fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, image: &Arc<MapImage>) {
-        let key = (Arc::as_ptr(image) as usize, image.revision);
-        if self.revision == Some(key) {
-            return;
-        }
-        if self.texture.as_ref().is_none_or(|(_, _, size)| *size != image.size) {
+    /// Uploads what the game thread sent; whether the texture holds a
+    /// whole image of `size` to draw from.
+    fn upload(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) -> bool {
+        let (size, full, cells) = {
+            let mut u = UPLOADS.lock();
+            if u.size == 0 {
+                return false;
+            }
+            if self.texture.as_ref().is_some_and(|(_, _, size)| *size != u.size) {
+                self.ready = false;
+            }
+            let full = u.full.take();
+            if full.is_none() && !self.ready {
+                // Cells alone can't fill a new texture: ask for all of it.
+                u.want_full = true;
+                u.cells.clear();
+                return false;
+            }
+            (u.size, full, std::mem::take(&mut u.cells))
+        };
+        if self.texture.as_ref().is_none_or(|(_, _, s)| *s != size) {
             let texture = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("meridian minimap"),
-                size: wgpu::Extent3d { width: image.size, height: image.size, depth_or_array_layers: 1 },
+                size: wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
@@ -239,30 +273,37 @@ impl Gpu {
                     wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view) },
                 ],
             });
-            self.texture = Some((texture, bind, image.size));
+            self.texture = Some((texture, bind, size));
         }
         let (texture, _, _) = self.texture.as_ref().expect("made above");
-        // ARGB -> RGBA bytes.
-        let mut bytes = Vec::with_capacity(image.pixels.len() * 4);
-        for p in &image.pixels {
-            bytes.extend_from_slice(&[(p >> 16) as u8, (p >> 8) as u8, *p as u8, (p >> 24) as u8]);
+        let write = |at: [u32; 2], side: u32, pixels: &[u32]| {
+            // ARGB -> RGBA bytes.
+            let mut bytes = Vec::with_capacity(pixels.len() * 4);
+            for p in pixels {
+                bytes.extend_from_slice(&[(p >> 16) as u8, (p >> 8) as u8, *p as u8, (p >> 24) as u8]);
+            }
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d { x: at[0], y: at[1], z: 0 },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &bytes,
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(side * 4), rows_per_image: Some(side) },
+                wgpu::Extent3d { width: side, height: side, depth_or_array_layers: 1 },
+            );
+        };
+        if let Some(full) = full {
+            write([0, 0], size, &full);
+            self.ready = true;
         }
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &bytes,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(image.size * 4),
-                rows_per_image: Some(image.size),
-            },
-            wgpu::Extent3d { width: image.size, height: image.size, depth_or_array_layers: 1 },
-        );
-        self.revision = Some(key);
+        for (at, pixels) in cells {
+            if at[0] + CELL <= size && at[1] + CELL <= size {
+                write(at, CELL, &pixels);
+            }
+        }
+        true
     }
 }
 
@@ -276,6 +317,16 @@ impl RenderHooks for MapRenderer {
             return;
         }
         let world = &mut *event.world;
+        // Uploads first: what the game thread sent must not pile up while
+        // the map can't be drawn.
+        let mut guard = self.gpu.lock();
+        if guard.as_ref().is_none_or(|g| g.format != world.color_format) {
+            *guard = Some(Gpu::new(world.device, world.color_format));
+        }
+        let gpu = guard.as_mut().expect("made above");
+        if !gpu.upload(world.device, world.queue) || gpu.texture.as_ref().is_none_or(|(_, _, s)| *s != frame.size) {
+            return;
+        }
         let [w, h] = world.size;
         if w == 0 || h == 0 || frame.gui[0] <= 0.0 {
             return;
@@ -288,33 +339,31 @@ impl RenderHooks for MapRenderer {
         if side < 2.0 || x0 + side > w as f32 || y0 + side > h as f32 {
             return;
         }
-        let mut guard = self.gpu.lock();
-        if guard.as_ref().is_none_or(|g| g.format != world.color_format) {
-            *guard = Some(Gpu::new(world.device, world.color_format));
-        }
-        let gpu = guard.as_mut().expect("made above");
-        gpu.upload(world.device, world.queue, &frame.image);
-        let params: [f32; 20] = [
+        let params: [f32; 24] = [
             frame.right[0],
             frame.right[1],
             frame.forward[0],
             frame.forward[1],
             frame.center[0],
             frame.center[1],
-            frame.blocks_per_gui_px / scale,
+            frame.blocks_per_gui_px / frame.scale / scale,
             side / 2.0,
             frame.backdrop[0],
             frame.backdrop[1],
             frame.backdrop[2],
             frame.backdrop[3],
-            frame.image.size as f32,
+            frame.size as f32,
             if frame.round { 1.0 } else { 0.0 },
             frame.opacity,
-            0.0,
+            frame.scale,
             if frame.grid.is_some() { 1.0 } else { 0.0 },
             frame.grid.unwrap_or(0.0),
             frame.origin[0].rem_euclid(16) as f32,
             frame.origin[1].rem_euclid(16) as f32,
+            frame.wrap[0] as f32,
+            frame.wrap[1] as f32,
+            0.0,
+            0.0,
         ];
         let bytes: Vec<u8> = params.iter().flat_map(|v| v.to_le_bytes()).collect();
         world.queue.write_buffer(&gpu.uniforms, 0, &bytes);

@@ -57,6 +57,11 @@ static SERVER_WORLD: Mutex<Option<String>> = Mutex::new(None);
 static SERVER_SEED: Mutex<Option<(i64, bool)>> = Mutex::new(None);
 /// Blocks within which a waypoint's beam is left out (it would fill the view).
 const BEAM_HIDE_DISTANCE: f64 = 8.0;
+/// How long the waypoint screens' list of worlds is used before the
+/// folders are read again.
+const BOOK_PLACES_TTL: Duration = Duration::from_secs(2);
+/// How long a radar's request for entities lasts unless renewed.
+const ENTITY_REQUEST_TTL: Duration = Duration::from_millis(250);
 
 /// Mean colours of the block textures, by texture file, and which file each
 /// sprite of Horizon's block atlas comes from.
@@ -153,7 +158,9 @@ struct State {
     /// Feedback to show on the action bar when a hook can.
     notice: Option<String>,
     /// The minimap's composed image and what it was composed from.
-    map_image: Option<(MapImageKey, std::sync::Arc<gpu::MapImage>)>,
+    minimap_image: meridian_core::minimap_image::MinimapImage,
+    /// Settings changed by a drag not yet written (saved on release).
+    config_unsaved: bool,
     /// The open screen of ours, if any.
     screen: Option<Screen>,
     /// A screen to open from the next hook that may (`key`).
@@ -193,6 +200,11 @@ struct State {
     looks_ready: bool,
     /// The faces key (Tab by default) is held.
     faces_held: bool,
+    /// Radar faces by entity kind (or player skin), found once each.
+    face_cache: HashMap<String, Option<std::sync::Arc<radar::Face>>>,
+    /// When the radar last asked the bridge for entities: the request ends
+    /// unless renewed.
+    entities_wanted: Option<Instant>,
     /// The marker the open map menu is for.
     menu_marker: Option<HoveredMarker>,
     /// The other player the map menu was opened on.
@@ -202,6 +214,8 @@ struct State {
     waypoint_place: (Option<std::path::PathBuf>, Option<String>),
     /// The waypoints of another world, while the waypoint screens show it.
     other_book: Option<(std::path::PathBuf, WaypointBook)>,
+    /// The maps with waypoint files, as last read from disk, and when.
+    book_places: Option<(Instant, Vec<waypoint::BookPlace>)>,
     /// Where the minimap was drawn last (the position editor drags it).
     minimap_place: Option<meridian_core::screens::MinimapPlace>,
     /// The nearest search's options, kept for the session.
@@ -257,18 +271,6 @@ enum Pending {
     Chat(String),
     /// A line for the action bar.
     Notice(String),
-}
-
-/// What a minimap image depends on: its origin and size, and the regions'
-/// revisions (any redraw changes them).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-struct MapImageKey {
-    origin: [i32; 2],
-    size: u32,
-    revisions: u64,
-    overlay: Option<[u8; 2]>,
-    /// The seed slime chunks are marked from (Overworld, seed known).
-    slime: Option<i64>,
 }
 
 struct Meridian {
@@ -417,9 +419,25 @@ impl MapHost for HorizonHost<'_> {
 }
 
 impl State {
-    fn save_config(&self) {
+    fn save_config(&mut self) {
+        self.config_unsaved = false;
         if let Err(e) = self.store.save(&self.config) {
             log::warn!("meridian: cannot save settings: {e}");
+        }
+    }
+
+    /// Asks the bridge for the entities (or stops): a request ends unless
+    /// renewed (see [`State::expire_entities`]).
+    fn want_entities(&mut self, on: bool) {
+        bridge::want_entities(on);
+        self.entities_wanted = on.then(Instant::now);
+    }
+
+    /// Stops the entity copies when no radar asked for a while (the minimap
+    /// hidden by F1, F3, a screen, or switched off).
+    fn expire_entities(&mut self) {
+        if self.entities_wanted.is_some_and(|t| t.elapsed() > ENTITY_REQUEST_TTL) {
+            self.want_entities(false);
         }
     }
 
@@ -662,7 +680,8 @@ impl Meridian {
                 map_frame: Instant::now(),
                 next_color: 12,
                 notice: None,
-                map_image: None,
+                minimap_image: Default::default(),
+                config_unsaved: false,
                 screen: None,
                 open_screen: None,
                 pending: Vec::new(),
@@ -682,10 +701,13 @@ impl Meridian {
                 hovered_marker: None,
                 looks_ready: false,
                 faces_held: false,
+                face_cache: HashMap::new(),
+                entities_wanted: None,
                 menu_marker: None,
                 menu_player: None,
                 waypoint_place: (None, None),
                 other_book: None,
+                book_places: None,
                 minimap_place: None,
                 nearest_opts: Default::default(),
             }
@@ -1487,6 +1509,7 @@ impl Hooks for Meridian {
     ) {
         bridge::clear_looks();
         *TEXTURES.lock() = None;
+        self.with_state(&*host, |s| s.face_cache.clear());
         self.send(host, HostEvent::ResourcesReloaded);
     }
 
@@ -1527,6 +1550,11 @@ impl Hooks for Meridian {
         let host: &dyn Host = host;
         self.with_state(host, |s| {
             s.update_map(&data_dir(host));
+            s.expire_entities();
+            if s.config_unsaved && !s.screen.as_ref().is_some_and(Screen::dragging) {
+                // A drag ended without a release reaching us (the screen closed).
+                s.save_config();
+            }
             s.update_seeds();
             s.seed_svc.poll();
             s.poll_nearest();
@@ -1672,6 +1700,7 @@ impl Hooks for Meridian {
                 minimap_ops(host, s, &player, gui, gui_scale, &mut ops);
             } else {
                 gpu::set_frame(None);
+                s.want_entities(false);
             }
             paint(host, event.batch, &ops);
         });
@@ -1763,33 +1792,33 @@ fn minimap_ops(
         rect: [layout.x, layout.y, layout.size, layout.size],
         margin: 5.0 * layout.unit + layout.frame_width(),
     });
-    compose_map(s, &layout, player);
+    compose_map(s, &layout, player, gui_scale);
     let settings = &s.config.current().minimap;
     let axes = minimap::Axes::new(layout.rotate, player.yaw);
-    if let Some((key, image)) = &s.map_image {
-        let undiscovered = settings.undiscovered_opacity.min(100) as f32 / 100.0;
-        gpu::set_frame(Some(gpu::MapFrame {
-            rect: [layout.x, layout.y, layout.size, layout.size],
-            gui,
-            right: [axes.right[0] as f32, axes.right[1] as f32],
-            forward: [axes.forward[0] as f32, axes.forward[1] as f32],
-            center: [(px - key.origin[0] as f64) as f32, (pz - key.origin[1] as f64) as f32],
-            blocks_per_gui_px: layout.blocks_per_pixel,
-            round: layout.round,
-            opacity: settings.opacity.min(100) as f32 / 100.0,
-            backdrop: [0.06, 0.06, 0.06, undiscovered],
-            image: image.clone(),
-            at: Instant::now(),
-            grid: settings.chunk_grid.then_some(layout.blocks_per_pixel / gui_scale.max(0.25)),
-            origin: key.origin,
-        }));
-    }
-    let radar = &s.config.current().radar;
-    let radar_on = radar.enabled && !s.config.current().minimap.fair_play;
-    bridge::want_entities(radar_on);
+    let image = &s.minimap_image;
+    let undiscovered = settings.undiscovered_opacity.min(100) as f32 / 100.0;
+    gpu::set_frame(Some(gpu::MapFrame {
+        rect: [layout.x, layout.y, layout.size, layout.size],
+        gui,
+        right: [axes.right[0] as f32, axes.right[1] as f32],
+        forward: [axes.forward[0] as f32, axes.forward[1] as f32],
+        center: image.center([px, pz]),
+        blocks_per_gui_px: layout.blocks_per_pixel,
+        scale: image.scale() as f32,
+        size: image.size(),
+        wrap: image.wrap(),
+        round: layout.round,
+        opacity: settings.opacity.min(100) as f32 / 100.0,
+        backdrop: [0.06, 0.06, 0.06, undiscovered],
+        at: Instant::now(),
+        grid: settings.chunk_grid.then_some(layout.blocks_per_pixel / gui_scale.max(0.25)),
+        origin: image.origin_block(),
+    }));
+    let radar_on = s.config.current().radar.enabled && !s.config.current().minimap.fair_play;
+    s.want_entities(radar_on);
     if radar_on {
-        let entities = radar_entities();
-        let radar = radar_now(radar, s.faces_held);
+        let entities = radar_entities(&mut s.face_cache);
+        let radar = radar_now(&s.config.current().radar, s.faces_held);
         ops.extend(radar::dots(&layout, player.position, player.yaw, &entities, &radar));
     }
     let wp = &s.config.current().waypoints;
@@ -1808,71 +1837,49 @@ fn minimap_ops(
     }
     ops.extend(minimap::frame(&layout));
     ops.extend(minimap::compass(&layout, player.yaw));
-    ops.extend(minimap::player_mark(&layout, player.yaw, settings.arrow_scale));
+    ops.extend(minimap::player_mark(&layout, player.yaw, s.config.current().minimap.arrow_scale));
     ops.extend(minimap::info(&layout, &lines));
 }
 
-/// Composes the north-up image the GPU turns: one texel per block, wide
-/// enough for the map's diagonal, centred on the player's block. Only when
-/// the player crossed a block or a region under it was redrawn.
-fn compose_map(s: &mut State, layout: &minimap::Layout, player: &PlayerState) {
-    let side_blocks = layout.size * layout.blocks_per_pixel;
-    let size = (((side_blocks * std::f32::consts::SQRT_2) as u32 + 4).div_ceil(16) * 16).clamp(16, 2048);
-    let (bx, bz) = (player.position[0].floor() as i32, player.position[2].floor() as i32);
-    let origin = [bx - size as i32 / 2, bz - size as i32 / 2];
-    let (rmin, rmax) = (
-        RegionPos::of_block(origin[0], origin[1]),
-        RegionPos::of_block(origin[0] + size as i32, origin[1] + size as i32),
-    );
-    let mut revisions = 0u64;
-    for x in rmin.x..=rmax.x {
-        for z in rmin.z..=rmax.z {
-            if let Some(r) = s.engine.region(RegionPos::new(x, z)) {
-                revisions = revisions.wrapping_mul(31).wrapping_add(r.revision + 1);
-            }
-        }
-    }
+/// Brings the minimap's image up to date (`minimap_image`: only cells that
+/// scrolled in or whose region was redrawn) and hands what changed to the
+/// render thread.
+fn compose_map(s: &mut State, layout: &minimap::Layout, player: &PlayerState, gui_scale: f32) {
+    use meridian_core::minimap_image::{CELL, Style, View};
     let minimap = &s.config.current().minimap;
-    let overlay = minimap.light_overlay.then_some(minimap.light_overlay_range);
     let slime = if minimap.slime_chunks && s.dimension.as_deref() == Some("minecraft:overworld") {
         s.seed_svc.atlas().map(|a| a.seed)
     } else {
         None
     };
-    let key = MapImageKey { origin, size, revisions, overlay, slime };
-    if s.map_image.as_ref().is_some_and(|(k, _)| *k == key) {
-        return;
-    }
-    let sampler = s.engine.sampler();
-    let mut pixels = Vec::with_capacity((size * size) as usize);
-    for z in 0..size as i32 {
-        for x in 0..size as i32 {
-            let (bx, bz) = (origin[0] + x, origin[1] + z);
-            let mut p = sampler.pixel(bx, bz);
-            if let Some([lo, hi]) = overlay
-                && p >> 24 != 0
-                && let Some(col) = sampler.column(bx, bz)
-                && col.water_depth == 0
-                && (lo..=hi).contains(&col.block_light())
-            {
-                // Spawnable ground: tinted light purple, as the reference's overlay.
-                p = 0xFF00_0000 | meridian_core::color::blend(p & 0x00FF_FFFF, 0xFF55FF, 0.45);
-            }
-            if let Some(seed) = slime
-                && meridian_seedatlas::structures::is_slime_chunk(seed as u64, bx >> 4, bz >> 4)
-            {
-                // Slime chunks: tinted green; unexplored ones half see-through.
-                p = if p >> 24 == 0 {
-                    0x8022_DD22
-                } else {
-                    0xFF00_0000 | meridian_core::color::blend(p & 0x00FF_FFFF, 0x22DD22, 0.4)
-                };
-            }
-            pixels.push(p);
+    let epoch = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (s.engine.context(), s.engine.map(), s.engine.layer(), &s.dimension).hash(&mut h);
+        h.finish()
+    };
+    let view = View {
+        center: [player.position[0], player.position[2]],
+        side_blocks: layout.size * layout.blocks_per_pixel,
+        blocks_per_px: layout.blocks_per_pixel / gui_scale.max(0.25),
+        style: Style { light_overlay: minimap.light_overlay.then_some(minimap.light_overlay_range), slime, epoch },
+    };
+    let engine = &s.engine;
+    s.minimap_image.update(&view, |p| engine.region(p));
+    let changes = s.minimap_image.take_changes();
+    let image = &s.minimap_image;
+    gpu::send(|u| {
+        let cells = (image.size() / CELL).pow(2) as usize;
+        if changes.reset || u.want_full || u.size != image.size() || u.cells.len() + changes.cells.len() > cells {
+            // New, asked for, or the render thread fell behind: all of it.
+            u.size = image.size();
+            u.full = Some(image.pixels().to_vec());
+            u.cells.clear();
+            u.want_full = false;
+        } else {
+            u.cells.extend(changes.cells.iter().map(|c| ([c[0] * CELL, c[1] * CELL], image.cell(*c))));
         }
-    }
-    let revision = s.map_image.as_ref().map_or(0, |(_, i)| i.revision + 1);
-    s.map_image = Some((key, std::sync::Arc::new(gpu::MapImage { size, pixels, revision })));
+    });
 }
 
 /// "MeridianTest (auto)" / "overworld (auto)" for the screens' selectors.
@@ -1919,7 +1926,15 @@ impl Meridian {
             let here_dir = s.book.as_ref().map(|((source, map), _)| {
                 meridian_core::persist::server_dir(&data, source).join(meridian_core::persist::escape_component(map))
             });
-            let others: Vec<waypoint::BookPlace> = waypoint::book_places(&data).into_iter().filter(|p| Some(&p.dir) != here_dir.as_ref()).collect();
+            // The folders are read again every two seconds, not every frame.
+            if s.book_places.as_ref().is_none_or(|(at, _)| at.elapsed() >= BOOK_PLACES_TTL) {
+                s.book_places = Some((Instant::now(), waypoint::book_places(&data)));
+            }
+            let others: Vec<waypoint::BookPlace> = s
+                .book_places
+                .as_ref()
+                .map(|(_, places)| places.iter().filter(|p| Some(&p.dir) != here_dir.as_ref()).cloned().collect())
+                .unwrap_or_default();
             let other_dir = s.waypoint_place.0.clone().filter(|d| Some(d) != here_dir.as_ref() && others.iter().any(|p| &p.dir == d));
             if let Some(dir) = &other_dir
                 && s.other_book.as_ref().is_none_or(|(d, _)| d != dir)
@@ -1952,18 +1967,19 @@ impl Meridian {
             };
             let shown_world = places.worlds[places.world].clone();
             let shown_dim = places.dimensions[places.dimension].clone();
-            let mut settings = s.config.current().clone();
             let sa_dim = sa::dimension_of(s.dimension.as_deref().unwrap_or("")).unwrap_or(meridian_seedatlas::Dimension::Overworld);
+            // Completed counts: one pass, and only for the screens showing them.
+            let counts = s
+                .seed_key
+                .as_ref()
+                .filter(|_| matches!(screen, Screen::Settings(_) | Screen::ConfirmReset(_)))
+                .map(|k| s.completed.counts(k));
             let sa_env = meridian_core::screens_seedatlas::SeedAtlasEnv {
                 dimension: sa_dim,
                 has_seed: s.seed_svc.atlas_for(sa_dim).is_some(),
-                completed_count: s.seed_key.as_ref().map(|k| s.completed.count(k, None)),
+                completed_count: counts.as_ref().map(|(all, _)| *all),
                 nearest: s.nearest_opts,
-                completed_by_kind: s
-                    .seed_key
-                    .as_ref()
-                    .map(|k| sa::MARKERS.iter().map(|m| (m.id.to_owned(), s.completed.count(k, Some(m.id)))).collect())
-                    .unwrap_or_default(),
+                completed_by_kind: counts.map(|(_, by_kind)| by_kind).unwrap_or_default(),
                 seed_status,
             };
             let profiles: Vec<String> = s.config.profiles.keys().cloned().collect();
@@ -1977,7 +1993,8 @@ impl Meridian {
                     dimension_label: &shown_dim,
                     player_block,
                     waypoints,
-                    settings: &mut settings,
+                    // Screens change the settings in place and say so.
+                    settings: s.config.current_mut(),
                     waypoints_changed: false,
                     settings_changed: false,
                     seed_atlas: sa_env,
@@ -1998,8 +2015,12 @@ impl Meridian {
                 }
             }
             if settings_changed {
-                *s.config.current_mut() = settings;
                 s.engine.set_settings(s.config.current().clone());
+                s.config_unsaved = true;
+            }
+            // Applied at once; written when no drag is under way (a slider
+            // writes on release, not per drag event).
+            if s.config_unsaved && !screen.dragging() {
                 s.save_config();
             }
             if let Screen::Nearest(n) = &screen {
@@ -2140,8 +2161,9 @@ impl Meridian {
     }
 }
 
-/// The bridge's entities as the radar's.
-fn radar_entities() -> Vec<radar::Entity> {
+/// The bridge's entities as the radar's, their faces from `faces` (by kind,
+/// or skin for players; filled on first sight).
+fn radar_entities(faces: &mut HashMap<String, Option<std::sync::Arc<radar::Face>>>) -> Vec<radar::Entity> {
     bridge::entities()
         .into_iter()
         .map(|e| radar::Entity {
@@ -2157,7 +2179,19 @@ fn radar_entities() -> Vec<radar::Entity> {
             invisible: e.invisible,
             // Faces only where the texture is there (another resource pack
             // may not have it): a dot otherwise.
-            face: radar::face_for(&e.kind, e.skin.as_deref()).filter(|f| texture_size(&f.texture).is_some()),
+            face: {
+                let key = e.skin.as_deref().unwrap_or(&e.kind);
+                match faces.get(key) {
+                    Some(face) => face.clone(),
+                    None => {
+                        let face = radar::face_for(&e.kind, e.skin.as_deref())
+                            .filter(|f| texture_size(&f.texture).is_some())
+                            .map(std::sync::Arc::new);
+                        faces.insert(key.to_owned(), face.clone());
+                        face
+                    }
+                }
+            },
             kind: e.kind,
             name: e.name,
             tamed: e.tamed,
@@ -2398,8 +2432,6 @@ impl Meridian {
                 let step = sa::step_for(region_side, sa_settings.biome_resolution);
                 let refine = sa::refine_allowed(region_side);
                 let y = sa::sample_y(&sa_settings, dim);
-                let mut order: Vec<RegionPos> = (dmin.x..=dmax.x).flat_map(|x| (dmin.z..=dmax.z).map(move |z| RegionPos::new(x, z))).collect();
-                order.sort_by_key(|r| (r.x - mid.x).abs().max((r.z - mid.z).abs()));
                 if sa_settings.biome_layer {
                     // Tiles of 128 samples at the chosen step, nearest first;
                     // a coarser tile already computed shows under one that is
@@ -2567,21 +2599,17 @@ impl Meridian {
             let hovered_height = sampler.column(hx, hz).map(|c| c.height);
             let hovered_biome = sampler.biome(hx, hz);
             let cave_layer = engine.layer();
+            let radar_on = s.config.current().radar.enabled && !s.config.current().minimap.fair_play;
+            s.want_entities(radar_on && shown == here);
+            let entities = if radar_on && shown == here { radar_entities(&mut s.face_cache) } else { Vec::new() };
             let settings = s.config.current();
-            let radar_on = settings.radar.enabled && !settings.minimap.fair_play;
-            bridge::want_entities(radar_on);
-            let entities: Vec<radar::Entity> = if radar_on {
-                radar_entities().into_iter().filter(|e| radar::shown(e, &settings.radar)).collect()
-            } else {
-                Vec::new()
-            };
+            let radar = radar_now(&settings.radar, s.faces_held);
             let waypoints: Vec<&Waypoint> = match &s.book {
                 Some((_, book)) if settings.waypoints.on_minimap => {
                     book.dimension(&shown).map(|d| d.visible(settings.waypoints.all_sets)).unwrap_or_default()
                 }
                 _ => Vec::new(),
             };
-            let entities = if shown == here { entities } else { Vec::new() };
             let wm = &settings.world_map;
             s.map.seed_atlas = sa_settings.enabled;
             let mut ops = s.map.overlay(&Overlay {
@@ -2594,7 +2622,7 @@ impl Meridian {
                 hovered_biome,
                 waypoints: &waypoints,
                 entities: &entities,
-                faces: radar_now(&settings.radar, s.faces_held).faces,
+                radar: &radar,
                 seed_layer: sa_settings.biome_layer,
                 show_coordinates: wm.show_coordinates,
                 show_zoom: wm.show_zoom,

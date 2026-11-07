@@ -92,6 +92,8 @@ pub struct Shading {
     /// Cave floors drawn bright enough to read (otherwise only torches
     /// light them).
     pub legible: bool,
+    /// Ground below this Y is left out (a cave layer's depth).
+    pub floor: Option<i32>,
 }
 
 impl Shading {
@@ -105,6 +107,7 @@ impl Shading {
             daylight: day_time.map_or(1.0, daylight),
             cave: false,
             legible: true,
+            floor: None,
         }
     }
 
@@ -112,6 +115,12 @@ impl Shading {
     pub fn for_cave(mut self, cave: bool, legible: bool) -> Self {
         self.cave = cave;
         self.legible = legible;
+        self
+    }
+
+    /// Leaves out ground below `floor` (cave mode's depth below its layer).
+    pub fn with_floor(mut self, floor: Option<i32>) -> Self {
+        self.floor = floor;
         self
     }
 
@@ -127,6 +136,7 @@ impl Shading {
             || self.transparency != other.transparency
             || self.cave != other.cave
             || (self.cave && self.legible != other.legible)
+            || self.floor != other.floor
             || (self.lighting && step(self.daylight) != step(other.daylight))
     }
 }

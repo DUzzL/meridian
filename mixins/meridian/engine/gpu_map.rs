@@ -96,8 +96,9 @@ fn fs(in: Out) -> @location(0) vec4<f32> {
 
 /// How long after the map's last frame its Seed Atlas textures are dropped.
 const RELEASE_AFTER: std::time::Duration = std::time::Duration::from_secs(2);
-/// Region textures uploaded per frame at most.
-const UPLOADS_PER_FRAME: usize = 6;
+/// Texture bytes uploaded per frame at most: six full regions, or many
+/// more small overview and seed textures.
+const UPLOAD_BYTES_PER_FRAME: usize = 6 * 512 * 512 * 4;
 /// Texture memory kept before the least recently drawn are dropped.
 const CACHE_BYTES: usize = 256 << 20;
 const LODS: [u32; 3] = [512, 128, 32];
@@ -311,7 +312,7 @@ impl Gpu {
     }
 
     /// Makes sure `key` holds `pixels` at `revision`; false when the frame's
-    /// upload budget is spent.
+    /// upload budget (bytes) is spent.
     fn upload(
         &mut self,
         device: &wgpu::Device,
@@ -325,11 +326,12 @@ impl Gpu {
         if self.entries.get(&key).is_some_and(|e| e.revision == revision) {
             return true;
         }
-        if *budget == 0 {
+        let side = key.3;
+        let cost = (side * side * 4) as usize;
+        if *budget < cost {
             return false;
         }
-        *budget -= 1;
-        let side = key.3;
+        *budget -= cost;
         let bytes = match fixed {
             None => downsample(pixels, side),
             Some(alpha) => pixels
@@ -433,7 +435,7 @@ impl WorldMapRenderer {
             Icon(usize),
         }
         let mut draws: Vec<Draw> = Vec::new();
-        let mut budget = UPLOADS_PER_FRAME;
+        let mut budget = UPLOAD_BYTES_PER_FRAME;
         let mid = [frame.gui[0] / 2.0, frame.gui[1] / 2.0];
         let near = |a: &RegionQuad, b: &RegionQuad| {
             let d = |r: &RegionQuad| ((r.rect[0] + r.rect[2]) / 2.0 - mid[0]).abs() + ((r.rect[1] + r.rect[3]) / 2.0 - mid[1]).abs();

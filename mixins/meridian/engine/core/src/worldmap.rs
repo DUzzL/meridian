@@ -127,9 +127,10 @@ pub struct Overlay<'a> {
     pub hovered_height: Option<i16>,
     pub hovered_biome: Option<String>,
     pub waypoints: &'a [&'a Waypoint],
+    /// The entities around the player; the radar chooses which show.
     pub entities: &'a [radar::Entity],
-    /// Entities as their faces (where known) instead of dots.
-    pub faces: bool,
+    /// The radar's settings as drawn now (faces while their key is held).
+    pub radar: &'a crate::config::RadarSettings,
     /// The Seed Atlas layer is shown (the toolbar's layer button).
     pub seed_layer: bool,
     pub show_coordinates: bool,
@@ -437,11 +438,16 @@ impl WorldMap {
                 });
             }
         }
-        // Entities: small dots with a dark rim, or their faces. Both keep
-        // their size in GUI units whatever the zoom.
-        for e in o.entities {
+        // Entities: the radar's choice on screen (filters, height limit and
+        // fade, cap and order as on the minimap), as dots with a dark rim or
+        // their faces. Both keep their size in GUI units whatever the zoom.
+        let on_screen = |e: &radar::Entity| {
             let [x, y] = self.to_screen([e.pos[0], e.pos[2]], gui, u);
-            if o.faces
+            x >= 0.0 && y >= 0.0 && x <= gui[0] && y <= gui[1]
+        };
+        for e in radar::select(o.entities, o.player, o.radar, on_screen) {
+            let [x, y] = self.to_screen([e.pos[0], e.pos[2]], gui, u);
+            if o.radar.faces
                 && let Some(face) = &e.face
             {
                 let (half, rim) = (ENTITY_FACE_HALF * u, 0.6 * u);
@@ -454,11 +460,13 @@ impl WorldMap {
                     rect: [x - half, y - half, 2.0 * half, 2.0 * half],
                     uv: face.uv,
                     base: face.base,
-                    argb: 0xFFFF_FFFF,
+                    argb: radar::face_tint(e, o.player[1], o.radar),
                 });
                 continue;
             }
-            let r = 1.2 * u;
+            // The dot size setting, at the default 2 the 1.2 units the map
+            // always drew.
+            let r = 0.6 * o.radar.dot_size.max(1) as f32 * u;
             let diamond = |r: f32| [[x, y - r], [x + r, y], [x, y + r], [x - r, y]];
             ops.push(DrawOp::Quad {
                 points: diamond(r + 0.7 * u),
@@ -466,7 +474,7 @@ impl WorldMap {
             });
             ops.push(DrawOp::Quad {
                 points: diamond(r),
-                argb: 0xFF00_0000 | e.class.rgb(),
+                argb: 0xFF00_0000 | radar::color(e, o.player[1], o.radar),
             });
         }
         // Waypoints: a shield in the waypoint's colour with its initial, its
@@ -901,6 +909,60 @@ mod tests {
     use super::*;
 
     const GUI: [f32; 2] = [1000.0, 600.0];
+
+    #[test]
+    fn the_world_map_radar_follows_the_radar_settings() {
+        let map = WorldMap::new([0.0, 64.0, 0.0]);
+        let entity = |id, pos| radar::Entity {
+            id,
+            class: radar::Class::Friendly,
+            pos,
+            invisible: false,
+            kind: "minecraft:cow".into(),
+            name: None,
+            face: None,
+            tamed: false,
+        };
+        let entities = [
+            entity(1, [2.0, 64.0, 0.0]),
+            entity(2, [4.0, 64.0, 0.0]),
+            // 30 blocks up: beyond the height limit.
+            entity(3, [6.0, 94.0, 0.0]),
+        ];
+        let colors = |radar: &crate::config::RadarSettings| {
+            let o = Overlay {
+                gui: GUI,
+                unit: 1.0,
+                mouse: [-1.0, -1.0],
+                player: [0.0, 64.0, 0.0],
+                yaw: 0.0,
+                hovered_height: None,
+                hovered_biome: None,
+                waypoints: &[],
+                entities: &entities,
+                radar,
+                seed_layer: false,
+                show_coordinates: false,
+                show_zoom: false,
+                show_biome: false,
+                show_footsteps: false,
+                player_as_arrow: true,
+                cave_layer: None,
+                other_dimension: None,
+            };
+            map.overlay(&o)
+                .into_iter()
+                .filter_map(|op| match op {
+                    DrawOp::Quad { argb, .. } if argb & 0xFF_FFFF == 0xFFFF55 => Some(argb),
+                    _ => None,
+                })
+                .count()
+        };
+        let mut s = crate::config::RadarSettings::default();
+        assert_eq!(colors(&s), 2, "the height limit holds on the world map");
+        s.max_entities = 1;
+        assert_eq!(colors(&s), 1, "and the cap");
+    }
 
     #[test]
     fn view_round_trip_and_zoom_about_cursor() {

@@ -1,7 +1,8 @@
 //! Settings, named profiles and their file.
 //!
 //! Every field has a default and `#[serde(default)]`, so an older or partial
-//! file keeps loading as fields are added. Defaults follow the reference
+//! file keeps loading as fields are added; keys of removed fields are
+//! ignored. Defaults follow the reference
 //! mods' first-start configuration (`docs/FEATURES.md`, source O2) unless
 //! `docs/DECISIONS.md` says otherwise.
 
@@ -93,8 +94,8 @@ pub enum Slopes {
     Strong,
 }
 
-/// How the map is drawn; shared by the minimap and the world map, each with
-/// its own copy.
+/// How the map is drawn: the minimap and the world map show the same
+/// regions, so one style (`world_map.terrain`) serves both.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TerrainStyle {
@@ -102,7 +103,9 @@ pub struct TerrainStyle {
     pub biome_colors_in_vanilla: bool,
     pub terrain_depth: bool,
     pub slopes: Slopes,
+    /// Grass, foliage and water tints blend over neighbouring biomes.
     pub biome_blending: bool,
+    /// Night and block light on the maps.
     pub lighting: bool,
     pub show_flowers: bool,
     pub show_redstone: bool,
@@ -136,11 +139,11 @@ pub struct CaveSettings {
     /// Dimensions where cave mode may run; empty means all.
     pub allowed_dimensions: Vec<String>,
     pub auto: AutoCaveMode,
-    /// Blocks scanned below the cave ceiling.
+    /// Blocks below the cave layer's start that the cave map shows; deeper
+    /// ground is left out.
     pub depth: u32,
     /// Caves drawn readable (otherwise only torches light them). Named
-    /// apart from the unused `legible` of older files, so their `false`
-    /// doesn't darken caves now.
+    /// apart from the unused `legible` of older files, which is ignored.
     pub legible_caves: bool,
     /// Delay before switching in or out, milliseconds.
     pub toggle_delay_ms: u32,
@@ -155,8 +158,9 @@ impl Default for CaveSettings {
             allowed_dimensions: Vec::new(),
             auto: AutoCaveMode::Roof3x3,
             depth: 30,
-            // Readable by default: the map's own caves were always drawn so.
-            legible_caves: true,
+            // Off, as the reference's first start (O2
+            // `minimap_legible_cave_maps`); files that saved `true` keep it.
+            legible_caves: false,
             toggle_delay_ms: 1000,
             extra_zoom: 2,
         }
@@ -215,13 +219,10 @@ pub struct MinimapSettings {
     pub enlarged_zoom: u8,
     pub enlarged_centered: bool,
     pub opacity: u8,
-    pub frame: u8,
     pub arrow_scale: f32,
     pub hide_under_screens: bool,
     pub hide_under_debug: bool,
     pub undiscovered_opacity: u8,
-    /// Reuse the world map's tiles instead of building separate ones.
-    pub share_world_map_tiles: bool,
     /// Fair play: no entity radar and no cave maps (for servers that ask).
     pub fair_play: bool,
     pub chunk_grid: bool,
@@ -233,7 +234,7 @@ pub struct MinimapSettings {
     pub show_coords: bool,
     pub show_biome: bool,
     pub info: InfoSettings,
-    pub terrain: TerrainStyle,
+    /// Cave mode (the minimap's and the world map's).
     pub cave: CaveSettings,
 }
 
@@ -252,12 +253,10 @@ impl Default for MinimapSettings {
             enlarged_zoom: 0,
             enlarged_centered: false,
             opacity: 100,
-            frame: 0,
             arrow_scale: 1.5,
             hide_under_screens: true,
             hide_under_debug: true,
             undiscovered_opacity: 50,
-            share_world_map_tiles: true,
             fair_play: false,
             chunk_grid: false,
             slime_chunks: false,
@@ -266,7 +265,6 @@ impl Default for MinimapSettings {
             show_coords: true,
             show_biome: false,
             info: InfoSettings::default(),
-            terrain: TerrainStyle::default(),
             cave: CaveSettings::default(),
         }
     }
@@ -295,8 +293,8 @@ pub struct WorldMapSettings {
     pub player_teleport_format: String,
     /// Which map of a server is shown.
     pub multiplayer_maps: MapSelection,
+    /// How both maps are drawn.
     pub terrain: TerrainStyle,
-    pub cave: CaveSettings,
 }
 
 impl Default for WorldMapSettings {
@@ -319,7 +317,6 @@ impl Default for WorldMapSettings {
             player_teleport_format: "/tp @s {name}".into(),
             multiplayer_maps: MapSelection::WorldSpawn,
             terrain: TerrainStyle::default(),
-            cave: CaveSettings::default(),
         }
     }
 }
@@ -389,6 +386,8 @@ pub struct RadarSettings {
     /// Shows what the filters hide and hides what they show (the reverse key).
     pub reversed: bool,
     pub hide_invisible: bool,
+    /// Kept for files and a later bridge: entity positions always come
+    /// interpolated between ticks, so there is no unsmoothed choice yet.
     pub smooth: bool,
     pub name_scale: f32,
     pub players: bool,
@@ -832,9 +831,31 @@ mod tests {
 
     #[test]
     fn old_legible_value_is_ignored() {
-        let old = "[profiles.default.minimap.cave]\nlegible = false\n";
+        // The old field never worked: neither value of it counts.
+        for old in ["legible = false", "legible = true"] {
+            let text = format!("[profiles.default.minimap.cave]\n{old}\n");
+            let f: ConfigFile = toml::from_str(&text).unwrap();
+            assert!(
+                !f.profiles["default"].minimap.cave.legible_caves,
+                "the default, as O2's"
+            );
+        }
+        let saved = "[profiles.default.minimap.cave]\nlegible = false\nlegible_caves = true\n";
+        let f: ConfigFile = toml::from_str(saved).unwrap();
+        assert!(
+            f.profiles["default"].minimap.cave.legible_caves,
+            "a saved choice stays"
+        );
+    }
+
+    #[test]
+    fn removed_fields_still_load() {
+        let old = "[profiles.default.minimap]\nframe = 2\nshare_world_map_tiles = false\nzoom = 2\n\
+                   [profiles.default.minimap.terrain]\nlighting = false\n\
+                   [profiles.default.world_map.cave]\ndepth = 9\n";
         let f: ConfigFile = toml::from_str(old).unwrap();
-        assert!(f.profiles["default"].minimap.cave.legible_caves);
+        assert_eq!(f.profiles["default"].minimap.zoom, 2);
+        assert!(f.profiles["default"].world_map.terrain.lighting);
     }
 
     #[test]

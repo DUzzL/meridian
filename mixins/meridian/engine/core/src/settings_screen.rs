@@ -84,6 +84,10 @@ enum Control {
     Switch(fn(&Settings) -> bool, fn(&mut Settings, bool)),
     /// A slider: its value 0..=1, the text on it, and how a value is set.
     Slider(fn(&Settings) -> f32, fn(&Settings) -> String, fn(&mut Settings, f32)),
+    /// A text field: the value as text, and how typed text is set (false
+    /// when it is not valid: the old value stays). Enter or a click
+    /// elsewhere sets it, Escape drops it.
+    Text(fn(&Settings) -> String, fn(&mut Settings, &str) -> bool),
     /// A button with this id and its text.
     Button(&'static str, fn(&Env<'_>) -> String),
     /// A structure kind: on/off, its completed count, a reset button.
@@ -134,7 +138,71 @@ fn pct_text(v: f32) -> String {
     format!("{}%", (v * 100.0).round() as u32)
 }
 
-/// Every row of a category.
+/// A 0..=100 percentage as a slider's 0..=1.
+fn pct(v: u8) -> f32 {
+    f32::from(v.min(100)) / 100.0
+}
+
+/// A slider's 0..=1 as a 0..=100 percentage.
+fn to_pct(v: f32) -> u8 {
+    (v * 100.0).round() as u8
+}
+
+/// A scale from 0.5 to 3.0 in steps of 0.1 as a slider's 0..=1, and back.
+fn scale_value(v: f32) -> f32 {
+    ((v - 0.5) / 2.5).clamp(0.0, 1.0)
+}
+
+fn to_scale(v: f32) -> f32 {
+    ((0.5 + v * 2.5) * 10.0).round() / 10.0
+}
+
+/// A whole number from `text` within `range`.
+fn number<T: std::str::FromStr + PartialOrd>(
+    text: &str,
+    range: std::ops::RangeInclusive<T>,
+) -> Option<T> {
+    text.trim().parse().ok().filter(|v| range.contains(v))
+}
+
+/// A command format: it must be a command, or the line would go to the chat.
+fn command(text: &str) -> Option<String> {
+    let t = text.trim();
+    (t.len() > 1 && t.starts_with('/')).then(|| t.to_owned())
+}
+
+/// Dimension ids as the cave mode list shows them: short, comma separated.
+fn dimension_list(ids: &[String]) -> String {
+    ids.iter()
+        .map(|d| d.strip_prefix("minecraft:").unwrap_or(d))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// A typed dimension list (`overworld, the_nether`); empty means all.
+fn parse_dimensions(text: &str) -> Option<Vec<String>> {
+    let mut out = Vec::new();
+    for id in text.split([',', ' ']).map(str::trim).filter(|d| !d.is_empty()) {
+        if !id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "_-./:".contains(c))
+        {
+            return None;
+        }
+        let id = if id.contains(':') {
+            id.to_owned()
+        } else {
+            format!("minecraft:{id}")
+        };
+        if !out.contains(&id) {
+            out.push(id);
+        }
+    }
+    Some(out)
+}
+
+/// Every row of a category (a table: one row per line).
+#[rustfmt::skip]
 fn rows(c: Category) -> Vec<Row> {
     use Category::*;
     use Control::*;
@@ -161,6 +229,8 @@ fn rows(c: Category) -> Vec<Row> {
             opt(Minimap, "Further Zoom Out", "Adds zoom steps further out."),
             opt(Minimap, "Hide Under Screens", "Hides the minimap while a menu or inventory is open."),
             opt(Minimap, "Hide Under F3", "Hides the minimap while the debug screen is shown."),
+            row(Minimap, "Arrow Scale", "Size of your arrow on the minimap.", Slider(|s| scale_value(s.minimap.arrow_scale), |s| format!("{:.1}x", s.minimap.arrow_scale), |s, v| s.minimap.arrow_scale = to_scale(v))),
+            row(Minimap, "Undiscovered Opacity", "How dark ground nobody explored yet shows on the minimap.", Slider(|s| pct(s.minimap.undiscovered_opacity), |s| pct_text(pct(s.minimap.undiscovered_opacity)), |s, v| s.minimap.undiscovered_opacity = to_pct(v))),
         ],
         Information => vec![
             opt(Information, "Coordinates", "X, Y and Z under the minimap."),
@@ -187,8 +257,9 @@ fn rows(c: Category) -> Vec<Row> {
             opt(Radar, "Height-Based Fade", "Marks get darker the further above or below you they are."),
             opt(Radar, "Dot Size", "Size of the dots."),
             opt(Radar, "Hide Invisible Entities", "Leaves out entities that are invisible."),
-            opt(Radar, "Smooth Entity Dots", "Moves marks smoothly between game ticks."),
             opt(Radar, "Reverse Filter", "Shows what the filters hide and hides what they show."),
+            row(Radar, "Name Scale", "Size of the names under the marks.", Slider(|s| scale_value(s.radar.name_scale), |s| format!("{:.1}x", s.radar.name_scale), |s, v| s.radar.name_scale = to_scale(v))),
+            row(Radar, "Max Entities", "Entities shown at most; the nearest ones stay.", Text(|s| s.radar.max_entities.to_string(), |s, t| number(t, 1..=100_000).map(|v| s.radar.max_entities = v).is_some())),
         ],
         Waypoints => vec![
             opt(Waypoints, "Waypoints In World", "Names and distances of waypoints in the world."),
@@ -199,13 +270,17 @@ fn rows(c: Category) -> Vec<Row> {
             opt(Waypoints, "Deathpoints", "A waypoint where you died."),
             opt(Waypoints, "Keep Old Deathpoints", "Keeps earlier deathpoints when you die again."),
             opt(Waypoints, "Delete Reached Deathpoints", "Removes a deathpoint once you get back to it."),
+            row(Waypoints, "Waypoint Opacity In World", "How see-through waypoints in the world are.", Slider(|s| pct(s.waypoints.opacity_in_world), |s| pct_text(pct(s.waypoints.opacity_in_world)), |s, v| s.waypoints.opacity_in_world = to_pct(v))),
+            row(Waypoints, "Waypoint Opacity On Minimap", "How see-through waypoints on the minimap are.", Slider(|s| pct(s.waypoints.opacity_on_minimap), |s| pct_text(pct(s.waypoints.opacity_on_minimap)), |s, v| s.waypoints.opacity_on_minimap = to_pct(v))),
+            row(Waypoints, "Distance In km From", "Distances from this many blocks on are shown in km; 0 never.", Text(|s| s.waypoints.distance_in_km_from.to_string(), |s, t| number(t, 0..=u32::MAX).map(|v| s.waypoints.distance_in_km_from = v).is_some())),
+            row(Waypoints, "Waypoint Teleport Command", "The command Teleport sends: {x} {y} {z} are the waypoint's coordinates.", Text(|s| s.waypoints.teleport_format.clone(), |s, t| command(t).map(|c| s.waypoints.teleport_format = c).is_some())),
         ],
         Terrain => vec![
             opt(Terrain, "Block Colors", "Accurate uses the block textures and biome tints; Vanilla the colours of paper maps."),
             opt(Terrain, "Biome Colors In Vanilla Mode", "Biome tints for grass, leaves and water with Vanilla colours."),
             opt(Terrain, "Terrain Slopes", "Shading of slopes."),
             opt(Terrain, "Terrain Depth", "Lower ground is drawn darker."),
-            opt(Terrain, "Lighting", "Night and block light on the maps."),
+            opt(Terrain, "Lighting", "Night and block light on the minimap and the world map."),
             opt(Terrain, "Biome Blending", "Smooth biome tints at biome borders."),
             opt(Terrain, "Block Transparency", "Water and glass show what is below them."),
             opt(Terrain, "Display Flowers", "Flowers and small plants on the maps."),
@@ -217,12 +292,15 @@ fn rows(c: Category) -> Vec<Row> {
             opt(Overlays, "Chunk Grid", "Chunk borders on the minimap."),
             opt(Overlays, "Slime Chunks", "Chunks where slimes spawn, in green (needs the seed)."),
             opt(Overlays, "Light Overlay", "Marks blocks dark enough for monsters to spawn."),
+            opt(Overlays, "Light Overlay Min", "The lowest light level the overlay marks."),
             opt(Overlays, "Light Overlay Max", "The highest light level the overlay marks."),
             opt(Overlays, "Cave Mode", "Allows cave maps when you are underground."),
             opt(Overlays, "Auto Cave Mode", "How large the roof above you must be before the cave map shows."),
             opt(Overlays, "Cave Mode Toggle Delay", "How long you must be under a roof (or out) before the map switches."),
             opt(Overlays, "Legible Cave Maps", "Brighter cave maps that are easier to read."),
             opt(Overlays, "Cave Mode Extra Zoom", "Zooms the minimap in further in caves."),
+            opt(Overlays, "Cave Mode Depth", "How far below where you are the cave map shows the ground."),
+            row(Overlays, "Cave Mode Dimensions", "Dimensions where cave maps may show, comma separated (overworld, the_nether); empty for all.", Text(|s| dimension_list(&s.minimap.cave.allowed_dimensions), |s, t| parse_dimensions(t).map(|d| s.minimap.cave.allowed_dimensions = d).is_some())),
         ],
         WorldMap => vec![
             opt(WorldMap, "World Map", "The world map (M)."),
@@ -236,8 +314,10 @@ fn rows(c: Category) -> Vec<Row> {
             opt(WorldMap, "Opening Animation", "Zooms out from your position when the map opens."),
             opt(WorldMap, "Unlimited Zoom In", "Zoom in further than 1 block a pixel steps."),
             opt(WorldMap, "Unlimited Zoom Out", "Zoom out to 1/64."),
-            opt(WorldMap, "Map Lighting", "Night and block light on the world map."),
             opt(WorldMap, "Multiplayer Maps", "How the maps of a server with several worlds are kept apart."),
+            row(WorldMap, "Map Teleport Command", "The command Teleport Here sends: {x} {y} {z} are the coordinates.", Text(|s| s.world_map.map_teleport_format.clone(), |s, t| command(t).map(|c| s.world_map.map_teleport_format = c).is_some())),
+            row(WorldMap, "Map Teleport Command (Dimension)", "Teleport Here on another dimension's map; {d} is the dimension.", Text(|s| s.world_map.map_teleport_dimension_format.clone(), |s, t| command(t).map(|c| s.world_map.map_teleport_dimension_format = c).is_some())),
+            row(WorldMap, "Player Teleport Command", "The command Teleport To sends for another player; {name} is their name.", Text(|s| s.world_map.player_teleport_format.clone(), |s, t| command(t).map(|c| s.world_map.player_teleport_format = c).is_some())),
         ],
         SeedAtlas => vec![
             row(SeedAtlas, "Seed", "The seed the Seed Atlas uses for this world or server.", Info(|e| e.seed_atlas.seed_status.clone())),
@@ -275,6 +355,10 @@ fn rows(c: Category) -> Vec<Row> {
             opt(Performance, "Worker threads", "Threads computing the Seed Atlas map. Auto leaves cores for the game."),
             opt(Performance, "Background prefetch", "Computes the map around the view in advance while the world map is open."),
             opt(Performance, "Max Loaded Regions", "Explored regions the world map keeps in memory."),
+            opt(Performance, "Map Frame Budget", "Time per frame for drawing explored terrain; more fills the map faster."),
+            opt(Performance, "Chunk Reads Per Tick", "Chunks read from the game per tick at most."),
+            opt(Performance, "Region Save Interval", "How often changed regions are written to disk."),
+            opt(Performance, "Map Worker Threads", "Threads building map tiles (after a restart). Auto takes half the cores, up to 4."),
         ],
     }
 }
@@ -306,6 +390,17 @@ fn profile_title(name: &str) -> String {
         .map_or_else(String::new, |f| f.to_uppercase().chain(c).collect())
 }
 
+/// The end of `text` that fits `width` GUI pixels (a field being typed in
+/// shows where the cursor is).
+fn tail(text: &str, width: f32) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut start = 0;
+    while start < chars.len() && ui::text_width(&chars[start..].iter().collect::<String>()) > width {
+        start += 1;
+    }
+    chars[start..].iter().collect()
+}
+
 /// `text`, shortened with "..." to fit `width` GUI pixels.
 fn fit(text: &str, width: f32) -> String {
     if ui::text_width(text) <= width {
@@ -334,6 +429,8 @@ pub struct SettingsScreen {
     pub profile_name: Option<String>,
     /// The slider row being dragged.
     pub dragging: Option<usize>,
+    /// The text field being typed in: its row's label and the text so far.
+    pub editing: Option<(String, String)>,
     /// Opened from the world map: Done goes back to it.
     pub direct: bool,
 }
@@ -363,6 +460,7 @@ impl SettingsScreen {
             scroll: 0.0,
             profile_name: None,
             dragging: None,
+            editing: None,
             direct: false,
         }
     }
@@ -488,7 +586,12 @@ impl SettingsScreen {
 
     fn row_widgets(&self, env: &Env<'_>, l: &Layout, i: usize, r: &Row, rect: [f32; 4], searching: bool) -> Vec<Widget> {
         let [x, y, cw, _] = rect;
-        let ctl = [x + cw - l.control_w - 2.0, y + 2.0, l.control_w, 20.0];
+        // Text fields take more room: commands are long.
+        let control_w = match r.control {
+            Control::Text(..) => (cw * 0.5).clamp(l.control_w, (cw - 90.0).max(l.control_w)),
+            _ => l.control_w,
+        };
+        let ctl = [x + cw - control_w - 2.0, y + 2.0, control_w, 20.0];
         let mut ws = vec![Widget::fill([x, y, cw, ROW_H], if i.is_multiple_of(2) { 0x3000_0000 } else { 0x1800_0000 })];
         let mut text_x = x + 4.0;
         let text_w = ctl[0] - text_x - 6.0;
@@ -506,6 +609,15 @@ impl SettingsScreen {
             }
             Control::Slider(value, text, _) => {
                 ws.push(Widget::slider(&id, ctl, text(env.settings), value(env.settings)));
+            }
+            Control::Text(get, _) => {
+                let shown = match &self.editing {
+                    Some((label, text)) if *label == r.label => Some(tail(text, ctl[2] - 14.0)),
+                    _ => None,
+                };
+                let focused = shown.is_some();
+                let text = shown.unwrap_or_else(|| fit(&get(env.settings), ctl[2] - 8.0));
+                ws.push(Widget::field(&id, ctl, &text, "", focused));
             }
             Control::Button(action, text) => {
                 let enabled = action != "delete_profile" || env.profiles.len() > 1;
@@ -569,6 +681,17 @@ impl SettingsScreen {
 
     pub(crate) fn click(&mut self, id: Option<&str>, at: [f32; 2], right: bool, env: &mut Env<'_>) -> Action {
         self.search_focused = false;
+        // A click anywhere but the field being typed in sets its value.
+        let row = id
+            .and_then(|id| id.strip_prefix("row:")?.parse::<usize>().ok())
+            .and_then(|i| self.shown().into_iter().nth(i));
+        if self
+            .editing
+            .as_ref()
+            .is_some_and(|(label, _)| row.as_ref().is_none_or(|r| r.label != *label))
+        {
+            self.commit(env);
+        }
         if id != Some("profile_name")
             && self.profile_name.is_some()
             && let Some(op) = self.confirm_name(env)
@@ -623,6 +746,11 @@ impl SettingsScreen {
                 env.settings_changed = true;
             }
             Control::Info(_) => {}
+            Control::Text(get, _) => {
+                if self.editing.is_none() {
+                    self.editing = Some((r.label.clone(), get(env.settings)));
+                }
+            }
             Control::Button(action, _) => return self.button(action, right, env),
         }
         Action::None
@@ -678,7 +806,23 @@ impl SettingsScreen {
         self.dragging = None;
     }
 
+    /// Sets the typed text, if it is valid and differs.
+    fn commit(&mut self, env: &mut Env<'_>) {
+        let Some((label, text)) = self.editing.take() else { return };
+        let row = Category::ALL.iter().flat_map(|c| rows(*c)).find(|r| r.label == label);
+        if let Some(Row { control: Control::Text(get, set), .. }) = row
+            && get(env.settings) != text
+            && set(env.settings, &text)
+        {
+            env.settings_changed = true;
+        }
+    }
+
     pub(crate) fn typed(&mut self, c: char) {
+        if let Some((_, text)) = &mut self.editing {
+            ui::type_char(text, c, 120, |_| true);
+            return;
+        }
         if let Some(name) = &mut self.profile_name {
             ui::type_char(name, c, 24, |c| c.is_alphanumeric() || "_- ".contains(c));
             return;
@@ -696,6 +840,17 @@ impl SettingsScreen {
     }
 
     pub(crate) fn key(&mut self, key: &str, env: &mut Env<'_>) -> Action {
+        if let Some((_, text)) = &mut self.editing {
+            match key {
+                "key.keyboard.backspace" => {
+                    ui::backspace(text);
+                }
+                "key.keyboard.enter" | "key.keyboard.keypad.enter" => self.commit(env),
+                "key.keyboard.escape" => self.editing = None,
+                _ => {}
+            }
+            return Action::None;
+        }
         if let Some(name) = &mut self.profile_name {
             match key {
                 "key.keyboard.backspace" => {
@@ -757,8 +912,7 @@ mod tests {
         let missing: Vec<_> = options()
             .iter()
             .map(|o| o.label)
-            // Folded into the "Icons" row; the World Map's lighting is
-            // "Map Lighting"; the terrain switches are shared.
+            // Folded into the "Icons" row.
             .filter(|l| !["Mob Faces", "Faces While Tab Held", "Completed", "Layer opacity"].contains(l))
             // Structure kinds have their own rows.
             .filter(|l| !MARKERS.iter().any(|m| m.name == *l))
@@ -820,7 +974,9 @@ mod tests {
         assert_eq!(e.settings.seed_atlas.completed_opacity_pct(), 0);
         sc.drag([rect[0] + rect[2] - 4.0, rect[1]], &mut e);
         assert_eq!(e.settings.seed_atlas.completed_opacity_pct(), 100);
+        assert!(sc.dragging.is_some(), "the host writes the file only on release");
         sc.release();
+        assert!(sc.dragging.is_none());
         // A search looks through every category.
         sc.search_focused = true;
         for ch in "slime".chars() {
@@ -834,6 +990,54 @@ mod tests {
         let on = crate::seedatlas::marker_enabled(&e.settings.seed_atlas, "camp");
         sc.click(Some(&format!("row:{camp}")), [0.0, 0.0], false, &mut e);
         assert_ne!(crate::seedatlas::marker_enabled(&e.settings.seed_atlas, "camp"), on);
+    }
+
+    #[test]
+    fn text_fields_set_valid_values() {
+        let (mut w, mut s) = (DimensionWaypoints::default(), Settings::default());
+        let mut e = env(&mut w, &mut s, [854.0, 480.0]);
+        let mut sc = SettingsScreen::at(Category::Radar);
+        let i = rows(Category::Radar).iter().position(|r| r.label == "Max Entities").unwrap();
+        let field = format!("row:{i}");
+        let type_in = |sc: &mut SettingsScreen, e: &mut Env<'_>, text: &str| {
+            sc.click(Some(&field), [0.0, 0.0], false, e);
+            for _ in 0..10 {
+                sc.key("key.keyboard.backspace", e);
+            }
+            text.chars().for_each(|c| sc.typed(c));
+        };
+        type_in(&mut sc, &mut e, "250");
+        assert_eq!(e.settings.radar.max_entities, 1000, "not before Enter");
+        sc.key("key.keyboard.enter", &mut e);
+        assert_eq!(e.settings.radar.max_entities, 250);
+        assert!(e.settings_changed && sc.editing.is_none());
+        // Invalid text keeps the old value; Escape drops the text.
+        type_in(&mut sc, &mut e, "lots");
+        sc.key("key.keyboard.enter", &mut e);
+        assert_eq!(e.settings.radar.max_entities, 250);
+        type_in(&mut sc, &mut e, "7");
+        sc.key("key.keyboard.escape", &mut e);
+        assert_eq!(e.settings.radar.max_entities, 250);
+        // A click elsewhere sets it too.
+        type_in(&mut sc, &mut e, "40");
+        sc.click(Some("cat:0"), [0.0, 0.0], false, &mut e);
+        assert_eq!(e.settings.radar.max_entities, 40);
+        // Commands stay commands; dimension lists take short names.
+        assert!(command("tp @s {x} {y} {z}").is_none());
+        assert_eq!(command(" /tp {x} {y} {z} ").as_deref(), Some("/tp {x} {y} {z}"));
+        let dims = parse_dimensions("overworld, the_nether mymod:deep").unwrap();
+        assert_eq!(dims, ["minecraft:overworld", "minecraft:the_nether", "mymod:deep"]);
+        assert_eq!(dimension_list(&dims), "overworld, the_nether, mymod:deep");
+        assert_eq!(parse_dimensions(" ").unwrap(), Vec::<String>::new(), "empty means all");
+        assert!(parse_dimensions("Over World!").is_none());
+    }
+
+    #[test]
+    fn rows_have_unique_labels() {
+        let labels: Vec<String> = Category::ALL.iter().flat_map(|c| rows(*c)).map(|r| r.label).collect();
+        for (i, l) in labels.iter().enumerate() {
+            assert!(!labels[i + 1..].contains(l), "{l} twice");
+        }
     }
 
     #[test]
