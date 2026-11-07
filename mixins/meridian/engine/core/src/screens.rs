@@ -1672,7 +1672,7 @@ fn performance_options() -> Vec<Opt> {
             value: |s| format!("{}", s.performance.chunk_reads_per_tick),
             step: |s, b| {
                 s.performance.chunk_reads_per_tick = cycle(
-                    &[4usize, 8, 16, 32, 64],
+                    &[16usize, 32, 64, 128, 256],
                     s.performance.chunk_reads_per_tick,
                     b,
                 )

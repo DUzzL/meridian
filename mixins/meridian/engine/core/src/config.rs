@@ -564,7 +564,9 @@ pub struct PerformanceSettings {
     pub worker_threads: usize,
     /// Main-thread time per frame for map work, microseconds.
     pub frame_budget_us: u32,
-    /// Chunks read from the game per tick at most.
+    /// Chunks asked from the game per game tick (50 ms of wall time) at
+    /// most; 64 is about 1280 a second, the bridge's per-frame time budget
+    /// still bounds each frame.
     pub chunk_reads_per_tick: usize,
     /// Seconds between saves of changed regions.
     pub save_interval_s: u32,
@@ -575,7 +577,7 @@ impl Default for PerformanceSettings {
         Self {
             worker_threads: 0,
             frame_budget_us: 2_000,
-            chunk_reads_per_tick: 16,
+            chunk_reads_per_tick: 64,
             save_interval_s: 30,
         }
     }
