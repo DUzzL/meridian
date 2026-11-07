@@ -254,6 +254,65 @@ pub struct WaypointBook {
     pub dirty: bool,
 }
 
+/// A world or server map that has waypoints: its folder and a label
+/// (`MyWorld`, `play.example.net`, `play.example.net / map-2`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BookPlace {
+    pub dir: PathBuf,
+    pub label: String,
+}
+
+/// Undoes `persist::escape_component` for display.
+fn unescape(name: &str) -> String {
+    let bytes = name.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let Ok(b) = u8::from_str_radix(&name[i + 1..(i + 3).min(name.len())], 16)
+        {
+            out.push(b);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Every map with a waypoint file under `data_dir/worlds`, sorted by label.
+pub fn book_places(data_dir: &Path) -> Vec<BookPlace> {
+    let mut out = Vec::new();
+    let Ok(sources) = std::fs::read_dir(data_dir.join("worlds")) else {
+        return out;
+    };
+    for source in sources.flatten() {
+        let folder = source.file_name().to_string_lossy().into_owned();
+        let name = folder
+            .strip_prefix("sp-")
+            .or_else(|| folder.strip_prefix("mp-"))
+            .unwrap_or(&folder);
+        let name = unescape(name.trim_start_matches('_'));
+        let Ok(maps) = std::fs::read_dir(source.path()) else { continue };
+        for map in maps.flatten() {
+            if !map.path().join(FILE).is_file() {
+                continue;
+            }
+            let map_name = unescape(&map.file_name().to_string_lossy());
+            let label = if map_name == crate::engine::DEFAULT_MAP {
+                name.clone()
+            } else {
+                format!("{name} / {map_name}")
+            };
+            out.push(BookPlace { dir: map.path(), label });
+        }
+    }
+    out.sort_by_key(|p| p.label.to_lowercase());
+    out
+}
+
 impl Default for WaypointBook {
     fn default() -> Self {
         Self {
@@ -437,6 +496,20 @@ pub fn now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn waypoint_places_on_disk() {
+        let dir = std::env::temp_dir().join(format!("meridian-places-{}", std::process::id()));
+        for (source, map) in [("sp-my%20world", "default"), ("mp-play.example.net", "map-2"), ("sp-empty", "default")] {
+            std::fs::create_dir_all(dir.join("worlds").join(source).join(map)).unwrap();
+        }
+        for (source, map) in [("sp-my%20world", "default"), ("mp-play.example.net", "map-2")] {
+            std::fs::write(dir.join("worlds").join(source).join(map).join(FILE), "{}").unwrap();
+        }
+        let labels: Vec<String> = book_places(&dir).into_iter().map(|p| p.label).collect();
+        assert_eq!(labels, ["my world", "play.example.net / map-2"], "maps without waypoints are left out");
+        std::fs::remove_dir_all(&dir).ok();
+    }
     use crate::persist::test_dir;
 
     const OW: &str = "minecraft:overworld";

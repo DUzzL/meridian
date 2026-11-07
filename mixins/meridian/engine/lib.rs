@@ -197,6 +197,11 @@ struct State {
     menu_marker: Option<HoveredMarker>,
     /// The other player the map menu was opened on.
     menu_player: Option<String>,
+    /// The world (its map folder) and dimension the waypoint screens show
+    /// instead of where the player is; `None` each for the automatic one.
+    waypoint_place: (Option<std::path::PathBuf>, Option<String>),
+    /// The waypoints of another world, while the waypoint screens show it.
+    other_book: Option<(std::path::PathBuf, WaypointBook)>,
     /// Where the minimap was drawn last (the position editor drags it).
     minimap_place: Option<meridian_core::screens::MinimapPlace>,
     /// The nearest search's options, kept for the session.
@@ -574,6 +579,23 @@ impl State {
     fn close_book(&mut self) {
         self.save_book();
         self.book = None;
+        self.close_other_book();
+    }
+
+    /// Saves and drops another world's waypoints the screens showed.
+    fn close_other_book(&mut self) {
+        if let Some((_, mut book)) = self.other_book.take()
+            && book.dirty
+            && let Err(e) = book.save()
+        {
+            log::warn!("meridian: cannot save waypoints: {e}");
+        }
+    }
+
+    /// The waypoint screens show where the player is again.
+    fn reset_waypoint_place(&mut self) {
+        self.waypoint_place = (None, None);
+        self.close_other_book();
     }
 
     /// The open book and the current dimension's id.
@@ -662,6 +684,8 @@ impl Meridian {
                 faces_held: false,
                 menu_marker: None,
                 menu_player: None,
+                waypoint_place: (None, None),
+                other_book: None,
                 minimap_place: None,
                 nearest_opts: Default::default(),
             }
@@ -1269,6 +1293,7 @@ impl Hooks for Meridian {
                 s.map_open = false;
                 s.return_to_map = false;
                 s.map.press = None;
+                s.reset_waypoint_place();
                 if !s.map_open {
                     s.viewer = None;
                 }
@@ -1473,7 +1498,10 @@ impl Hooks for Meridian {
         for p in pending {
             match p {
                 Pending::CloseScreen => {
-                    let back = self.with_state(&*host, |s| std::mem::take(&mut s.return_to_map));
+                    let back = self.with_state(&*host, |s| {
+                        s.reset_waypoint_place();
+                        std::mem::take(&mut s.return_to_map)
+                    });
                     if back {
                         self.with_state(&*host, |s| {
                             s.screen = None;
@@ -1882,12 +1910,50 @@ impl Meridian {
                 s.screen = Some(screen);
                 return R::default();
             };
-            let Some((_, book)) = &mut s.book else {
+            if s.book.is_none() {
                 s.screen = Some(screen);
                 return R::default();
+            }
+            // Which world and dimension the waypoint screens show.
+            let data = data_dir(host);
+            let here_dir = s.book.as_ref().map(|((source, map), _)| {
+                meridian_core::persist::server_dir(&data, source).join(meridian_core::persist::escape_component(map))
+            });
+            let others: Vec<waypoint::BookPlace> = waypoint::book_places(&data).into_iter().filter(|p| Some(&p.dir) != here_dir.as_ref()).collect();
+            let other_dir = s.waypoint_place.0.clone().filter(|d| Some(d) != here_dir.as_ref() && others.iter().any(|p| &p.dir == d));
+            if let Some(dir) = &other_dir
+                && s.other_book.as_ref().is_none_or(|(d, _)| d != dir)
+            {
+                s.close_other_book();
+                s.other_book = Some((dir.clone(), WaypointBook::load(dir)));
+            }
+            let here = other_dir.is_none();
+            let dim = s.waypoint_place.1.clone().unwrap_or_else(|| dim.clone());
+            let book = match (here, &mut s.book, &mut s.other_book) {
+                (true, Some((_, book)), _) | (false, _, Some((_, book))) => book,
+                _ => {
+                    s.screen = Some(screen);
+                    return R::default();
+                }
             };
+            let mut dims: Vec<String> = book.dimensions.keys().cloned().collect();
+            for d in ["minecraft:overworld", "minecraft:the_nether", "minecraft:the_end"] {
+                if !dims.iter().any(|x| x == d) {
+                    dims.push(d.to_owned());
+                }
+            }
+            dims.sort();
+            let short = |d: &str| d.strip_prefix("minecraft:").unwrap_or(d).to_owned();
+            let places = meridian_core::screens::Places {
+                worlds: std::iter::once(world_label.clone()).chain(others.iter().map(|p| p.label.clone())).collect(),
+                world: other_dir.as_ref().and_then(|d| others.iter().position(|p| &p.dir == d)).map_or(0, |i| i + 1),
+                dimensions: std::iter::once(dim_label.clone()).chain(dims.iter().map(|d| short(d))).collect(),
+                dimension: s.waypoint_place.1.as_ref().and_then(|d| dims.iter().position(|x| x == d)).map_or(0, |i| i + 1),
+            };
+            let shown_world = places.worlds[places.world].clone();
+            let shown_dim = places.dimensions[places.dimension].clone();
             let mut settings = s.config.current().clone();
-            let sa_dim = sa::dimension_of(&dim).unwrap_or(meridian_seedatlas::Dimension::Overworld);
+            let sa_dim = sa::dimension_of(s.dimension.as_deref().unwrap_or("")).unwrap_or(meridian_seedatlas::Dimension::Overworld);
             let sa_env = meridian_core::screens_seedatlas::SeedAtlasEnv {
                 dimension: sa_dim,
                 has_seed: s.seed_svc.atlas_for(sa_dim).is_some(),
@@ -1907,8 +1973,8 @@ impl Meridian {
                 let mut env = Env {
                     gui,
                     mouse: host.cursor(),
-                    world_label: &world_label,
-                    dimension_label: &dim_label,
+                    world_label: &shown_world,
+                    dimension_label: &shown_dim,
                     player_block,
                     waypoints,
                     settings: &mut settings,
@@ -1918,12 +1984,18 @@ impl Meridian {
                     profiles: profiles.clone(),
                     profile: profile.clone(),
                     minimap: s.minimap_place,
+                    places: places.clone(),
                 };
                 let (result, action) = f(&mut screen, &mut env);
                 (result, action, env.waypoints_changed, env.settings_changed)
             };
             if waypoints_changed {
                 book.dirty = true;
+                if !here
+                    && let Err(e) = book.save()
+                {
+                    log::warn!("meridian: cannot save waypoints: {e}");
+                }
             }
             if settings_changed {
                 *s.config.current_mut() = settings;
@@ -1939,8 +2011,14 @@ impl Meridian {
                 Action::Close => s.pending.push(Pending::CloseScreen),
                 Action::Open(next) => s.screen = Some(next),
                 Action::Save { edit, set, waypoint } => {
-                    if let Some((book, _)) = s.book.as_mut().map(|(_, b)| (b, ())) {
+                    let target = if here { s.book.as_mut().map(|(_, b)| b) } else { s.other_book.as_mut().map(|(_, b)| b) };
+                    if let Some(book) = target {
                         book.save_edit(&dim, edit, &set, waypoint, waypoint::now());
+                        if !here
+                            && let Err(e) = book.save()
+                        {
+                            log::warn!("meridian: cannot save waypoints: {e}");
+                        }
                     }
                     if let Some(Screen::Editor(editor)) = &s.screen {
                         match editor.after_save() {
@@ -1949,6 +2027,8 @@ impl Meridian {
                         }
                     }
                 }
+                // Only in the world the player is in.
+                Action::Teleport(_) | Action::Share(_) if !here => {}
                 Action::Teleport(id) => {
                     let tp = s.config.current().waypoints.teleport_format.clone();
                     if let Some(w) = s.book.as_ref().and_then(|(_, b)| b.dimension(&dim)?.find(id).cloned()) {
@@ -1959,6 +2039,14 @@ impl Meridian {
                 Action::Share(id) => {
                     if let Some(w) = s.book.as_ref().and_then(|(_, b)| b.dimension(&dim)?.find(id).cloned()) {
                         s.pending.push(Pending::Chat(waypoint::share_text(&w, &dim)));
+                    }
+                }
+                Action::ShowPlace { world, dimension } => {
+                    if let Some(i) = world {
+                        s.waypoint_place.0 = i.checked_sub(1).and_then(|i| others.get(i)).map(|p| p.dir.clone());
+                    }
+                    if let Some(i) = dimension {
+                        s.waypoint_place.1 = i.checked_sub(1).and_then(|i| dims.get(i)).cloned();
                     }
                 }
                 Action::FindNearest { kind, waypoint, skip_completed } => {
@@ -2390,7 +2478,8 @@ impl Meridian {
                     background.extend(fine);
                 }
                 s.hovered_marker = None;
-                if sa_settings.structures {
+                // Structures belong to the seed map layer: off, they go too.
+                if sa_settings.structures && sa_settings.biome_layer {
                     load_icons();
                     // `MarkerSize.iconScale`: two blocks wide with the map,
                     // never below the sprite size and at most twice it, so

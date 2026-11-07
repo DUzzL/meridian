@@ -740,6 +740,7 @@ mod tests {
             profiles: vec!["default".into(), "pvp".into()],
             profile: "default".into(),
             minimap: None,
+            places: Default::default(),
         }
     }
 

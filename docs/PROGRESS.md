@@ -550,3 +550,16 @@ Neue Tests:
 - **Neue Tests:** `every_catalogue_option_has_a_row`, `categories_rows_and_clicks`, `search_scroll_and_slider`, `profiles`, `faces_lie_inside_their_textures`, `tamed_animals_over_wild_ones`, Werkzeugleiste in `zoom_buttons`.
 
 **Build und Tests**: 195 Kern-Tests grün; Clippy sauber, Adapter-Check grün; Launcher-Build `native-66f3981-2984424c33ef`.
+
+### Phase 6: Strukturen mit der Seed-Ebene, Wegpunkt-Auswahl (D-038)
+
+- Seed-Ebene aus blendet die Strukturmarker mit aus.
+- „World/Server“ und „Sub-World/Dimension“ in Wegpunktliste und Editor sind Auswahllisten; andere Welten und Dimensionen lassen sich ansehen und bearbeiten.
+- **Im Spiel geprüft:**
+  - Seed-Ebene per Leiste aus: Strukturen weg, Icon grau, Tooltip links.
+  - Welt-Liste mit der aktuellen und einer zweiten Testwelt; Wechsel zeigt deren Wegpunkte.
+  - Dimensions-Liste und Wechsel in den Nether.
+- **Nicht im Spiel geprüft:** Speichern eines Wegpunkts in einer anderen Welt (Unit-Logik und Adapter-Pfad vorhanden, kein Klicktest).
+- **Neue Tests:** `waypoint_world_and_dimension_dropdowns`, `waypoint_places_on_disk`.
+
+**Build und Tests**: 197 Kern-Tests grün; Clippy sauber, Adapter-Check grün; Launcher-Build `native-66f3981-2096c8af0689`.

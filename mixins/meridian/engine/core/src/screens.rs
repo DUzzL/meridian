@@ -66,6 +66,80 @@ pub struct Env<'a> {
     pub profile: String,
     /// Where the minimap is drawn now (for the position editor).
     pub minimap: Option<MinimapPlace>,
+    /// The worlds and dimensions the waypoint screens can show.
+    pub places: Places,
+}
+
+/// The choices of the waypoint screens' "World/Server" and
+/// "Sub-World/Dimension" dropdowns: labels, the first being the automatic
+/// one (where the player is), and which is shown.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Places {
+    pub worlds: Vec<String>,
+    pub world: usize,
+    pub dimensions: Vec<String>,
+    pub dimension: usize,
+}
+
+/// An open dropdown of the waypoint screens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Dropdown {
+    World,
+    Dimension,
+}
+
+/// The entries of the open dropdown, under its selector (`world` or
+/// `dimension` rect), over everything else.
+fn dropdown_widgets(open: Option<Dropdown>, world: [f32; 4], dimension: [f32; 4], env: &Env<'_>) -> Vec<Widget> {
+    let Some(open) = open else { return Vec::new() };
+    let (rect, entries, chosen, tag) = match open {
+        Dropdown::World => (world, &env.places.worlds, env.places.world, "w"),
+        Dropdown::Dimension => (dimension, &env.places.dimensions, env.places.dimension, "d"),
+    };
+    let row = 12.0;
+    let room = ((env.gui[1] - rect[1] - rect[3] - 4.0) / row).floor().max(1.0) as usize;
+    let shown = entries.len().min(room);
+    let top = rect[1] + rect[3];
+    let mut ws = vec![Widget {
+        id: "dd:panel".into(),
+        rect: [rect[0], top, rect[2], shown as f32 * row + 2.0],
+        text: String::new(),
+        kind: ui::Kind::Panel { fill: 0xF010_1010 },
+    }];
+    for (i, label) in entries.iter().take(shown).enumerate() {
+        let y = top + 1.0 + i as f32 * row;
+        ws.push(Widget::row(&format!("dd:{tag}:{i}"), [rect[0] + 1.0, y, rect[2] - 2.0, row], i == chosen));
+        ws.push(Widget::label(rect[0] + rect[2] / 2.0, y + 2.0, label.clone(), Align::Center));
+    }
+    ws
+}
+
+/// A click while a dropdown may be open: opens or closes one, or picks an
+/// entry. `Some` when the click was the dropdown's.
+fn dropdown_click(open: &mut Option<Dropdown>, id: Option<&str>) -> Option<Action> {
+    let was = open.take();
+    match id {
+        Some("world") => {
+            *open = (was != Some(Dropdown::World)).then_some(Dropdown::World);
+            Some(Action::None)
+        }
+        Some("dimension") => {
+            *open = (was != Some(Dropdown::Dimension)).then_some(Dropdown::Dimension);
+            Some(Action::None)
+        }
+        Some(entry) if entry.starts_with("dd:") => {
+            let mut parts = entry.split(':').skip(1);
+            let (tag, i) = (parts.next()?, parts.next()?.parse::<usize>().ok());
+            match (tag, i) {
+                ("w", Some(i)) => Some(Action::ShowPlace { world: Some(i), dimension: None }),
+                ("d", Some(i)) => Some(Action::ShowPlace { world: None, dimension: Some(i) }),
+                _ => Some(Action::None),
+            }
+        }
+        // A click elsewhere only closes an open dropdown.
+        _ if was.is_some() => Some(Action::None),
+        _ => None,
+    }
 }
 
 /// The minimap's rectangle on screen and its margin from the corner (GUI
@@ -121,6 +195,12 @@ pub enum Action {
     /// `confirm_reset`), then show the marker settings again.
     ResetCompleted(Option<String>),
     Profile(ProfileOp),
+    /// Show the waypoints of another world (index into `Places::worlds`)
+    /// or dimension (into `Places::dimensions`); 0 is the automatic one.
+    ShowPlace {
+        world: Option<usize>,
+        dimension: Option<usize>,
+    },
 }
 
 #[derive(Debug, PartialEq)]
@@ -270,6 +350,7 @@ pub struct Editor {
     pub focus: Option<Field>,
     /// Back to the list after confirming or cancelling.
     pub from_list: bool,
+    pub dropdown: Option<Dropdown>,
 }
 
 impl Editor {
@@ -291,6 +372,7 @@ impl Editor {
             set: waypoints.current_set.clone(),
             focus: Some(Field::Name),
             from_list,
+            dropdown: None,
         }
     }
 
@@ -309,6 +391,7 @@ impl Editor {
             set: set.to_owned(),
             focus: Some(Field::Name),
             from_list,
+            dropdown: None,
         }
     }
 
@@ -457,6 +540,12 @@ impl Editor {
             "Cancel",
             true,
         ));
+        ws.extend(dropdown_widgets(
+            self.dropdown,
+            [cx - 203.0, c - 85.0, 201.0, ui::SELECTOR_H],
+            [cx + 2.0, c - 85.0, 201.0, ui::SELECTOR_H],
+            env,
+        ));
         ws
     }
 
@@ -488,6 +577,13 @@ impl Editor {
 
     fn click(&mut self, id: Option<&str>, right: bool, env: &mut Env<'_>) -> Action {
         self.focus = None;
+        if let Some(action) = dropdown_click(&mut self.dropdown, id) {
+            if matches!(action, Action::ShowPlace { .. }) {
+                // The set list belongs to the place shown.
+                self.set = env.waypoints.current_set.clone();
+            }
+            return action;
+        }
         match id {
             Some("name") => self.focus = Some(Field::Name),
             Some("x") => self.focus = Some(Field::X),
@@ -574,6 +670,7 @@ pub struct List {
     pub scroll: usize,
     /// "Clear Set" was clicked once; a second click clears.
     pub confirm_clear: bool,
+    pub dropdown: Option<Dropdown>,
 }
 
 const ROW_H: f32 = 12.0;
@@ -712,11 +809,23 @@ impl List {
             "Done",
             true,
         ));
+        ws.extend(dropdown_widgets(
+            self.dropdown,
+            [cx - 203.0, 17.0, 201.0, ui::SELECTOR_H],
+            [cx + 2.0, 17.0, 201.0, ui::SELECTOR_H],
+            env,
+        ));
         ws
     }
 
     fn click(&mut self, id: Option<&str>, right: bool, env: &mut Env<'_>) -> Action {
         self.filter_focused = false;
+        if let Some(action) = dropdown_click(&mut self.dropdown, id) {
+            if matches!(action, Action::ShowPlace { .. }) {
+                self.selected = None;
+            }
+            return action;
+        }
         if id != Some("clear") {
             self.confirm_clear = false;
         }
@@ -1579,6 +1688,7 @@ mod tests {
             profiles: vec!["default".into()],
             profile: "default".into(),
             minimap: None,
+            places: Default::default(),
         }
     }
 
@@ -1593,6 +1703,48 @@ mod tests {
     fn click(screen: &mut Screen, id: &str, e: &mut Env<'_>) -> Action {
         let at = center_of(&screen.widgets(e), id);
         screen.click(at, false, e)
+    }
+
+    #[test]
+    fn waypoint_world_and_dimension_dropdowns() {
+        let (mut w, mut s) = (DimensionWaypoints::default(), Settings::default());
+        let mut e = env(&mut w, &mut s);
+        e.places = Places {
+            worlds: vec!["Test (auto)".into(), "Other".into()],
+            world: 0,
+            dimensions: vec!["overworld (auto)".into(), "overworld".into(), "the_end".into(), "the_nether".into()],
+            dimension: 0,
+        };
+        let mut list = Screen::List(List::default());
+        let ids = |sc: &Screen, e: &Env<'_>| sc.widgets(e).into_iter().map(|w| w.id).collect::<Vec<_>>();
+        assert!(!ids(&list, &e).iter().any(|i| i.starts_with("dd:")));
+        // The selector opens its list over the screen.
+        let rect = |sc: &Screen, e: &Env<'_>, id: &str| sc.widgets(e).into_iter().find(|w| w.id == id).unwrap().rect;
+        let r = rect(&list, &e, "dimension");
+        assert_eq!(list.click([r[0] + 5.0, r[1] + 5.0], false, &mut e), Action::None);
+        assert!(ids(&list, &e).contains(&"dd:d:3".to_owned()));
+        // Picking an entry asks the host to show that dimension.
+        let r = rect(&list, &e, "dd:d:3");
+        assert_eq!(
+            list.click([r[0] + 5.0, r[1] + 5.0], false, &mut e),
+            Action::ShowPlace { world: None, dimension: Some(3) }
+        );
+        assert!(!ids(&list, &e).iter().any(|i| i.starts_with("dd:")), "closed after picking");
+        // The world selector likewise; a click elsewhere only closes it.
+        let r = rect(&list, &e, "world");
+        list.click([r[0] + 5.0, r[1] + 5.0], false, &mut e);
+        assert!(ids(&list, &e).contains(&"dd:w:1".to_owned()));
+        assert_eq!(list.click([1.0, e.gui[1] - 1.0], false, &mut e), Action::None);
+        assert!(!ids(&list, &e).iter().any(|i| i.starts_with("dd:")));
+        // The editor has the same dropdowns.
+        let mut editor = Screen::Editor(Editor::new(e.waypoints, 1, true));
+        let r = rect(&editor, &e, "world");
+        editor.click([r[0] + 5.0, r[1] + 5.0], false, &mut e);
+        let r = rect(&editor, &e, "dd:w:1");
+        assert_eq!(
+            editor.click([r[0] + 5.0, r[1] + 5.0], false, &mut e),
+            Action::ShowPlace { world: Some(1), dimension: None }
+        );
     }
 
     #[test]

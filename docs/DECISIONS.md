@@ -485,3 +485,13 @@ Auf Wunsch, mit Vorrang für die Leistung: Weit draußen genügt ein ungefähres
   - Neu: Gezähmte friedliche Tiere zeichnen über wilden (Reihenfolge 4), gezähmte feindliche mit 5.
   - Neu: Rüstungsständer zählen wie in der Referenz nicht zu den Lebewesen, sondern zu den sonstigen Entities (dunkellila) statt ganz zu fehlen. Bridge Version 10.
   - Offen: Die Datei nennt Zahlencodes für die Namensanzeige (`names` 0). Ihre Bedeutung lässt sich aus erlaubten Quellen nicht bestimmen, Meridian bleibt bei „Spielernamen“.
+
+## D-038: Strukturen mit der Seed-Ebene, Welt- und Dimensionsauswahl der Wegpunkte
+
+- **Strukturen mit der Seed-Ebene:** Ist die Seed-Kartenebene aus, zeigt die Weltkarte auch keine Strukturmarker; „Structures“ allein schaltet sie weiterhin ab.
+- **Welt- und Dimensionsauswahl:** Die Felder „World/Server“ und „Sub-World/Dimension“ in der Wegpunktliste und im Editor waren bisher nur Anzeigen. Jetzt öffnen sie eine Liste unter dem Feld.
+  - **Welten:** Oben steht die aktuelle Welt („(auto)“), darunter jede Welt und jede Serverkarte, für die Wegpunkte gespeichert sind (`waypoint::book_places`).
+  - **Dimensionen:** Die automatische, dann die Dimensionen der gewählten Welt sowie Overworld, Nether und End.
+  - Die Liste zeigt die Wegpunkte der gewählten Stelle; neue und bearbeitete Wegpunkte werden dort gespeichert (bei einer anderen Welt sofort in deren Datei).
+  - Teleportieren und Teilen gehen nur in der Welt, in der man ist.
+  - Beim Schließen der Screens springt die Auswahl auf „auto“ zurück.
