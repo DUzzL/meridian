@@ -257,6 +257,7 @@ fn rows(c: Category) -> Vec<Row> {
             opt(Radar, "Height-Based Fade", "Marks get darker the further above or below you they are."),
             opt(Radar, "Dot Size", "Size of the dots."),
             opt(Radar, "Hide Invisible Entities", "Leaves out entities that are invisible."),
+            opt(Radar, "Smooth Entity Dots", "Moves marks smoothly between game ticks instead of tick by tick."),
             opt(Radar, "Reverse Filter", "Shows what the filters hide and hides what they show."),
             row(Radar, "Name Scale", "Size of the names under the marks.", Slider(|s| scale_value(s.radar.name_scale), |s| format!("{:.1}x", s.radar.name_scale), |s, v| s.radar.name_scale = to_scale(v))),
             row(Radar, "Max Entities", "Entities shown at most; the nearest ones stay.", Text(|s| s.radar.max_entities.to_string(), |s, t| number(t, 1..=100_000).map(|v| s.radar.max_entities = v).is_some())),

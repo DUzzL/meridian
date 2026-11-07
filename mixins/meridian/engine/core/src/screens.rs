@@ -1357,6 +1357,7 @@ pub fn options() -> Vec<Opt> {
         toggle!("Center When Enlarged", View, minimap.enlarged_centered),
         toggle!("Entity Radar", Radar, radar.enabled),
         toggle!("Hide Invisible Entities", Radar, radar.hide_invisible),
+        toggle!("Smooth Entity Dots", Radar, radar.smooth),
         toggle!("Mob Faces", Radar, radar.faces),
         toggle!("Faces While Tab Held", Radar, radar.faces_while_held),
         Opt {

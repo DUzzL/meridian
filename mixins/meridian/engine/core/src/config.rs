@@ -405,8 +405,8 @@ pub struct RadarSettings {
     /// Shows what the filters hide and hides what they show (the reverse key).
     pub reversed: bool,
     pub hide_invisible: bool,
-    /// Kept for files and a later bridge: entity positions always come
-    /// interpolated between ticks, so there is no unsmoothed choice yet.
+    /// Marks move smoothly between game ticks; off, they jump from tick to
+    /// tick.
     pub smooth: bool,
     pub name_scale: f32,
     pub players: bool,

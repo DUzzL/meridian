@@ -313,6 +313,12 @@ impl WorldMap {
         }
     }
 
+    /// Drops the footsteps, as when leaving the world.
+    pub fn forget_footsteps(&mut self) {
+        self.footsteps.clear();
+        self.footsteps_of = None;
+    }
+
     /// Notes where the player walked (every other block).
     pub fn step(&mut self, player: [f64; 3]) {
         self.player_at = Some([player[0], player[2]]);

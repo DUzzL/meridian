@@ -82,14 +82,17 @@ pub enum EntityClass {
     Other,
 }
 
-/// One entity near the player, interpolated to this frame.
+/// One entity near the player.
 #[derive(Clone, Debug, PartialEq)]
 pub struct EntitySnap {
     pub id: u32,
     /// `minecraft:zombie`, `minecraft:item`...
     pub kind: String,
     pub class: EntityClass,
+    /// Interpolated between the last two ticks, to this frame.
     pub pos: [f64; 3],
+    /// Where the last tick put it, not interpolated.
+    pub tick_pos: [f64; 3],
     pub invisible: bool,
     /// A player's name or a custom name.
     pub name: Option<String>,
@@ -133,7 +136,8 @@ struct Shared {
     resources: Option<std::path::PathBuf>,
     /// Entities are copied each frame only while someone wants them.
     want_entities: bool,
-    entities: Vec<EntitySnap>,
+    /// Shared with the readers, so a frame's copy is made once.
+    entities: std::sync::Arc<[EntitySnap]>,
     /// Columns either side of the player a roof must cover (cave mode), or
     /// none when nobody asks.
     roof_radius: Option<u8>,
@@ -252,13 +256,14 @@ pub fn want_entities(on: bool) {
     with(|s| {
         s.want_entities = on;
         if !on {
-            s.entities.clear();
+            s.entities = std::sync::Arc::new([]);
         }
     });
 }
 
-/// The entities of the last frame (empty unless asked for).
-pub fn entities() -> Vec<EntitySnap> {
+/// The entities of the last frame (empty unless asked for); cheap to call
+/// more than once a frame.
+pub fn entities() -> std::sync::Arc<[EntitySnap]> {
     with(|s| s.entities.clone())
 }
 
@@ -344,7 +349,7 @@ pub(super) fn frame(game: &mut super::Game<'_>) {
     }
     s.world_spawn = game.spawn.map(|p| [p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32]);
     if s.want_entities {
-        s.entities = snapshot_entities(game);
+        s.entities = snapshot_entities(game).into();
     }
     if let Some(r) = s.roof_radius {
         s.under_roof = under_roof_check(game, r);
@@ -580,6 +585,7 @@ fn snapshot_entities(game: &super::Game<'_>) -> Vec<EntitySnap> {
                 lerp(m.previous.y, m.position.y),
                 lerp(m.previous.z, m.position.z),
             ],
+            tick_pos: [m.position.x, m.position.y, m.position.z],
             invisible: m.invisible || m.has_effect("minecraft:invisibility"),
             name,
             skin,
@@ -596,6 +602,7 @@ fn snapshot_entities(game: &super::Game<'_>) -> Vec<EntitySnap> {
                 lerp(item.previous.y, item.position.y),
                 lerp(item.previous.z, item.position.z),
             ],
+            tick_pos: [item.position.x, item.position.y, item.position.z],
             invisible: false,
             name: None,
             skin: None,
@@ -614,6 +621,7 @@ fn snapshot_entities(game: &super::Game<'_>) -> Vec<EntitySnap> {
             kind: kind.to_owned(),
             class: EntityClass::Other,
             pos: [lerp(previous.x, position.x), lerp(previous.y, position.y), lerp(previous.z, position.z)],
+            tick_pos: [position.x, position.y, position.z],
             invisible: false,
             name: None,
             skin: None,

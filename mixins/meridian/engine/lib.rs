@@ -1276,12 +1276,12 @@ impl Hooks for Meridian {
                     if s.viewer.is_none() {
                         let reach = 6.0 * view.unit;
                         s.menu_player = bridge::entities()
-                            .into_iter()
+                            .iter()
                             .filter(|e| e.class == bridge::EntityClass::Player)
                             .filter_map(|e| {
                                 let p = s.map.to_screen([e.pos[0], e.pos[2]], view.gui, view.unit);
                                 let d = (p[0] - at[0]).hypot(p[1] - at[1]);
-                                (d <= reach).then_some((d, e.name?))
+                                (d <= reach).then_some((d, e.name.clone()?))
                             })
                             .min_by(|a, b| a.0.total_cmp(&b.0))
                             .map(|(_, name)| name);
@@ -1619,6 +1619,7 @@ impl Hooks for Meridian {
             s.close_book();
             s.levels = 0;
             s.close_viewer();
+            s.map.forget_footsteps();
         });
         self.send(host, HostEvent::Disconnected);
         // The world's regions reach the disk before the next one opens.
@@ -1963,7 +1964,8 @@ fn minimap_ops(
     let radar_on = s.config.current().radar.enabled && !s.config.current().minimap.fair_play;
     s.want_entities(radar_on);
     if radar_on {
-        let entities = radar_entities(&mut s.face_cache);
+        let smooth = s.config.current().radar.smooth;
+        let entities = radar_entities(&mut s.face_cache, smooth);
         let radar = radar_now(&s.config.current().radar, s.faces_held);
         ops.extend(radar::dots(&layout, player.position, player.yaw, &entities, &radar));
     }
@@ -2314,9 +2316,9 @@ impl Meridian {
 
 /// The bridge's entities as the radar's, their faces from `faces` (by kind,
 /// or skin for players; filled on first sight).
-fn radar_entities(faces: &mut HashMap<String, Option<std::sync::Arc<radar::Face>>>) -> Vec<radar::Entity> {
+fn radar_entities(faces: &mut HashMap<String, Option<std::sync::Arc<radar::Face>>>, smooth: bool) -> Vec<radar::Entity> {
     bridge::entities()
-        .into_iter()
+        .iter()
         .map(|e| radar::Entity {
             id: e.id,
             class: match e.class {
@@ -2326,7 +2328,7 @@ fn radar_entities(faces: &mut HashMap<String, Option<std::sync::Arc<radar::Face>
                 bridge::EntityClass::Item => radar::Class::Item,
                 bridge::EntityClass::Other => radar::Class::Other,
             },
-            pos: e.pos,
+            pos: if smooth { e.pos } else { e.tick_pos },
             invisible: e.invisible,
             // Faces only where the texture is there (another resource pack
             // may not have it): a dot otherwise.
@@ -2343,8 +2345,8 @@ fn radar_entities(faces: &mut HashMap<String, Option<std::sync::Arc<radar::Face>
                     }
                 }
             },
-            kind: e.kind,
-            name: e.name,
+            kind: e.kind.clone(),
+            name: e.name.clone(),
             tamed: e.tamed,
         })
         .collect()
@@ -2766,7 +2768,8 @@ impl Meridian {
             let cave_layer = engine.layer();
             let radar_on = s.config.current().radar.enabled && !s.config.current().minimap.fair_play;
             s.want_entities(radar_on && shown == here);
-            let entities = if radar_on && shown == here { radar_entities(&mut s.face_cache) } else { Vec::new() };
+            let smooth = s.config.current().radar.smooth;
+            let entities = if radar_on && shown == here { radar_entities(&mut s.face_cache, smooth) } else { Vec::new() };
             let settings = s.config.current();
             let radar = radar_now(&settings.radar, s.faces_held);
             let waypoints: Vec<&Waypoint> = match &s.book {
