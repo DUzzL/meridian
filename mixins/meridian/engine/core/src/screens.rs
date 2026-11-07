@@ -8,7 +8,7 @@
 
 use crate::config::{
     AutoCaveMode, BlockColors, ClockInfo, Corner, LightInfo, MinimapShape, MinimapSize, Settings,
-    Slopes,
+    Slopes, WaypointSort,
 };
 use crate::minimap::Align;
 use crate::nearest::WaypointMode;
@@ -90,14 +90,21 @@ pub enum Dropdown {
 
 /// The entries of the open dropdown, under its selector (`world` or
 /// `dimension` rect), over everything else.
-fn dropdown_widgets(open: Option<Dropdown>, world: [f32; 4], dimension: [f32; 4], env: &Env<'_>) -> Vec<Widget> {
+fn dropdown_widgets(
+    open: Option<Dropdown>,
+    world: [f32; 4],
+    dimension: [f32; 4],
+    env: &Env<'_>,
+) -> Vec<Widget> {
     let Some(open) = open else { return Vec::new() };
     let (rect, entries, chosen, tag) = match open {
         Dropdown::World => (world, &env.places.worlds, env.places.world, "w"),
         Dropdown::Dimension => (dimension, &env.places.dimensions, env.places.dimension, "d"),
     };
     let row = 12.0;
-    let room = ((env.gui[1] - rect[1] - rect[3] - 4.0) / row).floor().max(1.0) as usize;
+    let room = ((env.gui[1] - rect[1] - rect[3] - 4.0) / row)
+        .floor()
+        .max(1.0) as usize;
     let shown = entries.len().min(room);
     let top = rect[1] + rect[3];
     let mut ws = vec![Widget {
@@ -108,8 +115,17 @@ fn dropdown_widgets(open: Option<Dropdown>, world: [f32; 4], dimension: [f32; 4]
     }];
     for (i, label) in entries.iter().take(shown).enumerate() {
         let y = top + 1.0 + i as f32 * row;
-        ws.push(Widget::row(&format!("dd:{tag}:{i}"), [rect[0] + 1.0, y, rect[2] - 2.0, row], i == chosen));
-        ws.push(Widget::label(rect[0] + rect[2] / 2.0, y + 2.0, label.clone(), Align::Center));
+        ws.push(Widget::row(
+            &format!("dd:{tag}:{i}"),
+            [rect[0] + 1.0, y, rect[2] - 2.0, row],
+            i == chosen,
+        ));
+        ws.push(Widget::label(
+            rect[0] + rect[2] / 2.0,
+            y + 2.0,
+            label.clone(),
+            Align::Center,
+        ));
     }
     ws
 }
@@ -131,8 +147,14 @@ fn dropdown_click(open: &mut Option<Dropdown>, id: Option<&str>) -> Option<Actio
             let mut parts = entry.split(':').skip(1);
             let (tag, i) = (parts.next()?, parts.next()?.parse::<usize>().ok());
             match (tag, i) {
-                ("w", Some(i)) => Some(Action::ShowPlace { world: Some(i), dimension: None }),
-                ("d", Some(i)) => Some(Action::ShowPlace { world: None, dimension: Some(i) }),
+                ("w", Some(i)) => Some(Action::ShowPlace {
+                    world: Some(i),
+                    dimension: None,
+                }),
+                ("d", Some(i)) => Some(Action::ShowPlace {
+                    world: None,
+                    dimension: Some(i),
+                }),
                 _ => Some(Action::None),
             }
         }
@@ -313,6 +335,26 @@ impl Screen {
         }
     }
 
+    /// The quick confirm key: confirms what the screen asks (the editor's
+    /// waypoint, the list's pending set name or deletion, a reset).
+    pub fn quick_confirm(&mut self, env: &mut Env<'_>) -> Action {
+        match self {
+            Screen::Editor(s) => s.confirm(env),
+            Screen::List(s) => s.quick_confirm(env),
+            Screen::ConfirmReset(s) => s.click(Some("yes")),
+            _ => Action::None,
+        }
+    }
+
+    /// The modifier keys held during the next click: Shift selects a range
+    /// of waypoints, Ctrl (or Cmd) adds or removes one.
+    pub fn set_modifiers(&mut self, shift: bool, ctrl: bool) {
+        if let Screen::List(s) = self {
+            s.shift = shift;
+            s.ctrl = ctrl;
+        }
+    }
+
     pub fn scroll(&mut self, lines: f32, env: &Env<'_>) {
         match self {
             Screen::Settings(s) => s.scroll(lines, env),
@@ -392,7 +434,7 @@ impl Editor {
             edit: Some(w.id),
             name: w.name.clone(),
             x: w.pos[0].to_string(),
-            y: w.pos[1].to_string(),
+            y: w.height_text(),
             z: w.pos[2].to_string(),
             yaw: w.yaw.map(|y| format!("{y:.0}")).unwrap_or_default(),
             initials: w.initials.clone(),
@@ -418,7 +460,7 @@ impl Editor {
     }
 
     /// The waypoint the fields describe, if they are valid; empty
-    /// coordinates take the player's.
+    /// coordinates take the player's, and a Y of `~` is an unknown height.
     pub fn waypoint(&self, player: [i32; 3]) -> Option<Waypoint> {
         let name = self.name.trim();
         if name.is_empty() {
@@ -431,17 +473,20 @@ impl Editor {
                 s.trim().parse().ok()
             }
         };
-        let pos = [
-            coord(&self.x, player[0])?,
-            coord(&self.y, player[1])?,
-            coord(&self.z, player[2])?,
-        ];
+        let unknown = self.y.trim() == "~";
+        let y = if unknown {
+            player[1]
+        } else {
+            coord(&self.y, player[1])?
+        };
+        let pos = [coord(&self.x, player[0])?, y, coord(&self.z, player[2])?];
         let yaw = if self.yaw.trim().is_empty() {
             None
         } else {
             Some(self.yaw.trim().parse::<f32>().ok()?)
         };
         let mut w = Waypoint::new(name, pos, self.color);
+        w.y_unknown = unknown;
         if !self.initials.trim().is_empty() {
             w.initials = self.initials.trim().to_owned();
         }
@@ -568,7 +613,7 @@ impl Editor {
         }
     }
 
-    fn confirm(&mut self, env: &Env<'_>) -> Action {
+    pub(crate) fn confirm(&mut self, env: &Env<'_>) -> Action {
         match self.waypoint(env.player_block) {
             Some(mut w) => {
                 if let Some(id) = self.edit {
@@ -630,7 +675,9 @@ impl Editor {
         let Some(f) = self.focus else { return };
         let (max, accept): (usize, fn(char) -> bool) = match f {
             Field::Name => (32, |_| true),
-            Field::X | Field::Y | Field::Z => (9, |c| c.is_ascii_digit() || c == '-'),
+            Field::X | Field::Z => (9, |c| c.is_ascii_digit() || c == '-'),
+            // `~`: the height is not known.
+            Field::Y => (9, |c| c.is_ascii_digit() || c == '-' || c == '~'),
             Field::Yaw => (6, |c| c.is_ascii_digit() || c == '-' || c == '.'),
             Field::Initials => (2, |c| !c.is_whitespace()),
         };
@@ -673,38 +720,101 @@ fn set_label(set: &str) -> String {
 
 // ------------------------------------------------------------------ list --
 
+/// A set name being typed in the list: a new set, or the current one
+/// renamed.
+#[derive(Debug, Default, PartialEq)]
+pub struct SetName {
+    pub rename: bool,
+    pub text: String,
+}
+
 #[derive(Debug, Default, PartialEq)]
 pub struct List {
-    pub selected: Option<u64>,
+    /// The selected waypoints, in the order they were picked.
+    pub selected: Vec<u64>,
+    /// Where a Shift click's range starts.
+    pub anchor: Option<u64>,
+    /// Modifier keys held during the click being handled (the host sets
+    /// them, [`Screen::set_modifiers`]).
+    pub shift: bool,
+    pub ctrl: bool,
     pub filter: String,
     pub filter_focused: bool,
     pub scroll: usize,
     /// "Clear Set" was clicked once; a second click clears.
     pub confirm_clear: bool,
+    /// "Delete Set" was clicked once; a second click deletes.
+    pub confirm_delete_set: bool,
+    /// A set name being typed.
+    pub naming: Option<SetName>,
     pub dropdown: Option<Dropdown>,
 }
 
 const ROW_H: f32 = 12.0;
 
+const SORTS: [WaypointSort; 4] = [
+    WaypointSort::Creation,
+    WaypointSort::Name,
+    WaypointSort::Distance,
+    WaypointSort::Initials,
+];
+
+fn sort_label(sort: WaypointSort) -> &'static str {
+    match sort {
+        WaypointSort::Creation => "Sort: Newest",
+        WaypointSort::Name => "Sort: Name",
+        WaypointSort::Distance => "Sort: Distance",
+        WaypointSort::Initials => "Sort: Initials",
+    }
+}
+
 impl List {
-    /// The current set's waypoints matching the filter, in list order.
-    fn rows<'a>(&self, waypoints: &'a DimensionWaypoints) -> Vec<&'a Waypoint> {
+    /// The player's position, when the list shows the player's own world
+    /// and dimension (distances mean nothing elsewhere).
+    fn player(env: &Env<'_>) -> Option<[f64; 3]> {
+        (env.places.world == 0 && env.places.dimension == 0)
+            .then(|| env.player_block.map(|v| v as f64 + 0.5))
+    }
+
+    /// The current set's waypoints matching the filter, in the chosen
+    /// order (ties keep the set's own order).
+    fn rows<'a>(&self, env: &'a Env<'_>) -> Vec<&'a Waypoint> {
         let filter = self.filter.to_lowercase();
-        waypoints
+        let mut rows: Vec<&Waypoint> = env
+            .waypoints
             .current()
             .iter()
             .filter(|w| filter.is_empty() || w.name.to_lowercase().contains(&filter))
-            .collect()
+            .collect();
+        match env.settings.waypoints.sort {
+            WaypointSort::Creation => rows.sort_by_key(|w| std::cmp::Reverse(w.created)),
+            WaypointSort::Name => rows.sort_by_cached_key(|w| w.name.to_lowercase()),
+            WaypointSort::Initials => rows.sort_by_cached_key(|w| w.initials.to_lowercase()),
+            WaypointSort::Distance => {
+                if let Some(p) = Self::player(env) {
+                    rows.sort_by(|a, b| a.distance(p).total_cmp(&b.distance(p)))
+                }
+            }
+        }
+        rows
     }
 
     fn visible_rows(env: &Env<'_>) -> usize {
         (((env.gui[1] - 62.0) - 62.0) / ROW_H).max(1.0) as usize
     }
 
+    /// The one selected waypoint, when exactly one is.
+    fn single(&self) -> Option<u64> {
+        match self.selected.as_slice() {
+            [one] => Some(*one),
+            _ => None,
+        }
+    }
+
     fn widgets(&self, env: &Env<'_>) -> Vec<Widget> {
         let [cx, _] = env.center();
         let h = env.gui[1];
-        let has = self.selected.is_some();
+        let (any, one) = (!self.selected.is_empty(), self.single().is_some());
         let mut ws = vec![
             Widget::label(cx - 102.0, 9.0, "World/Server", Align::Center),
             Widget::label(cx + 102.0, 9.0, "Sub-World/Dimension", Align::Center),
@@ -751,9 +861,59 @@ impl List {
                 "Filter...",
                 self.filter_focused,
             ),
+            Widget::selector(
+                "sort",
+                [cx - 203.0, 84.0, 74.0, ui::SELECTOR_H],
+                sort_label(env.settings.waypoints.sort),
+                0xFFFF_FFFF,
+            ),
         ];
+        // The sets: new, rename, delete; a name field while one is typed.
+        match &self.naming {
+            Some(n) => {
+                ws.push(Widget::field(
+                    "set_name",
+                    [cx + 130.0, 60.0, 74.0, ui::BUTTON_H],
+                    &n.text,
+                    "Set name",
+                    true,
+                ));
+                ws.push(Widget::button(
+                    "set_name_ok",
+                    [cx + 130.0, 84.0, 74.0, ui::BUTTON_H],
+                    if n.rename { "Rename" } else { "Create" },
+                    !n.text.trim().is_empty(),
+                ));
+            }
+            None => {
+                ws.push(Widget::button(
+                    "new_set",
+                    [cx + 130.0, 60.0, 74.0, ui::BUTTON_H],
+                    "New Set",
+                    true,
+                ));
+                ws.push(Widget::button(
+                    "rename_set",
+                    [cx + 130.0, 84.0, 74.0, ui::BUTTON_H],
+                    "Rename Set",
+                    true,
+                ));
+            }
+        }
+        ws.push(Widget::button(
+            "delete_set",
+            [cx + 130.0, 108.0, 74.0, ui::BUTTON_H],
+            if self.confirm_delete_set {
+                "Confirm?"
+            } else {
+                "Delete Set"
+            },
+            env.waypoints.sets.len() > 1 || !env.waypoints.current().is_empty(),
+        ));
+        let player = Self::player(env);
+        let km_from = env.settings.waypoints.distance_in_km_from;
         for (i, w) in self
-            .rows(env.waypoints)
+            .rows(env)
             .into_iter()
             .skip(self.scroll)
             .take(Self::visible_rows(env))
@@ -763,7 +923,7 @@ impl List {
             ws.push(Widget::row(
                 &format!("row:{}", w.id),
                 [cx - 110.0, y, 220.0, ROW_H],
-                self.selected == Some(w.id),
+                self.selected.contains(&w.id),
             ));
             let color = if w.disabled { 0xFF80_8080 } else { 0xFFFF_FFFF };
             ws.push(Widget {
@@ -783,8 +943,24 @@ impl List {
                     color: 0xFF00_0000 | w.rgb(),
                 },
             });
+            if let Some(p) = player {
+                ws.push(Widget {
+                    id: String::new(),
+                    rect: [cx + 107.0, y + 2.0, 0.0, 9.0],
+                    text: waypoint::distance_label(w.distance(p), km_from, 1),
+                    kind: ui::Kind::Label {
+                        color: 0xFFA0_A0A0,
+                        align: Align::Right,
+                    },
+                });
+            }
         }
         let y = h - 52.0;
+        let all_disabled = self
+            .selected
+            .iter()
+            .filter_map(|s| env.waypoints.find(*s))
+            .all(|w| w.disabled);
         for (i, (id, label)) in [
             ("add", "Add/Edit"),
             ("teleport", "Teleport (T)"),
@@ -795,17 +971,15 @@ impl List {
         .into_iter()
         .enumerate()
         {
-            let enabled = id == "add" || has;
-            let label = if id == "toggle" {
-                let disabled = self
-                    .selected
-                    .and_then(|s| env.waypoints.find(s))
-                    .is_some_and(|w| w.disabled);
-                if has && !disabled { "Disable" } else { label }
-            } else if id == "add" && !has {
-                "Add"
-            } else {
-                label
+            let enabled = match id {
+                "add" => true,
+                "teleport" | "share" => one,
+                _ => any,
+            };
+            let label = match id {
+                "toggle" if any && !all_disabled => "Disable",
+                "add" if !one => "Add",
+                _ => label,
             };
             ws.push(Widget::button(
                 id,
@@ -829,36 +1003,117 @@ impl List {
         ws
     }
 
+    /// A click on a row: alone it selects the row (or clears it when it was
+    /// the only one); with Ctrl it adds or removes the row; with Shift it
+    /// selects the rows from the last one clicked.
+    fn pick(&mut self, id: u64, env: &Env<'_>) {
+        if self.shift
+            && let Some(anchor) = self.anchor
+        {
+            let ids: Vec<u64> = self.rows(env).iter().map(|w| w.id).collect();
+            if let (Some(a), Some(b)) = (
+                ids.iter().position(|x| *x == anchor),
+                ids.iter().position(|x| *x == id),
+            ) {
+                self.selected = ids[a.min(b)..=a.max(b)].to_vec();
+                return;
+            }
+        }
+        if self.ctrl {
+            match self.selected.iter().position(|x| *x == id) {
+                Some(i) => {
+                    self.selected.remove(i);
+                }
+                None => self.selected.push(id),
+            }
+        } else if self.selected == [id] {
+            self.selected.clear();
+        } else {
+            self.selected = vec![id];
+        }
+        self.anchor = Some(id);
+    }
+
+    fn clear_selection(&mut self) {
+        self.selected.clear();
+        self.anchor = None;
+    }
+
+    fn delete_selected(&mut self, env: &mut Env<'_>) {
+        for id in std::mem::take(&mut self.selected) {
+            env.waypoints.remove(id);
+            env.waypoints_changed = true;
+        }
+        self.anchor = None;
+    }
+
+    /// Creates or renames the set being named.
+    fn finish_naming(&mut self, env: &mut Env<'_>) {
+        let Some(n) = self.naming.take() else { return };
+        let name = n.text.trim();
+        let current = env.waypoints.current_set.clone();
+        let done = if n.rename {
+            env.waypoints.rename_set(&current, name)
+        } else {
+            env.waypoints.create_set(name)
+        };
+        if done {
+            env.waypoints.current_set = name.to_owned();
+            env.waypoints_changed = true;
+            self.clear_selection();
+        }
+    }
+
+    fn quick_confirm(&mut self, env: &mut Env<'_>) -> Action {
+        if self.naming.is_some() {
+            self.finish_naming(env);
+        } else if self.confirm_clear {
+            return self.click(Some("clear"), false, env);
+        } else if self.confirm_delete_set {
+            return self.click(Some("delete_set"), false, env);
+        }
+        Action::None
+    }
+
     fn click(&mut self, id: Option<&str>, right: bool, env: &mut Env<'_>) -> Action {
         self.filter_focused = false;
         if let Some(action) = dropdown_click(&mut self.dropdown, id) {
             if matches!(action, Action::ShowPlace { .. }) {
-                self.selected = None;
+                self.clear_selection();
             }
             return action;
         }
         if id != Some("clear") {
             self.confirm_clear = false;
         }
+        if id != Some("delete_set") {
+            self.confirm_delete_set = false;
+        }
+        if !matches!(id, Some("set_name" | "set_name_ok")) {
+            self.naming = None;
+        }
         match id {
             Some("filter") => self.filter_focused = true,
             Some(r) if r.starts_with("row:") => {
-                let id = r[4..].parse().ok();
-                self.selected = if self.selected == id { None } else { id };
+                if let Ok(id) = r[4..].parse() {
+                    self.pick(id, env);
+                }
             }
             Some("set") => {
                 if right {
-                    let names: Vec<String> = env.waypoints.sets.keys().cloned().collect();
-                    let i = names
-                        .iter()
-                        .position(|n| *n == env.waypoints.current_set)
-                        .unwrap_or(0);
-                    env.waypoints.current_set = names[(i + names.len() - 1) % names.len()].clone();
+                    env.waypoints.previous_set();
                 } else {
                     env.waypoints.next_set();
                 }
-                self.selected = None;
+                self.clear_selection();
                 env.waypoints_changed = true;
+            }
+            Some("sort") => {
+                let sort = &mut env.settings.waypoints.sort;
+                let i = SORTS.iter().position(|s| s == sort).unwrap_or(0);
+                let n = SORTS.len();
+                *sort = SORTS[if right { (i + n - 1) % n } else { (i + 1) % n }];
+                env.settings_changed = true;
             }
             Some("clear") => {
                 if self.confirm_clear {
@@ -867,33 +1122,54 @@ impl List {
                         list.clear();
                     }
                     env.waypoints_changed = true;
-                    self.selected = None;
+                    self.clear_selection();
                     self.confirm_clear = false;
                 } else {
                     self.confirm_clear = true;
                 }
             }
+            Some("new_set") => self.naming = Some(SetName::default()),
+            Some("rename_set") => {
+                self.naming = Some(SetName {
+                    rename: true,
+                    text: set_label(&env.waypoints.current_set),
+                })
+            }
+            Some("set_name_ok") => self.finish_naming(env),
+            Some("delete_set") => {
+                if self.confirm_delete_set {
+                    let set = env.waypoints.current_set.clone();
+                    env.waypoints.delete_set(&set);
+                    env.waypoints_changed = true;
+                    self.clear_selection();
+                    self.confirm_delete_set = false;
+                } else {
+                    self.confirm_delete_set = true;
+                }
+            }
             Some("add") => {
-                let editor = match self.selected.and_then(|s| env.waypoints.find(s)) {
+                let editor = match self.single().and_then(|s| env.waypoints.find(s)) {
                     Some(w) => Editor::edit(w, &env.waypoints.current_set.clone(), true),
                     None => Editor::new(env.waypoints, waypoint::now(), true),
                 };
                 return Action::Open(Screen::Editor(editor));
             }
-            Some("teleport") => return self.selected.map_or(Action::None, Action::Teleport),
-            Some("share") => return self.selected.map_or(Action::None, Action::Share),
+            Some("teleport") => return self.single().map_or(Action::None, Action::Teleport),
+            Some("share") => return self.single().map_or(Action::None, Action::Share),
             Some("toggle") => {
-                if let Some(w) = self.selected.and_then(|s| env.waypoints.find_mut(s)) {
-                    w.disabled = !w.disabled;
-                    env.waypoints_changed = true;
+                let all_disabled = self
+                    .selected
+                    .iter()
+                    .filter_map(|s| env.waypoints.find(*s))
+                    .all(|w| w.disabled);
+                for id in &self.selected {
+                    if let Some(w) = env.waypoints.find_mut(*id) {
+                        w.disabled = !all_disabled;
+                        env.waypoints_changed = true;
+                    }
                 }
             }
-            Some("delete") => {
-                if let Some(s) = self.selected.take() {
-                    env.waypoints.remove(s);
-                    env.waypoints_changed = true;
-                }
-            }
+            Some("delete") => self.delete_selected(env),
             Some("options") => {
                 return Action::Open(Screen::Settings(SettingsScreen::at(Category::Waypoints)));
             }
@@ -904,25 +1180,32 @@ impl List {
     }
 
     fn typed(&mut self, c: char) {
-        if self.filter_focused && ui::type_char(&mut self.filter, c, 24, |_| true) {
+        if let Some(n) = &mut self.naming {
+            ui::type_char(&mut n.text, c, 32, |_| true);
+        } else if self.filter_focused && ui::type_char(&mut self.filter, c, 24, |_| true) {
             self.scroll = 0;
         }
     }
 
     fn key(&mut self, key: &str, env: &mut Env<'_>) -> Action {
+        if let Some(n) = &mut self.naming {
+            match key {
+                "key.keyboard.backspace" => {
+                    ui::backspace(&mut n.text);
+                }
+                "key.keyboard.enter" | "key.keyboard.keypad.enter" => self.finish_naming(env),
+                _ => {}
+            }
+            return Action::None;
+        }
         match key {
             "key.keyboard.backspace" if self.filter_focused => {
                 ui::backspace(&mut self.filter);
             }
             "key.keyboard.t" if !self.filter_focused => {
-                return self.selected.map_or(Action::None, Action::Teleport);
+                return self.single().map_or(Action::None, Action::Teleport);
             }
-            "key.keyboard.delete" if !self.filter_focused => {
-                if let Some(s) = self.selected.take() {
-                    env.waypoints.remove(s);
-                    env.waypoints_changed = true;
-                }
-            }
+            "key.keyboard.delete" if !self.filter_focused => self.delete_selected(env),
             _ => {}
         }
         Action::None
@@ -944,7 +1227,6 @@ pub enum Group {
     WorldMap,
     Performance,
 }
-
 
 /// One setting: its label, its value as shown, and how a click changes it
 /// (`back` for a right click).
@@ -1762,29 +2044,49 @@ mod tests {
         e.places = Places {
             worlds: vec!["Test (auto)".into(), "Other".into()],
             world: 0,
-            dimensions: vec!["overworld (auto)".into(), "overworld".into(), "the_end".into(), "the_nether".into()],
+            dimensions: vec![
+                "overworld (auto)".into(),
+                "overworld".into(),
+                "the_end".into(),
+                "the_nether".into(),
+            ],
             dimension: 0,
         };
         let mut list = Screen::List(List::default());
-        let ids = |sc: &Screen, e: &Env<'_>| sc.widgets(e).into_iter().map(|w| w.id).collect::<Vec<_>>();
+        let ids =
+            |sc: &Screen, e: &Env<'_>| sc.widgets(e).into_iter().map(|w| w.id).collect::<Vec<_>>();
         assert!(!ids(&list, &e).iter().any(|i| i.starts_with("dd:")));
         // The selector opens its list over the screen.
-        let rect = |sc: &Screen, e: &Env<'_>, id: &str| sc.widgets(e).into_iter().find(|w| w.id == id).unwrap().rect;
+        let rect = |sc: &Screen, e: &Env<'_>, id: &str| {
+            sc.widgets(e).into_iter().find(|w| w.id == id).unwrap().rect
+        };
         let r = rect(&list, &e, "dimension");
-        assert_eq!(list.click([r[0] + 5.0, r[1] + 5.0], false, &mut e), Action::None);
+        assert_eq!(
+            list.click([r[0] + 5.0, r[1] + 5.0], false, &mut e),
+            Action::None
+        );
         assert!(ids(&list, &e).contains(&"dd:d:3".to_owned()));
         // Picking an entry asks the host to show that dimension.
         let r = rect(&list, &e, "dd:d:3");
         assert_eq!(
             list.click([r[0] + 5.0, r[1] + 5.0], false, &mut e),
-            Action::ShowPlace { world: None, dimension: Some(3) }
+            Action::ShowPlace {
+                world: None,
+                dimension: Some(3)
+            }
         );
-        assert!(!ids(&list, &e).iter().any(|i| i.starts_with("dd:")), "closed after picking");
+        assert!(
+            !ids(&list, &e).iter().any(|i| i.starts_with("dd:")),
+            "closed after picking"
+        );
         // The world selector likewise; a click elsewhere only closes it.
         let r = rect(&list, &e, "world");
         list.click([r[0] + 5.0, r[1] + 5.0], false, &mut e);
         assert!(ids(&list, &e).contains(&"dd:w:1".to_owned()));
-        assert_eq!(list.click([1.0, e.gui[1] - 1.0], false, &mut e), Action::None);
+        assert_eq!(
+            list.click([1.0, e.gui[1] - 1.0], false, &mut e),
+            Action::None
+        );
         assert!(!ids(&list, &e).iter().any(|i| i.starts_with("dd:")));
         // The editor has the same dropdowns.
         let mut editor = Screen::Editor(Editor::new(e.waypoints, 1, true));
@@ -1793,7 +2095,10 @@ mod tests {
         let r = rect(&editor, &e, "dd:w:1");
         assert_eq!(
             editor.click([r[0] + 5.0, r[1] + 5.0], false, &mut e),
-            Action::ShowPlace { world: Some(1), dimension: None }
+            Action::ShowPlace {
+                world: Some(1),
+                dimension: None
+            }
         );
     }
 
@@ -1915,6 +2220,184 @@ mod tests {
         }
         assert!(!screen.widgets(&e).iter().any(|w| w.id.starts_with("row:")));
         assert_eq!(click(&mut screen, "done", &mut e), Action::Close);
+    }
+
+    fn list_with(names: &[(&str, u64, i32, u64)]) -> DimensionWaypoints {
+        let mut w = DimensionWaypoints::default();
+        for (name, id, x, created) in names {
+            let mut p = Waypoint::new(*name, [*x, 64, 10], 4);
+            p.id = *id;
+            p.created = *created;
+            w.sets.get_mut(waypoint::DEFAULT_SET).unwrap().push(p);
+        }
+        w
+    }
+
+    fn row_ids(screen: &Screen, e: &Env<'_>) -> Vec<u64> {
+        screen
+            .widgets(e)
+            .iter()
+            .filter_map(|w| w.id.strip_prefix("row:")?.parse().ok())
+            .collect()
+    }
+
+    #[test]
+    fn list_sorts_and_shows_distances() {
+        let mut w = list_with(&[
+            ("beta", 1, 140, 5),
+            ("Alpha", 2, 1130, 9),
+            ("gamma", 3, 131, 1),
+        ]);
+        let mut s = Settings::default();
+        let mut e = env(&mut w, &mut s);
+        let mut screen = Screen::List(List::default());
+        assert_eq!(row_ids(&screen, &e), [2, 1, 3], "newest first");
+        click(&mut screen, "sort", &mut e);
+        assert!(e.settings_changed);
+        assert_eq!(e.settings.waypoints.sort, WaypointSort::Name);
+        assert_eq!(row_ids(&screen, &e), [2, 1, 3]);
+        click(&mut screen, "sort", &mut e);
+        assert_eq!(row_ids(&screen, &e), [3, 1, 2], "nearest first");
+        // A distance on every row, from the player at x 130.
+        let labels: Vec<String> = screen
+            .widgets(&e)
+            .into_iter()
+            .filter(|w| {
+                matches!(
+                    w.kind,
+                    ui::Kind::Label {
+                        align: Align::Right,
+                        ..
+                    }
+                )
+            })
+            .map(|w| w.text)
+            .collect();
+        assert_eq!(labels, ["1m", "10m", "1000m"]);
+        // Another world shown: no distances.
+        e.places.world = 1;
+        assert!(!screen.widgets(&e).iter().any(|w| matches!(
+            w.kind,
+            ui::Kind::Label {
+                align: Align::Right,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn list_selects_several_and_acts_on_all() {
+        let mut w = list_with(&[
+            ("a", 1, 0, 4),
+            ("b", 2, 0, 3),
+            ("c", 3, 0, 2),
+            ("d", 4, 0, 1),
+        ]);
+        let mut s = Settings::default();
+        let mut e = env(&mut w, &mut s);
+        let mut screen = Screen::List(List::default());
+        click(&mut screen, "row:1", &mut e);
+        screen.set_modifiers(true, false);
+        click(&mut screen, "row:3", &mut e);
+        let Screen::List(list) = &screen else {
+            unreachable!()
+        };
+        assert_eq!(list.selected, [1, 2, 3], "Shift selects the range");
+        screen.set_modifiers(false, true);
+        click(&mut screen, "row:2", &mut e);
+        screen.set_modifiers(false, false);
+        let Screen::List(list) = &screen else {
+            unreachable!()
+        };
+        assert_eq!(list.selected, [1, 3], "Ctrl takes one out");
+        let enabled = |screen: &Screen, e: &Env<'_>, id: &str| {
+            screen
+                .widgets(e)
+                .iter()
+                .any(|w| w.id == id && w.kind == ui::Kind::Button { enabled: true })
+        };
+        assert!(
+            !enabled(&screen, &e, "teleport"),
+            "teleport needs one waypoint"
+        );
+        click(&mut screen, "toggle", &mut e);
+        assert!(e.waypoints.find(1).unwrap().disabled && e.waypoints.find(3).unwrap().disabled);
+        assert!(!e.waypoints.find(2).unwrap().disabled);
+        click(&mut screen, "toggle", &mut e);
+        assert!(!e.waypoints.find(1).unwrap().disabled);
+        click(&mut screen, "delete", &mut e);
+        assert_eq!(
+            e.waypoints
+                .current()
+                .iter()
+                .map(|w| w.id)
+                .collect::<Vec<_>>(),
+            [2, 4]
+        );
+        click(&mut screen, "row:4", &mut e);
+        assert!(enabled(&screen, &e, "teleport"));
+        assert_eq!(screen.key("key.keyboard.delete", &mut e), Action::None);
+        assert!(e.waypoints.find(4).is_none());
+    }
+
+    #[test]
+    fn list_creates_renames_and_deletes_sets() {
+        let (mut w, mut s) = (DimensionWaypoints::default(), Settings::default());
+        let mut e = env(&mut w, &mut s);
+        let mut screen = Screen::List(List::default());
+        click(&mut screen, "new_set", &mut e);
+        for c in "Nether hub".chars() {
+            screen.typed(c, &mut e);
+        }
+        screen.key("key.keyboard.enter", &mut e);
+        assert_eq!(e.waypoints.current_set, "Nether hub");
+        assert!(e.waypoints_changed);
+        click(&mut screen, "rename_set", &mut e);
+        for _ in 0.."hub".len() {
+            screen.key("key.keyboard.backspace", &mut e);
+        }
+        for c in "base".chars() {
+            screen.typed(c, &mut e);
+        }
+        assert_eq!(screen.quick_confirm(&mut e), Action::None);
+        assert_eq!(e.waypoints.current_set, "Nether base");
+        assert!(e.waypoints.sets.contains_key(waypoint::DEFAULT_SET));
+        // Deleting asks first; the quick confirm key answers.
+        click(&mut screen, "delete_set", &mut e);
+        assert!(e.waypoints.sets.contains_key("Nether base"));
+        screen.quick_confirm(&mut e);
+        assert!(!e.waypoints.sets.contains_key("Nether base"));
+        assert_eq!(e.waypoints.current_set, waypoint::DEFAULT_SET);
+        // A click elsewhere drops a name being typed.
+        click(&mut screen, "new_set", &mut e);
+        click(&mut screen, "filter", &mut e);
+        assert!(!screen.widgets(&e).iter().any(|w| w.id == "set_name"));
+    }
+
+    #[test]
+    fn editor_takes_an_unknown_height_and_quick_confirms() {
+        let (mut w, mut s) = (DimensionWaypoints::default(), Settings::default());
+        let mut e = env(&mut w, &mut s);
+        let mut editor = Editor::new(e.waypoints, 0, false);
+        editor.name = "Far".into();
+        editor.y = "~".into();
+        let mut screen = Screen::Editor(editor);
+        let Action::Save { waypoint, .. } = screen.quick_confirm(&mut e) else {
+            panic!("the quick confirm key saves")
+        };
+        assert_eq!(waypoint.height(), None);
+        assert_eq!(Editor::edit(&waypoint, "default", false).y, "~");
+        // `~` can be typed into the Y field.
+        let Screen::Editor(editor) = &mut screen else {
+            unreachable!()
+        };
+        editor.y.clear();
+        editor.focus = Some(Field::Y);
+        screen.typed('~', &mut e);
+        let Screen::Editor(editor) = &screen else {
+            unreachable!()
+        };
+        assert_eq!(editor.y, "~");
     }
 
     #[test]

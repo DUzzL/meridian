@@ -72,8 +72,8 @@ pub fn parse_text(text: &str) -> Vec<TextWaypoint> {
         let (Ok(x), Ok(z)) = (f[2].parse::<i32>(), f[4].parse::<i32>()) else {
             continue;
         };
-        // "~" is an unknown height.
-        let y = f[3].parse::<i32>().unwrap_or(64);
+        // "~" (or anything else not a number) is an unknown height.
+        let y = f[3].parse::<i32>().ok();
         let color = f[5].parse::<u8>().unwrap_or(12).min(15);
         let kind = match f[7].as_str() {
             "1" => Kind::OldDeath,
@@ -100,7 +100,8 @@ pub fn parse_text(text: &str) -> Vec<TextWaypoint> {
             waypoint: Waypoint {
                 name: f[0].clone(),
                 initials,
-                pos: [x, y, z],
+                pos: [x, y.unwrap_or(64), z],
+                y_unknown: y.is_none(),
                 color,
                 kind,
                 disabled: f[6] == "true",
@@ -158,8 +159,9 @@ pub fn read_text_folder(folder: &Path) -> BTreeMap<String, Vec<TextWaypoint>> {
     out
 }
 
-/// Adds waypoints to a book, each to its set; one with the same name and
-/// position already there is skipped. Returns how many were added.
+/// Adds waypoints to a book, each at the bottom of its set so a set keeps
+/// the file's order; one with the same name and position already there is
+/// skipped. Returns how many were added.
 pub fn merge(
     book: &mut WaypointBook,
     dimension: &str,
@@ -177,13 +179,15 @@ pub fn merge(
         if exists {
             continue;
         }
-        book.save_edit(dimension, None, &set, waypoint, now);
+        book.insert(dimension, &set, waypoint, true, now);
         added += 1;
     }
     added
 }
 
-/// Adds an export's waypoints to a book (see [`merge`]).
+/// Adds an export's waypoints to a book (see [`merge`]). A dimension that
+/// had no waypoints yet (a backup restored) also gets the export's current
+/// set back; elsewhere the player's choice stays.
 pub fn merge_export(
     book: &mut WaypointBook,
     dimensions: BTreeMap<String, DimensionWaypoints>,
@@ -191,6 +195,10 @@ pub fn merge_export(
 ) -> usize {
     let mut added = 0;
     for (dim, sets) in dimensions {
+        let fresh = book
+            .dimension(&dim)
+            .is_none_or(|d| d.sets.values().all(Vec::is_empty));
+        let current = sets.current_set.clone();
         let list = sets
             .sets
             .into_iter()
@@ -202,6 +210,13 @@ pub fn merge_export(
             })
             .collect();
         added += merge(book, &dim, list, now);
+        if fresh
+            && book
+                .dimension(&dim)
+                .is_some_and(|d| d.sets.contains_key(&current))
+        {
+            book.dimension_mut(&dim).current_set = current;
+        }
     }
     added
 }
@@ -231,7 +246,12 @@ mod tests {
         let mine = &ws[1];
         assert_eq!(mine.set, "Caves");
         assert_eq!(mine.waypoint.name, "Mine:2");
-        assert_eq!(mine.waypoint.pos, [-40, 64, 300], "unknown height");
+        assert_eq!(mine.waypoint.pos, [-40, 64, 300]);
+        assert_eq!(mine.waypoint.height(), None, "`~` is an unknown height");
+        assert_eq!(
+            crate::waypoint::command("/tp @s {x} {y} {z}", &mine.waypoint, "d"),
+            "/tp @s -40 ~ 300"
+        );
         assert!(mine.waypoint.disabled);
         assert_eq!(mine.waypoint.kind, Kind::OldDeath);
         assert_eq!(mine.waypoint.yaw, Some(90.0));
@@ -292,6 +312,41 @@ mod tests {
             1
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn imports_keep_order_and_the_current_set() {
+        let mut book = WaypointBook::default();
+        let dim = book.dimension_mut("minecraft:overworld");
+        dim.create_set("trip");
+        for name in ["first", "second", "third"] {
+            dim.sets.get_mut("trip").unwrap().push(Waypoint::new(
+                name,
+                [0, 0, name.len() as i32 * 7],
+                1,
+            ));
+        }
+        dim.current_set = "trip".into();
+        let text = export_json(&book);
+        let mut restored = WaypointBook::default();
+        merge_export(&mut restored, import_json(&text).unwrap(), 1);
+        let dim = restored.dimension("minecraft:overworld").unwrap();
+        let names: Vec<&str> = dim.sets["trip"].iter().map(|w| w.name.as_str()).collect();
+        assert_eq!(names, ["first", "second", "third"], "the file's order");
+        assert_eq!(dim.current_set, "trip", "a restored backup keeps its set");
+        // Into a dimension that has waypoints, the player's set stays.
+        let mut used = WaypointBook::default();
+        used.add(
+            "minecraft:overworld",
+            Waypoint::new("mine", [9, 9, 9], 1),
+            false,
+            1,
+        );
+        merge_export(&mut used, import_json(&text).unwrap(), 2);
+        assert_eq!(
+            used.dimension("minecraft:overworld").unwrap().current_set,
+            DEFAULT_SET
+        );
     }
 
     #[test]

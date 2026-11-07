@@ -549,8 +549,14 @@ mod tests {
         let zombie = e(2, Class::Hostile, [2.0, 64.0, 0.0]);
         let ops = dots(&layout(), [0.0, 64.0, 0.0], 0.0, &[dog, zombie], &s);
         // Dots come in pairs (rim, colour); the tamed friend is drawn last.
-        let DrawOp::Quad { points, .. } = &ops[3] else { panic!() };
-        assert_eq!(points[0][0], 1.0 * layout().blocks_per_pixel + 50.0, "the dog over the zombie");
+        let DrawOp::Quad { points, .. } = &ops[3] else {
+            panic!()
+        };
+        assert_eq!(
+            points[0][0],
+            1.0 * layout().blocks_per_pixel + 50.0,
+            "the dog over the zombie"
+        );
     }
 
     #[test]
@@ -567,8 +573,20 @@ mod tests {
     #[test]
     fn faces_lie_inside_their_textures() {
         let kinds = [
-            "bee", "wolf", "ghast", "iron_golem", "polar_bear", "sniffer", "fox", "tadpole",
-            "llama", "warden", "camel", "turtle", "parrot", "zombie",
+            "bee",
+            "wolf",
+            "ghast",
+            "iron_golem",
+            "polar_bear",
+            "sniffer",
+            "fox",
+            "tadpole",
+            "llama",
+            "warden",
+            "camel",
+            "turtle",
+            "parrot",
+            "zombie",
         ];
         for k in kinds {
             let f = face(k).unwrap_or_else(|| panic!("{k} has a face"));
@@ -632,9 +650,15 @@ mod tests {
         );
         // A kind without a known face (or whose texture is missing) stays a dot.
         zombie.face = None;
-        let blits = ops(&s, &[zombie]).into_iter().filter(|o| matches!(o, DrawOp::Blit { .. })).count();
+        let blits = ops(&s, &[zombie])
+            .into_iter()
+            .filter(|o| matches!(o, DrawOp::Blit { .. }))
+            .count();
         assert_eq!(blits, 0);
         assert!(face("minecraft:ender_dragon").is_none());
-        assert_eq!(face_for("minecraft:player", None).unwrap().texture, "entity/player/wide/steve");
+        assert_eq!(
+            face_for("minecraft:player", None).unwrap().texture,
+            "entity/player/wide/steve"
+        );
     }
 }

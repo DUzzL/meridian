@@ -81,7 +81,9 @@ fn on_off(on: bool) -> &'static str {
 }
 
 fn parent() -> Action {
-    Action::Open(Screen::Settings(crate::settings_screen::SettingsScreen::at(crate::settings_screen::Category::SeedAtlas)))
+    Action::Open(Screen::Settings(
+        crate::settings_screen::SettingsScreen::at(crate::settings_screen::Category::SeedAtlas),
+    ))
 }
 
 /// The biomes of the world's version (nothing without a seed), by name.
@@ -846,7 +848,11 @@ impl ConfirmResetScreen {
     pub(crate) fn click(&mut self, id: Option<&str>) -> Action {
         match id {
             Some("yes") => Action::ResetCompleted(self.kind.clone()),
-            Some("no") => Action::Open(Screen::Settings(crate::settings_screen::SettingsScreen::at(crate::settings_screen::Category::Structures))),
+            Some("no") => Action::Open(Screen::Settings(
+                crate::settings_screen::SettingsScreen::at(
+                    crate::settings_screen::Category::Structures,
+                ),
+            )),
             _ => Action::None,
         }
     }
@@ -1034,7 +1040,11 @@ mod tests {
         assert!(!ws.iter().any(|w| w.id == "search"));
         assert_eq!(
             click(&mut screen, "done", &mut e),
-            Action::Open(Screen::Settings(crate::settings_screen::SettingsScreen::at(crate::settings_screen::Category::SeedAtlas)))
+            Action::Open(Screen::Settings(
+                crate::settings_screen::SettingsScreen::at(
+                    crate::settings_screen::Category::SeedAtlas
+                )
+            ))
         );
     }
 
@@ -1102,7 +1112,11 @@ mod tests {
         assert!(!e.settings.seed_atlas.biome_highlight);
         assert_eq!(
             click(&mut screen, "done", &mut e),
-            Action::Open(Screen::Settings(crate::settings_screen::SettingsScreen::at(crate::settings_screen::Category::SeedAtlas)))
+            Action::Open(Screen::Settings(
+                crate::settings_screen::SettingsScreen::at(
+                    crate::settings_screen::Category::SeedAtlas
+                )
+            ))
         );
     }
 
@@ -1164,7 +1178,11 @@ mod tests {
         assert_eq!(again.page, 2);
         assert_eq!(
             click(&mut screen, "done", &mut e),
-            Action::Open(Screen::Settings(crate::settings_screen::SettingsScreen::at(crate::settings_screen::Category::SeedAtlas)))
+            Action::Open(Screen::Settings(
+                crate::settings_screen::SettingsScreen::at(
+                    crate::settings_screen::Category::SeedAtlas
+                )
+            ))
         );
     }
 
@@ -1197,12 +1215,15 @@ mod tests {
         }));
         assert_eq!(
             click(&mut screen, "no", &mut e),
-            Action::Open(Screen::Settings(crate::settings_screen::SettingsScreen::at(crate::settings_screen::Category::Structures)))
+            Action::Open(Screen::Settings(
+                crate::settings_screen::SettingsScreen::at(
+                    crate::settings_screen::Category::Structures
+                )
+            ))
         );
         assert_eq!(
             click(&mut screen, "yes", &mut e),
             Action::ResetCompleted(None)
         );
     }
-
 }
