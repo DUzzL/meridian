@@ -193,6 +193,18 @@ impl SeedContext {
             label,
         }
     }
+
+    /// The context of one map of a world or server: maps other than the
+    /// default one (other worlds behind the same address) keep their own
+    /// seeds.
+    pub fn of_map(source: &WorldSource, map: &str) -> Self {
+        let mut c = Self::from_source(source);
+        if map != crate::engine::DEFAULT_MAP {
+            c.key = format!("{}/{map}", c.key);
+            c.label = format!("{} ({map})", c.label);
+        }
+        c
+    }
 }
 
 /// The effective generation of one dimension in a context.

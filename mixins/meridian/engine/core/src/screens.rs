@@ -1195,6 +1195,23 @@ fn world_map_options() -> Vec<Opt> {
             },
         },
         Opt {
+            label: "Multiplayer Maps",
+            group: WorldMap,
+            value: |s| match s.world_map.multiplayer_maps {
+                crate::config::MapSelection::Single => "One Per Server".into(),
+                crate::config::MapSelection::WorldSpawn => "By World Spawn".into(),
+                crate::config::MapSelection::Manual => "Manual".into(),
+            },
+            step: |s, b| {
+                use crate::config::MapSelection::*;
+                s.world_map.multiplayer_maps = cycle(
+                    &[Single, WorldSpawn, Manual],
+                    s.world_map.multiplayer_maps,
+                    b,
+                );
+            },
+        },
+        Opt {
             label: "Map Lighting",
             group: WorldMap,
             value: |s| on_off(s.world_map.terrain.lighting),

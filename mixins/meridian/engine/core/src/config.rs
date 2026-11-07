@@ -69,6 +69,19 @@ pub enum AutoCaveMode {
     Roof5x5,
 }
 
+/// Which map of a server is shown (several worlds behind one address).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MapSelection {
+    /// One map per server address.
+    Single,
+    /// One map per world spawn the server announces.
+    #[default]
+    WorldSpawn,
+    /// The map chosen with `/meridian map`.
+    Manual,
+}
+
 /// How strongly slopes are shaded.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -274,6 +287,8 @@ pub struct WorldMapSettings {
     pub map_teleport_format: String,
     pub map_teleport_dimension_format: String,
     pub player_teleport_format: String,
+    /// Which map of a server is shown.
+    pub multiplayer_maps: MapSelection,
     pub terrain: TerrainStyle,
     pub cave: CaveSettings,
 }
@@ -296,6 +311,7 @@ impl Default for WorldMapSettings {
             map_teleport_format: "/tp @s {x} {y} {z}".into(),
             map_teleport_dimension_format: "/execute as @s in {d} run tp {x} {y} {z}".into(),
             player_teleport_format: "/tp @s {name}".into(),
+            multiplayer_maps: MapSelection::WorldSpawn,
             terrain: TerrainStyle::default(),
             cave: CaveSettings::default(),
         }

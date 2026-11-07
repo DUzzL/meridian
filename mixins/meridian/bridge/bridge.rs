@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 /// Bumped when the shapes below change, so a trait mod can refuse a bridge
 /// it doesn't understand.
-pub const VERSION: u32 = 5;
+pub const VERSION: u32 = 6;
 /// Main-thread time per frame for chunk reads.
 const READ_BUDGET: Duration = Duration::from_micros(1500);
 
@@ -117,6 +117,8 @@ struct Shared {
     window: Option<[u32; 2]>,
     /// The debug overlay (F3) is open.
     debug_shown: bool,
+    /// The world spawn the server announced (the Overworld's).
+    world_spawn: Option<[i32; 3]>,
     /// The prepared game resources (`assets/minecraft/textures/...`).
     resources: Option<std::path::PathBuf>,
     /// Entities are copied each frame only while someone wants them.
@@ -245,6 +247,11 @@ pub fn under_roof() -> bool {
     with(|s| s.under_roof)
 }
 
+/// The world spawn the server announced, once it has.
+pub fn world_spawn() -> Option<[i32; 3]> {
+    with(|s| s.world_spawn)
+}
+
 /// Whether the debug overlay (F3) is open.
 pub fn debug_shown() -> bool {
     with(|s| s.debug_shown)
@@ -289,6 +296,7 @@ pub(super) fn frame(game: &mut super::Game<'_>) {
     answer_requests(game, s);
     s.window = game.native_physical_window_size();
     s.debug_shown = game.debug;
+    s.world_spawn = game.spawn.map(|p| [p.x.floor() as i32, p.y.floor() as i32, p.z.floor() as i32]);
     if s.want_entities {
         s.entities = snapshot_entities(game);
     }

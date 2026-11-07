@@ -165,6 +165,8 @@ pub struct MapEngine {
     /// Regions without a file (nothing to make an overview of).
     no_file: HashSet<RegionPos>,
     overview_clock: u64,
+    /// The map of the world or server shown (`subworld`).
+    map: String,
 }
 
 /// A region's map at a quarter of the resolution.
@@ -237,6 +239,33 @@ impl MapEngine {
             transient: HashMap::new(),
             no_file: HashSet::new(),
             overview_clock: 0,
+            map: DEFAULT_MAP.to_owned(),
+        }
+    }
+
+    /// The map of the world or server shown.
+    pub fn map(&self) -> &str {
+        &self.map
+    }
+
+    /// Names the map the next level opens with (the open one is saved to
+    /// its own files when that happens).
+    pub fn prepare_map(&mut self, map: &str) {
+        self.map = map.to_owned();
+    }
+
+    /// Shows another map of the same world or server: saves this one and
+    /// opens that one for the current dimension.
+    pub fn set_map(&mut self, map: &str) {
+        if self.map == map {
+            return;
+        }
+        self.map = map.to_owned();
+        if let Some(active) = self.active.as_ref() {
+            let context = active.context.clone();
+            let layer = self.layer;
+            self.open(context);
+            self.set_layer(layer);
         }
     }
 
@@ -290,6 +319,10 @@ impl MapEngine {
         self.in_flight.clear();
         self.failures.clear();
         self.shading = None;
+        // Overviews belong to the layer they were drawn from.
+        self.overviews.clear();
+        self.transient.clear();
+        self.no_file.clear();
         if let Some(active) = &mut self.active {
             active.paths = active.paths.with_layer(layer);
             self.pending_reads = self.loaded_chunks.clone();
@@ -512,7 +545,7 @@ impl MapEngine {
         let paths = MapPaths::new(
             &self.data_dir,
             &context.source,
-            DEFAULT_MAP,
+            &self.map,
             &context.dimension,
         );
         self.active = Some(ActiveMap { context, paths });
@@ -1202,6 +1235,37 @@ mod tests {
             files >= 12 - 9,
             "evicted regions were saved ({files} files)"
         );
+    }
+
+    #[test]
+    fn maps_of_one_server_keep_their_own_files() {
+        let world = World::new("engine_maps");
+        let mut e = MapEngine::new(Settings::default(), world.data_dir());
+        e.handle(&world, HostEvent::LevelLoaded(overworld()));
+        e.handle(&world, HostEvent::ChunkLoaded(ChunkPos::new(0, 0)));
+        settle(&mut e, &world);
+        assert!(e.sampler().column(1, 1).is_some());
+        e.set_map("map-2");
+        assert_eq!(e.map(), "map-2");
+        settle(&mut e, &world);
+        let paths = |map: &str| {
+            MapPaths::new(
+                &world.data_dir(),
+                &overworld().source,
+                map,
+                &overworld().dimension,
+            )
+        };
+        assert!(
+            paths(DEFAULT_MAP)
+                .region_file(RegionPos::new(0, 0))
+                .exists(),
+            "the first map was saved"
+        );
+        // The loaded chunk is read again into the new map.
+        e.flush();
+        settle(&mut e, &world);
+        assert!(paths("map-2").region_file(RegionPos::new(0, 0)).exists());
     }
 
     #[test]

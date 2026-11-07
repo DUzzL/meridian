@@ -98,6 +98,11 @@ pub fn source_key(source: &WorldSource) -> String {
     }
 }
 
+/// The folder of a world or server, which holds its maps.
+pub fn server_dir(data_dir: &Path, source: &WorldSource) -> PathBuf {
+    data_dir.join("worlds").join(source_key(source))
+}
+
 /// Where one map of one dimension keeps its files.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MapPaths {
@@ -108,9 +113,7 @@ pub struct MapPaths {
 
 impl MapPaths {
     pub fn new(data_dir: &Path, source: &WorldSource, map: &str, dimension: &DimensionId) -> Self {
-        let root = data_dir
-            .join("worlds")
-            .join(source_key(source))
+        let root = server_dir(data_dir, source)
             .join(escape_component(map))
             .join(escape_component(dimension.as_str()));
         Self { root, layer: None }

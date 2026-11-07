@@ -37,6 +37,7 @@ pub mod seedatlas;
 pub mod seedatlas_commands;
 pub mod seedatlas_look;
 pub mod seedatlas_state;
+pub mod subworld;
 pub mod texture;
 pub mod tile;
 pub mod ui;

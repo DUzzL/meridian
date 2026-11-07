@@ -47,7 +47,7 @@ use parking_lot::Mutex;
 pub const MOD_ID: &str = "meridian";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The bridge shape this adapter was written for.
-const BRIDGE_VERSION: u32 = 5;
+const BRIDGE_VERSION: u32 = 6;
 
 /// The singleplayer world's folder name, set by the integrated server's
 /// thread (the window's client only knows the world's display name).
@@ -141,7 +141,10 @@ struct State {
     /// The dimension the client shows, from `client_level_load`.
     dimension: Option<String>,
     /// The waypoints of the open world, and which world they are.
-    book: Option<(WorldSource, WaypointBook)>,
+    /// The waypoints of the open world's map: its source and map name.
+    book: Option<((WorldSource, String), WaypointBook)>,
+    /// The maps of the server played on (several worlds behind one address).
+    server_maps: Option<(WorldSource, meridian_core::subworld::ServerMaps)>,
     last_book_save: Instant,
     /// The world map's last frame, for its animation.
     map_frame: Instant,
@@ -423,16 +426,84 @@ impl State {
 
     /// Opens the waypoints of `context`'s world (kept across its dimensions).
     fn open_book(&mut self, data_dir: &std::path::Path, context: &WorldContext) {
+        let map = self.engine.map().to_owned();
         if self
             .book
             .as_ref()
-            .is_some_and(|(source, _)| *source == context.source)
+            .is_some_and(|((source, m), _)| *source == context.source && *m == map)
         {
             return;
         }
         self.save_book();
-        let paths = MapPaths::new(data_dir, &context.source, DEFAULT_MAP, &context.dimension);
-        self.book = Some((context.source.clone(), WaypointBook::load(paths.map_dir())));
+        let paths = MapPaths::new(data_dir, &context.source, &map, &context.dimension);
+        self.book = Some(((context.source.clone(), map), WaypointBook::load(paths.map_dir())));
+    }
+
+    /// Picks the map of the server played on (by world spawn, or as chosen)
+    /// and switches the map and its waypoints when it changed.
+    fn update_map(&mut self, data_dir: &std::path::Path) {
+        let Some(context) = self.engine.context().cloned() else { return };
+        let name = self.map_for(data_dir, &context.source, bridge::world_spawn());
+        if self.engine.map() != name {
+            log::info!("meridian: showing map {name}");
+            self.engine.set_map(&name);
+            self.viewer = None;
+            self.open_book(data_dir, &context);
+        }
+    }
+
+    /// The map of a world or server to show now.
+    fn map_for(&mut self, data_dir: &std::path::Path, source: &WorldSource, spawn: Option<[i32; 3]>) -> String {
+        match source {
+            WorldSource::Singleplayer { .. } => DEFAULT_MAP.to_owned(),
+            WorldSource::Multiplayer { .. } => {
+                if self.server_maps.as_ref().is_none_or(|(src, _)| *src != *source) {
+                    let dir = meridian_core::persist::server_dir(data_dir, source);
+                    self.server_maps = Some((source.clone(), meridian_core::subworld::ServerMaps::load(&dir)));
+                }
+                let mode = self.config.current().world_map.multiplayer_maps;
+                let (_, maps) = self.server_maps.as_mut().expect("loaded above");
+                let (name, changed) = maps.choose(mode, spawn);
+                if changed && let Err(e) = maps.save() {
+                    log::warn!("meridian: saving the server's map list failed: {e}");
+                }
+                name
+            }
+        }
+    }
+
+    /// `/meridian map [list | use <name> | new <name>]`: the maps of the
+    /// server played on.
+    fn map_command(&mut self, args: &[&str]) -> String {
+        let Some(WorldSource::Multiplayer { .. }) = self.engine.context().map(|c| &c.source) else {
+            return "Worlds in singleplayer have one map".to_owned();
+        };
+        let Some((_, maps)) = self.server_maps.as_mut() else {
+            return "No server map list yet".to_owned();
+        };
+        let name = args.get(1..).map(|r| r.join(" ")).unwrap_or_default();
+        match args.first().copied() {
+            None | Some("list") => format!("Maps: {} (shown: {})", maps.names().join(", "), self.engine.map()),
+            Some(op @ ("use" | "new")) => {
+                if !maps.select(&name, op == "new") {
+                    return format!("No map named {name}");
+                }
+                if let Err(e) = maps.save() {
+                    log::warn!("meridian: saving the server's map list failed: {e}");
+                }
+                let mode = &mut self.config.current_mut().world_map.multiplayer_maps;
+                let note = if *mode == meridian_core::config::MapSelection::Manual {
+                    String::new()
+                } else {
+                    *mode = meridian_core::config::MapSelection::Manual;
+                    " (map selection set to manual)".to_owned()
+                };
+                self.engine.set_settings(self.config.current().clone());
+                self.save_config();
+                format!("Showing map {name}{note}")
+            }
+            _ => "/meridian map [list | use <name> | new <name>]".to_owned(),
+        }
     }
 
     fn close_book(&mut self) {
@@ -496,6 +567,7 @@ impl Meridian {
                 controls: Controls::default(),
                 dimension: None,
                 book: None,
+                server_maps: None,
                 last_book_save: Instant::now(),
                 map_frame: Instant::now(),
                 next_color: 12,
@@ -715,6 +787,9 @@ impl Meridian {
             let Some((book, dim)) = s.book_here() else {
                 return ("Meridian: no world open".to_owned(), None);
             };
+            if args.get(1) == Some(&"map") {
+                return (s.map_command(&args[2..]), None);
+            }
             // /meridian waypoint <action> [name...]
             if args.get(1) != Some(&"waypoint") {
                 return (USAGE.to_owned(), None);
@@ -1179,6 +1254,10 @@ impl Hooks for Meridian {
             };
             match map_host.context() {
                 Some(context) => {
+                    // The spawn may still be the last server's: the frame
+                    // corrects the map once the new one is announced.
+                    let map = s.map_for(&data_dir(host), &context.source, None);
+                    s.engine.prepare_map(&map);
                     s.open_book(&data_dir(host), &context);
                     s.engine.handle(&map_host, HostEvent::LevelLoaded(context));
                 }
@@ -1261,6 +1340,7 @@ impl Hooks for Meridian {
         }
         let host: &dyn Host = host;
         self.with_state(host, |s| {
+            s.update_map(&data_dir(host));
             s.update_seeds();
             s.seed_svc.poll();
             s.poll_nearest();
@@ -2261,6 +2341,7 @@ impl State {
             return;
         }
         let mut engine = MapEngine::new(self.config.current().clone(), data_dir(host));
+        engine.prepare_map(self.engine.map());
         let viewer_host = ViewerHost(HorizonHost { host, dimension: None });
         let context = WorldContext { source: context.source, dimension: DimensionId::new(&next) };
         engine.handle(&viewer_host, HostEvent::LevelLoaded(context));
@@ -2372,7 +2453,8 @@ impl Meridian {
     /// and whether to open the settings.
     fn on_seedatlas(&self, host: &dyn Host, args: &str) -> (String, bool) {
         self.with_state(host, |s| {
-            let context = s.engine.context().map(|c| meridian_core::seedatlas_state::SeedContext::from_source(&c.source));
+            let map = s.engine.map().to_owned();
+            let context = s.engine.context().map(|c| meridian_core::seedatlas_state::SeedContext::of_map(&c.source, &map));
             let detected = s.detected_seed();
             let mut settings = s.config.current().seed_atlas.clone();
             let outcome = {
@@ -2467,7 +2549,8 @@ impl State {
     /// them to the Seed Atlas service.
     fn update_seeds(&mut self) {
         let sa = self.config.current().seed_atlas.clone();
-        let context = self.engine.context().map(|c| meridian_core::seedatlas_state::SeedContext::from_source(&c.source));
+        let map = self.engine.map().to_owned();
+        let context = self.engine.context().map(|c| meridian_core::seedatlas_state::SeedContext::of_map(&c.source, &map));
         if let Some(c) = &context
             && self.seed_key.as_deref() != Some(c.key.as_str())
         {
