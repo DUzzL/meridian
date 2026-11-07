@@ -314,8 +314,9 @@ impl MapEngine {
     /// Applies new settings; redraws or rereads what they affect.
     pub fn set_settings(&mut self, settings: Settings) {
         let old = std::mem::replace(&mut self.settings, settings);
-        if old.world_map.terrain.biome_colors_in_vanilla
-            != self.settings.world_map.terrain.biome_colors_in_vanilla
+        let (was, now) = (&old.world_map.terrain, &self.settings.world_map.terrain);
+        if was.biome_colors_in_vanilla != now.biome_colors_in_vanilla
+            || was.biome_blending != now.biome_blending
         {
             // Tiles hold resolved colours: read loaded chunks again.
             self.pending_reads
@@ -887,7 +888,8 @@ impl MapEngine {
             self.in_flight.remove(&snapshot.pos);
             self.failures.remove(&snapshot.pos);
             let chunk = snapshot.pos;
-            let prepared = self.colors.prepare(host, snapshot, vanilla_biomes);
+            let mut prepared = self.colors.prepare(host, snapshot, vanilla_biomes);
+            prepared.biome_blending = self.settings.world_map.terrain.biome_blending;
             self.ensure_region(RegionPos::of_chunk(chunk));
             self.workers.submit(move || WorkResult::TileBuilt {
                 generation,
@@ -926,10 +928,13 @@ impl MapEngine {
         }
 
         // 3. Redraw, nearest regions first.
-        let shading = Shading::new(&self.settings.world_map.terrain, host.day_time()).for_cave(
-            self.layer.is_some(),
-            self.settings.minimap.cave.legible_caves,
-        );
+        let cave = &self.settings.minimap.cave;
+        let shading = Shading::new(&self.settings.world_map.terrain, host.day_time())
+            .for_cave(self.layer.is_some(), cave.legible_caves)
+            .with_floor(
+                self.layer
+                    .map(|ceiling| ceiling - cave.depth.min(4096) as i32),
+            );
         if self.shading.is_none_or(|s| s.differs(&shading)) {
             self.shading = Some(shading);
             for r in self.regions.values_mut() {

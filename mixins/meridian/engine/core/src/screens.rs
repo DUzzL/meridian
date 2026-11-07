@@ -281,6 +281,17 @@ impl Screen {
         }
     }
 
+    /// A drag that changes settings is under way (a slider, the minimap
+    /// being moved): the host applies its changes at once but writes the
+    /// settings file only once it ends.
+    pub fn dragging(&self) -> bool {
+        match self {
+            Screen::Position(s) => s.grab.is_some(),
+            Screen::Settings(s) => s.dragging.is_some(),
+            _ => false,
+        }
+    }
+
     /// The left button went up.
     pub fn release(&mut self) {
         match self {
@@ -931,6 +942,7 @@ pub enum Group {
     Waypoints,
     SeedAtlas,
     WorldMap,
+    Performance,
 }
 
 
@@ -1063,7 +1075,6 @@ pub fn options() -> Vec<Opt> {
         toggle!("Center When Enlarged", View, minimap.enlarged_centered),
         toggle!("Entity Radar", Radar, radar.enabled),
         toggle!("Hide Invisible Entities", Radar, radar.hide_invisible),
-        toggle!("Smooth Entity Dots", Radar, radar.smooth),
         toggle!("Mob Faces", Radar, radar.faces),
         toggle!("Faces While Tab Held", Radar, radar.faces_while_held),
         Opt {
@@ -1176,6 +1187,15 @@ pub fn options() -> Vec<Opt> {
         },
         toggle!("Legible Cave Maps", Misc, minimap.cave.legible_caves),
         Opt {
+            label: "Cave Mode Depth",
+            group: Misc,
+            value: |s| format!("{}", s.minimap.cave.depth),
+            step: |s, b| {
+                s.minimap.cave.depth =
+                    cycle(&[10u32, 20, 30, 50, 80, 128, 256], s.minimap.cave.depth, b)
+            },
+        },
+        Opt {
             label: "Cave Mode Extra Zoom",
             group: Misc,
             value: |s| format!("{}", s.minimap.cave.extra_zoom),
@@ -1197,7 +1217,6 @@ pub fn options() -> Vec<Opt> {
                     b,
                 );
                 s.world_map.terrain.block_colors = next;
-                s.minimap.terrain.block_colors = next;
             },
         },
         Opt {
@@ -1212,7 +1231,6 @@ pub fn options() -> Vec<Opt> {
                     b,
                 );
                 s.world_map.terrain.slopes = next;
-                s.minimap.terrain.slopes = next;
             },
         },
         toggle!("Terrain Depth", BlockMap, world_map.terrain.terrain_depth),
@@ -1228,49 +1246,34 @@ pub fn options() -> Vec<Opt> {
             BlockMap,
             world_map.terrain.block_transparency
         ),
-        Opt {
-            label: "Display Flowers",
-            group: BlockMap,
-            value: |s| on_off(s.world_map.terrain.show_flowers),
-            step: |s, _| {
-                let on = !s.world_map.terrain.show_flowers;
-                s.world_map.terrain.show_flowers = on;
-                s.minimap.terrain.show_flowers = on;
-            },
-        },
-        Opt {
-            label: "Display Redstone",
-            group: BlockMap,
-            value: |s| on_off(s.world_map.terrain.show_redstone),
-            step: |s, _| {
-                let on = !s.world_map.terrain.show_redstone;
-                s.world_map.terrain.show_redstone = on;
-                s.minimap.terrain.show_redstone = on;
-            },
-        },
-        Opt {
-            label: "Display Stained Glass",
-            group: BlockMap,
-            value: |s| on_off(s.world_map.terrain.stained_glass),
-            step: |s, _| {
-                let on = !s.world_map.terrain.stained_glass;
-                s.world_map.terrain.stained_glass = on;
-                s.minimap.terrain.stained_glass = on;
-            },
-        },
-        Opt {
-            label: "Adjust Height For Short Blocks",
-            group: BlockMap,
-            value: |s| on_off(s.world_map.terrain.adjust_short_blocks),
-            step: |s, _| {
-                let on = !s.world_map.terrain.adjust_short_blocks;
-                s.world_map.terrain.adjust_short_blocks = on;
-                s.minimap.terrain.adjust_short_blocks = on;
-            },
-        },
+        toggle!("Display Flowers", BlockMap, world_map.terrain.show_flowers),
+        toggle!(
+            "Display Redstone",
+            BlockMap,
+            world_map.terrain.show_redstone
+        ),
+        toggle!(
+            "Display Stained Glass",
+            BlockMap,
+            world_map.terrain.stained_glass
+        ),
+        toggle!(
+            "Adjust Height For Short Blocks",
+            BlockMap,
+            world_map.terrain.adjust_short_blocks
+        ),
         toggle!("Chunk Grid", Overlay, minimap.chunk_grid),
         toggle!("Slime Chunks", Overlay, minimap.slime_chunks),
         toggle!("Light Overlay", Overlay, minimap.light_overlay),
+        Opt {
+            label: "Light Overlay Min",
+            group: Overlay,
+            value: |s| format!("{}", s.minimap.light_overlay_range[0]),
+            step: |s, b| {
+                let v = s.minimap.light_overlay_range[0] as i32 + if b { -1 } else { 1 };
+                s.minimap.light_overlay_range[0] = v.rem_euclid(16) as u8;
+            },
+        },
         Opt {
             label: "Light Overlay Max",
             group: Overlay,
@@ -1312,6 +1315,7 @@ pub fn options() -> Vec<Opt> {
         },
     ];
     all.extend(world_map_options());
+    all.extend(performance_options());
     all.extend(seed_atlas_options());
     all
 }
@@ -1361,11 +1365,57 @@ fn world_map_options() -> Vec<Opt> {
                 );
             },
         },
+    ]
+}
+
+/// Map work budgets.
+fn performance_options() -> Vec<Opt> {
+    use Group::Performance;
+    vec![
         Opt {
-            label: "Map Lighting",
-            group: WorldMap,
-            value: |s| on_off(s.world_map.terrain.lighting),
-            step: |s, _| s.world_map.terrain.lighting = !s.world_map.terrain.lighting,
+            label: "Map Frame Budget",
+            group: Performance,
+            value: |s| format!("{:.1} ms", s.performance.frame_budget_us as f32 / 1000.0),
+            step: |s, b| {
+                s.performance.frame_budget_us = cycle(
+                    &[500u32, 1000, 2000, 4000, 8000],
+                    s.performance.frame_budget_us,
+                    b,
+                )
+            },
+        },
+        Opt {
+            label: "Chunk Reads Per Tick",
+            group: Performance,
+            value: |s| format!("{}", s.performance.chunk_reads_per_tick),
+            step: |s, b| {
+                s.performance.chunk_reads_per_tick = cycle(
+                    &[4usize, 8, 16, 32, 64],
+                    s.performance.chunk_reads_per_tick,
+                    b,
+                )
+            },
+        },
+        Opt {
+            label: "Region Save Interval",
+            group: Performance,
+            value: |s| format!("{}s", s.performance.save_interval_s),
+            step: |s, b| {
+                s.performance.save_interval_s =
+                    cycle(&[10u32, 30, 60, 120, 300], s.performance.save_interval_s, b)
+            },
+        },
+        Opt {
+            label: "Map Worker Threads",
+            group: Performance,
+            value: |s| match s.performance.worker_threads {
+                0 => "Auto".into(),
+                n => format!("{n}"),
+            },
+            step: |s, b| {
+                s.performance.worker_threads =
+                    cycle(&[0usize, 1, 2, 3, 4, 6, 8], s.performance.worker_threads, b)
+            },
         },
     ]
 }
@@ -1980,8 +2030,10 @@ mod tests {
         sc.click([20.0, 20.0], false, &mut e);
         sc.drag([60.0, 30.0], &mut e);
         assert!(e.settings_changed);
+        assert!(sc.dragging(), "saved only once the drag ends");
         assert_eq!(e.settings.minimap.offset, [40, 10]);
         sc.release();
+        assert!(!sc.dragging());
         e.settings_changed = false;
         sc.drag([200.0, 200.0], &mut e);
         assert!(!e.settings_changed, "no drag after release");

@@ -93,6 +93,8 @@ pub struct PreparedChunk {
     pub biomes: Vec<BiomeAppearance>,
     /// Use biome tints in the vanilla style too.
     pub biome_colors_in_vanilla: bool,
+    /// Tints blended over neighbouring columns' biomes (see [`blend_biomes`]).
+    pub biome_blending: bool,
 }
 
 impl PreparedChunk {
@@ -162,6 +164,7 @@ impl ColorTable {
             blocks,
             biomes,
             biome_colors_in_vanilla,
+            biome_blending: true,
         }
     }
 }
@@ -184,6 +187,7 @@ pub fn build_tile(chunk: &PreparedChunk) -> ChunkTile {
     };
     let block = |i: u16| chunk.blocks.get(i as usize).copied().unwrap_or(air);
     let no_biome = BiomeAppearance::default();
+    let blended = chunk.biome_blending.then(|| blend_biomes(chunk)).flatten();
     for (i, col) in chunk
         .snapshot
         .columns
@@ -191,7 +195,10 @@ pub fn build_tile(chunk: &PreparedChunk) -> ChunkTile {
         .take(CHUNK_COLUMNS)
         .enumerate()
     {
-        let biome = chunk.biomes.get(col.biome as usize).unwrap_or(&no_biome);
+        let biome = match &blended {
+            Some(b) => &b[i],
+            None => chunk.biomes.get(col.biome as usize).unwrap_or(&no_biome),
+        };
         let ground = block(col.block);
         let out = &mut tile.columns[i];
         out.height = col.height;
@@ -223,6 +230,63 @@ pub fn build_tile(chunk: &PreparedChunk) -> ChunkTile {
         }
     }
     tile
+}
+
+/// Columns either way whose biome tints a column blends (the game's
+/// default biome blend, 5 × 5).
+const BLEND_RADIUS: usize = 2;
+
+/// Each column's biome tints averaged over the columns within
+/// [`BLEND_RADIUS`] of it, so tints change gradually at biome borders. Only
+/// the chunk's own columns count (a snapshot knows no neighbours), so a
+/// border on a chunk edge stays sharp. `None` when the chunk has one biome.
+pub fn blend_biomes(chunk: &PreparedChunk) -> Option<Box<[BiomeAppearance; CHUNK_COLUMNS]>> {
+    let cols = &chunk.snapshot.columns;
+    if cols.len() < CHUNK_COLUMNS || cols.iter().all(|c| c.biome == cols[0].biome) {
+        return None;
+    }
+    let no_biome = BiomeAppearance::default();
+    let look = |x: usize, z: usize| {
+        chunk
+            .biomes
+            .get(cols[z * 16 + x].biome as usize)
+            .unwrap_or(&no_biome)
+    };
+    let mut out = Box::new([BiomeAppearance::default(); CHUNK_COLUMNS]);
+    for z in 0..16usize {
+        for x in 0..16usize {
+            let mut sum = [[0u32; 3]; 4];
+            let mut n = 0;
+            for nz in z.saturating_sub(BLEND_RADIUS)..=(z + BLEND_RADIUS).min(15) {
+                for nx in x.saturating_sub(BLEND_RADIUS)..=(x + BLEND_RADIUS).min(15) {
+                    let b = look(nx, nz);
+                    for (s, c) in sum
+                        .iter_mut()
+                        .zip([b.grass, b.foliage, b.dry_foliage, b.water])
+                    {
+                        for (k, ch) in s.iter_mut().zip(color::channels(c)) {
+                            *k += ch as u32;
+                        }
+                    }
+                    n += 1;
+                }
+            }
+            let mean = |s: [u32; 3]| {
+                color::rgb(
+                    ((s[0] + n / 2) / n) as u8,
+                    ((s[1] + n / 2) / n) as u8,
+                    ((s[2] + n / 2) / n) as u8,
+                )
+            };
+            out[z * 16 + x] = BiomeAppearance {
+                grass: mean(sum[0]),
+                foliage: mean(sum[1]),
+                dry_foliage: mean(sum[2]),
+                water: mean(sum[3]),
+            };
+        }
+    }
+    Some(out)
 }
 
 #[cfg(test)]
@@ -388,5 +452,46 @@ pub(crate) mod tests {
         assert!(tile.columns[0].empty);
         assert!(!tile.columns[1].empty);
         assert!(tile.columns[200].empty, "missing columns stay empty");
+    }
+
+    #[test]
+    fn biome_blending_softens_borders() {
+        let host = FlatHost::default();
+        let mut snap = flat_chunk(ChunkPos::new(0, 0));
+        // Plains west of x = 8, a swamp east of it.
+        snap.biomes = vec!["minecraft:plains".into(), "minecraft:swamp".into()];
+        for (i, c) in snap.columns.iter_mut().enumerate() {
+            c.biome = u16::from(i % 16 >= 8);
+        }
+        let mut prepared = ColorTable::default().prepare(&host, snap, false);
+        prepared.biomes[1].grass = 0x6A7039;
+        let grass = |tile: &ChunkTile, x: usize| tile.column(x, 4).accurate;
+        prepared.biome_blending = false;
+        let sharp = build_tile(&prepared);
+        prepared.biome_blending = true;
+        let soft = build_tile(&prepared);
+        let pure = |b: u32| color::channels(color::multiply(0x939393, b));
+        assert_eq!(grass(&sharp, 7), pure(0x91BD59));
+        assert_eq!(grass(&sharp, 8), pure(0x6A7039));
+        // Two columns from the border nothing changes; next to it the tints mix.
+        assert_eq!(grass(&soft, 5), grass(&sharp, 5));
+        assert_eq!(grass(&soft, 10), grass(&sharp, 10));
+        for x in 6..=9 {
+            assert_ne!(grass(&soft, x), grass(&sharp, x), "column {x}");
+        }
+        let green = |c: [u8; 3]| c[1];
+        assert!(
+            green(grass(&soft, 6)) > green(grass(&soft, 7))
+                && green(grass(&soft, 7)) > green(grass(&soft, 8))
+        );
+        // One biome: nothing to blend.
+        assert!(
+            blend_biomes(&ColorTable::default().prepare(
+                &host,
+                flat_chunk(ChunkPos::new(0, 0)),
+                false
+            ))
+            .is_none()
+        );
     }
 }

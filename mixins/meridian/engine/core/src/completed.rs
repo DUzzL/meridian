@@ -197,6 +197,18 @@ impl CompletedStore {
             .count()
     }
 
+    /// Completed structures of a world or server: all, and per kind, in
+    /// one pass (the settings screen shows both every frame).
+    pub fn counts(&self, world: &str) -> (usize, std::collections::BTreeMap<String, usize>) {
+        let mut by_kind = std::collections::BTreeMap::new();
+        let mut all = 0;
+        for k in self.order.iter().filter(|k| k.world == world) {
+            all += 1;
+            *by_kind.entry(k.kind.clone()).or_insert(0) += 1;
+        }
+        (all, by_kind)
+    }
+
     /// Marks every completed structure of a world or server, of one kind or
     /// all, as not completed; how many were. The UI asks first, see
     /// [`CompletedStore::reset_prompt`].
@@ -441,6 +453,12 @@ mod tests {
         assert_eq!(again.all(), s.all());
         assert_eq!(again.count("sp-a", None), 2);
         assert_eq!(again.count("sp-a", Some("village")), 1);
+        let (all, by_kind) = again.counts("sp-a");
+        assert_eq!(all, 2);
+        assert_eq!(
+            by_kind,
+            [("igloo".to_owned(), 1), ("village".to_owned(), 1)].into()
+        );
         assert!(again.is_completed(&key("mp-x", "village", -50, 60)));
         // An unmark persists too.
         let mut again = again;
