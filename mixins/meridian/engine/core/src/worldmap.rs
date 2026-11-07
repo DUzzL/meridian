@@ -453,7 +453,7 @@ impl WorldMap {
         }
         // Bottom: the zoom.
         if o.show_zoom {
-            let text = format!("{:.1}x", self.zoom);
+            let text = zoom_label(self.zoom);
             let y = gui[1] - 8.0 * ts - 4.0 * u;
             ops.push(plate(gui[0] / 2.0, y, &text, ts));
             ops.push(DrawOp::Text {
@@ -718,6 +718,17 @@ fn compass(gui: [f32; 2], u: f32) -> Vec<DrawOp> {
     ops
 }
 
+/// The zoom as the map shows it: "3.0x", and enough digits below 0.1x
+/// (unlimited zoom out) not to read "0.0x".
+pub fn zoom_label(zoom: f64) -> String {
+    if zoom >= 0.095 {
+        format!("{zoom:.1}x")
+    } else {
+        let digits = (-zoom.log10()).ceil() as usize + 1;
+        format!("{zoom:.digits$}x")
+    }
+}
+
 /// The controls the help button lists.
 pub const CONTROLS: &[&str] = &[
     "Controls",
@@ -857,6 +868,14 @@ mod tests {
         m.press(p);
         m.release(p, GUI, 1.0);
         assert!(m.zoom > DEFAULT_ZOOM);
+    }
+
+    #[test]
+    fn zoom_labels() {
+        assert_eq!(zoom_label(3.0), "3.0x");
+        assert_eq!(zoom_label(0.1), "0.1x");
+        assert_eq!(zoom_label(0.0625), "0.062x");
+        assert_eq!(zoom_label(1.0 / 64.0), "0.016x");
     }
 
     #[test]

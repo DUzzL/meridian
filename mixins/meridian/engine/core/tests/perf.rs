@@ -72,7 +72,11 @@ fn large_map() {
     assert_eq!(decoded.tile_count(), REGION_CHUNK_COUNT);
     let t = Instant::now();
     let overview = meridian_core::engine::overview_pixels(region.pixels());
-    println!("overview of one region: {:.2} ms, {} KiB", ms(t), overview.len() * 4 / 1024);
+    println!(
+        "overview of one region: {:.2} ms, {} KiB",
+        ms(t),
+        overview.len() * 4 / 1024
+    );
     println!(
         "one region (1024 chunks): build {build:.1} ms, render {render:.1} ms, encode {encode:.1} ms, decode {decode:.1} ms, file {} KiB",
         bytes.len() / 1024

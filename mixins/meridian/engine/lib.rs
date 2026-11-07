@@ -977,8 +977,10 @@ impl Hooks for Meridian {
     }
 
     fn menu_background(&self, host: &dyn Host, event: &mut MenuBackgroundEvent<'_>) {
-        // Our screens blur the world behind them as the game's menus do.
-        if host.mod_screen() == Some(MOD_ID) && event.radius.is_none() && !self.map_open(host) {
+        // Our screens blur the world behind them as the game's menus do;
+        // the position editor keeps the minimap it moves sharp.
+        let positioning = || self.with_state(host, |s| matches!(s.screen, Some(Screen::Position(_))));
+        if host.mod_screen() == Some(MOD_ID) && event.radius.is_none() && !self.map_open(host) && !positioning() {
             let blur = host.client_state().map_or(5.0, |c| c.menu_blur);
             *event.radius = Some(blur.max(1.0));
         }
@@ -2104,6 +2106,7 @@ impl Meridian {
                     && !inside(layer_button, mouse)
                     && !inside(settings_button, mouse)
                     && !inside(map_settings_button, mouse)
+                    && meridian_core::worldmap::button_at(mouse, gui, u).is_none()
                     && s.map.menu.is_none()
                 {
                     let y = sa::sample_y(&sa_settings, dim);

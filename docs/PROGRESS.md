@@ -359,11 +359,27 @@
 
 **Build und Tests**:
 
-- 172 Kern-Tests, 2 Host-Tests, 8 Engine-Tests und der Paritätstest grün;
+- 173 Kern-Tests, 2 Host-Tests, 8 Engine-Tests und der Paritätstest grün;
 - Clippy sauber, Adapter-Check grün;
-- Launcher-Build `native-66f3981-7b5f76e57779`.
+- Launcher-Build `native-66f3981-8a035d6c07f1`.
 
-**Noch nicht im Spiel geprüft**: alles aus diesem Zwischenstand. Der Zugriff auf das Spielfenster wurde in dieser Sitzung nicht freigegeben.
+**Im Spiel geprüft** (über `horizon-ctl`, Testwelt MeridianTest):
+
+- `]` öffnet „World Map Settings“.
+- Öffnungsanimation: Der erste Frame zeigt 2.7x, danach 3.0x.
+- Hilfe „?“ und unbegrenzter Zoom heraus bis 0.016x: Die Seed-Atlas-Ebene ist nach rund 10 s gefüllt.
+- F3 blendet die Minimap aus.
+- Profile: anlegen, umbenennen, löschen; die Datei folgt jeweils.
+- Positionseditor: Ziehen rastet unten rechts ein, „Reset“ setzt zurück.
+- Schleimchunks erscheinen grün auf der Minimap.
+
+Dabei behoben:
+
+- Zoomanzeige „0.0x“ bei starkem Herauszoomen.
+- Der Biom-Tooltip überdeckte das Hilfefenster.
+- Die Minimap im Positionseditor war unscharf, weil der Menühintergrund sie weichzeichnete.
+
+Nicht eigens geprüft: Spieler als Punkt, Teleport zu Spielern (braucht einen zweiten Spieler), Boote und Loren im Radar, Blumen und Redstone ausblenden.
 
 **Offen**
 
