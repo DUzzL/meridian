@@ -314,8 +314,62 @@
   - Suche „Abandoned Camp“ (Karte springt hin, temporärer Wegpunkt).
 - **Build und Tests:** 164 Kern-Tests, 2 Host-Tests, 8 Engine-Tests und der Paritätstest (alle Versionen) grün; Clippy sauber, Adapter-Check grün.
 
+**Nachtrag Icons und Tempo**: Die Marker-Icons kommen wie in Fabric 2.0 aus den Minecraft-Texturen, ergänzt um die aktualisierten eigenen Icons von Seed Atlas. Die Kacheln haben jetzt 128 Proben: erst eine schnelle Vorschau, dann die Verfeinerung. Im Spiel ist die Karte nach rund 1,5 s gefüllt.
+
 **Offen**
 
-- Die Marker-Icons aus Minecraft-Texturen (Fabric 2.0 nutzt Mob-Köpfe, Truhe, weinenden Obsidian): Meridian zeigt weiter die Seed-Atlas-Icons.
 - Hintergrund-Prefetch über die Sicht hinaus.
 - Ein Vergleich des Gelände-Looks Pixel für Pixel mit der Fabric-Version steht aus.
+
+## Phase 6: Feinschliff (Zwischenstand 1)
+
+**Abgleich mit `FEATURES.md` und `KEYBINDS.md`.** Jede Einstellung und jede Taste wurde im Code geprüft. Nachgezogen:
+
+- Tasten:
+  - `]` öffnet die neue Seite „World Map Settings“ (vorher ohne Wirkung).
+  - Chunkgitter, Schleimchunks und Licht-Overlay lassen sich jetzt per Taste schalten.
+- Weltkarte:
+  - Unbegrenzter Zoom (hinein und heraus) und eine Öffnungsanimation (WM-01).
+  - Spieler als Pfeil oder als Punkt.
+  - Knopf „?“ mit der Steuerung (WM-19).
+  - „Teleport To <Spieler>“ im Rechtsklickmenü.
+  - Max. geladene Regionen einstellbar.
+- Minimap:
+  - Schleimchunks (OV-02, Seed aus Seed Atlas).
+  - Ausblenden unter F3 (die Bridge meldet den F3-Zustand, Bridge-Version 5).
+  - Blumen und Redstone lassen sich ausblenden (MM-12, gilt für neu erfasste Chunks).
+- Einstellungen:
+  - Profile: wechseln, anlegen, umbenennen, löschen (SET-02, D-028).
+  - Positionseditor (MM-04).
+- Radar: Boote und Loren als „Sonstige“.
+
+**Performance** (`core/tests/perf.rs`, synthetische Karte aus 20 × 20 voll erkundeten Regionen, 10.240 × 10.240 Blöcke, M-Serie, Release):
+
+| Messung | Ergebnis |
+|---|---|
+| Region zeichnen (1024 Chunks) | 3–6 ms |
+| Region kodieren / dekodieren | 68 ms / 5 ms (im Hintergrund) |
+| Datei einer voll erkundeten Region | 2,1 MiB (Zufallsdaten, echtes Gelände ist kleiner) |
+| 300 Regionen laden und zeichnen | 2,0 s (6,7 ms je Region, auf Worker-Threads) |
+| PNG-Export der ganzen Karte | 2,8 s (5120 × 5120 px) |
+| Übersichtsbild einer Region | 0,07 ms, 64 KiB |
+
+- Gefunden: Herausgezoomt hielt die Karte bis zu 225 Regionen ganz im Speicher, über 1 GiB.
+- Lösung: Übersichtsbilder (D-027). Herausgezoomt sind jetzt höchstens 25 Regionen ganz geladen (~125 MiB), dazu bis zu 256 MiB Übersichten.
+
+**Build und Tests**:
+
+- 172 Kern-Tests, 2 Host-Tests, 8 Engine-Tests und der Paritätstest grün;
+- Clippy sauber, Adapter-Check grün;
+- Launcher-Build `native-66f3981-da48b31c039d`.
+
+**Noch nicht im Spiel geprüft**: alles aus diesem Zwischenstand. Der Zugriff auf das Spielfenster wurde in dieser Sitzung nicht freigegeben.
+
+**Offen**
+
+- Höhlenmodus: Extra-Zoom und „lesbare Höhlen“ als Schalter.
+- Gefärbtes Glas, Höhenanpassung kurzer Blöcke.
+- Unterwelten und Kartenauswahl im Mehrspieler (CTX-02 bis CTX-05), Schnellbestätigung.
+- Radar: Symbole und Köpfe statt Rauten, Namen, eigene Kategorien.
+- Wegpunkte: Import und Export (IO-01, IO-02).
+- Server-Regeln (SRV-*), Claims (OV-06).

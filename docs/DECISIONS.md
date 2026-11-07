@@ -274,3 +274,20 @@ Der Port folgt jetzt DUzzL/Seed-Atlas main (Engine, identisch mit fc2c628) und D
 - die neuen Funktionen für Geländehöhen und den Nether-Boden (mit und ohne Carving-Maske).
 
 Fixtures liegen pro Version in `seedatlas/tests/fixtures/<version>.txt.gz`. Sie stammen aus der echten Glue-Schicht (`tools/seedatlas-fixtures/build.sh`). `tests/parity.rs` prüft jede Zeile aller 38 Versionen, alle stimmen exakt überein. Die Arbeit lief in getrennten Teilaufgaben (Layer, Klima, Gelände, Strukturpositionen, Strukturprüfungen). Die Regeln dafür stehen in `docs/SEEDATLAS_PORT.md`.
+
+## D-027: Übersichtsbilder für die herausgezoomte Weltkarte
+
+Eine voll erkundete Region braucht im Speicher rund 5 MiB (1024 Kacheln mit je 256 Spalten plus 512 × 512 Pixel). Herausgezoomt hielt die Karte bisher bis zu 15 × 15 Regionen ganz, bei großen Karten also über 1 GiB.
+
+- Ist eine Region auf dem Bildschirm kleiner als 96 GUI-Pixel, bleiben nur die 5 × 5 Regionen um die Kartenmitte ganz im Speicher.
+- Alle anderen zeichnet die Karte aus Übersichtsbildern: 128 × 128 Pixel (64 KiB), der Mittelwert aus je 4 × 4 Pixeln.
+  - Sie entstehen, wenn eine Region aus dem Speicher fällt.
+  - Für sichtbare Regionen ohne Bild lädt die Engine bis zu vier Regionsdateien gleichzeitig, zeichnet sie, behält das Bild und gibt die Region wieder frei.
+  - Höchstens 4096 Bilder (256 MiB) bleiben, die ältesten fallen zuerst.
+- Ändert sich die Schattierung (Tageszeit, Stil), gelten die Bilder als veraltet. Sie werden nach und nach erneuert und bis dahin weiter gezeigt.
+
+## D-028: Profile und Positionseditor
+
+- Profile: Die Hauptseite der Einstellungen wechselt das Profil (Klick vor, Rechtsklick zurück) und legt neue Profile an („New Profile“, eine Kopie des aktuellen). Ein Klick auf „ID“ benennt das Profil um, „Delete Profile“ löscht es, solange es nicht das letzte ist.
+- Positionseditor: „Change Position“ zeigt die Minimap über dem Screen. Man zieht sie mit der Maus. Sie rastet an der nächsten Ecke ein und behält ihren Abstand dazu (`corner` + `offset`), auch bei anderer Fenstergröße.
+- Die Taste `]` und der Knopf „M“ auf der Karte öffnen die eigene Seite „World Map Settings“. „Back“ schließt sie dort direkt, wie bei der Seed-Atlas-Seite.

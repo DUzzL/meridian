@@ -15,6 +15,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use meridian_host::{ChunkPos, HostEvent, MapHost, ReadMode, WorldContext};
@@ -22,7 +23,7 @@ use meridian_host::{ChunkPos, HostEvent, MapHost, ReadMode, WorldContext};
 use crate::codec::{self, RegionData};
 use crate::color::Shading;
 use crate::config::Settings;
-use crate::geom::{REGION_CHUNKS, RegionPos};
+use crate::geom::{REGION_BLOCKS, REGION_CHUNKS, RegionPos};
 use crate::persist::{self, MapPaths};
 use crate::region::{Region, RegionEdges};
 use crate::tile::{ChunkTile, ColorTable, build_tile};
@@ -33,6 +34,14 @@ pub const DEFAULT_MAP: &str = "default";
 /// Explored chunks kept in memory at most (a full region is 1024 and takes
 /// about 5 MB with its pixels): about 500 MB, whatever the region limit.
 pub const MAX_CACHED_CHUNKS: usize = 96 * 1024;
+/// Side of a region's overview image (a quarter of its 512 pixels).
+pub const OVERVIEW_SIDE: usize = 128;
+/// Overviews kept (64 KiB each): far more regions than fit in memory whole.
+pub const MAX_OVERVIEWS: usize = 4096;
+/// Regions loaded at once only to make their overview.
+const OVERVIEW_LOADS: usize = 4;
+/// Region files looked up per call when asking for overviews.
+const OVERVIEW_PROBES: usize = 32;
 /// Chunks redrawn per batch between deadline checks.
 const RENDER_BATCH: usize = 32;
 /// Ticks a chunk request may stay unanswered before it is asked again.
@@ -148,6 +157,56 @@ pub struct MapEngine {
     /// The cache clock when the last tick ended: regions used since are
     /// shown now and are not evicted.
     frame_start: u64,
+    /// Small images of regions not held whole (the zoomed-out world map).
+    overviews: HashMap<RegionPos, Overview>,
+    /// Regions loaded only to make their overview, dropped once drawn,
+    /// with their cache clock when they arrived.
+    transient: HashMap<RegionPos, Option<u64>>,
+    /// Regions without a file (nothing to make an overview of).
+    no_file: HashSet<RegionPos>,
+    overview_clock: u64,
+}
+
+/// A region's map at a quarter of the resolution.
+#[derive(Clone, Debug)]
+pub struct Overview {
+    /// `OVERVIEW_SIDE`² ARGB pixels.
+    pub pixels: Arc<Vec<u32>>,
+    /// Changes whenever the image does.
+    pub revision: u64,
+    shading: Shading,
+    last_used: u64,
+}
+
+/// A quarter-size copy of a region's pixels: each pixel the mean of four
+/// by four, transparent where most of them are unexplored.
+pub fn overview_pixels(pixels: &[u32]) -> Vec<u32> {
+    let side = REGION_BLOCKS as usize;
+    let k = side / OVERVIEW_SIDE;
+    let mut out = vec![0u32; OVERVIEW_SIDE * OVERVIEW_SIDE];
+    if pixels.len() != side * side {
+        return out;
+    }
+    for oy in 0..OVERVIEW_SIDE {
+        for ox in 0..OVERVIEW_SIDE {
+            let (mut r, mut g, mut b, mut n) = (0u32, 0u32, 0u32, 0u32);
+            for dy in 0..k {
+                let row = (oy * k + dy) * side + ox * k;
+                for &p in &pixels[row..row + k] {
+                    if p >> 24 != 0 {
+                        r += (p >> 16) & 0xFF;
+                        g += (p >> 8) & 0xFF;
+                        b += p & 0xFF;
+                        n += 1;
+                    }
+                }
+            }
+            if n * 2 >= (k * k) as u32 {
+                out[oy * OVERVIEW_SIDE + ox] = 0xFF00_0000 | (r / n) << 16 | (g / n) << 8 | (b / n);
+            }
+        }
+    }
+    out
 }
 
 impl MapEngine {
@@ -174,6 +233,10 @@ impl MapEngine {
             workers,
             last_save: Instant::now(),
             save_errors: 0,
+            overviews: HashMap::new(),
+            transient: HashMap::new(),
+            no_file: HashSet::new(),
+            overview_clock: 0,
         }
     }
 
@@ -245,6 +308,135 @@ impl MapEngine {
 
     pub fn loaded_region_count(&self) -> usize {
         self.regions.len()
+    }
+
+    /// A region's overview, when it isn't held whole.
+    pub fn overview(&self, pos: RegionPos) -> Option<&Overview> {
+        self.overviews.get(&pos)
+    }
+
+    pub fn overview_count(&self) -> usize {
+        self.overviews.len()
+    }
+
+    /// Asks for overviews of the regions in a rectangle (inclusive), outside
+    /// `near` (which [`MapEngine::request_area`] keeps whole): regions with a
+    /// file and no current overview are loaded a few at a time, drawn,
+    /// reduced and dropped again.
+    pub fn request_overviews(
+        &mut self,
+        min: RegionPos,
+        max: RegionPos,
+        near: (RegionPos, RegionPos),
+    ) {
+        let Some(active) = &self.active else { return };
+        let Some(shading) = self.shading else { return };
+        self.overview_clock += 1;
+        let (center_x, center_z) = ((min.x + max.x) / 2, (min.z + max.z) / 2);
+        let mut wanted = Vec::new();
+        for x in min.x..=max.x {
+            for z in min.z..=max.z {
+                let pos = RegionPos::new(x, z);
+                if (near.0.x..=near.1.x).contains(&x) && (near.0.z..=near.1.z).contains(&z) {
+                    continue;
+                }
+                if let Some(o) = self.overviews.get_mut(&pos) {
+                    o.last_used = self.overview_clock;
+                    if !o.shading.differs(&shading) {
+                        continue;
+                    }
+                }
+                if self.regions.contains_key(&pos)
+                    || self.loading.contains(&pos)
+                    || self.no_file.contains(&pos)
+                {
+                    continue;
+                }
+                wanted.push(pos);
+            }
+        }
+        // Nearest the centre first; missing overviews before stale ones.
+        wanted.sort_by_key(|p| {
+            (
+                self.overviews.contains_key(p),
+                (p.x - center_x).abs().max((p.z - center_z).abs()),
+            )
+        });
+        let paths = active.paths.clone();
+        for pos in wanted.into_iter().take(OVERVIEW_PROBES) {
+            if self.transient.len() >= OVERVIEW_LOADS {
+                break;
+            }
+            if !paths.region_file(pos).exists() {
+                self.no_file.insert(pos);
+                continue;
+            }
+            self.transient.insert(pos, None);
+            self.ensure_region(pos);
+        }
+    }
+
+    /// Makes or refreshes a region's overview from its drawn pixels.
+    fn keep_overview(&mut self, pos: RegionPos) {
+        let (Some(region), Some(shading)) = (self.regions.get(&pos), self.shading) else {
+            return;
+        };
+        if region.has_dirty() || region.pixels().is_empty() || region.tile_count() == 0 {
+            return;
+        }
+        self.overview_clock += 1;
+        let pixels = Arc::new(overview_pixels(region.pixels()));
+        self.overviews.insert(
+            pos,
+            // Apart from region revisions, which share the GPU's texture keys.
+            Overview {
+                pixels,
+                revision: 1 << 40 | self.overview_clock,
+                shading,
+                last_used: self.overview_clock,
+            },
+        );
+        if self.overviews.len() > MAX_OVERVIEWS {
+            let mut by_age: Vec<(u64, RegionPos)> = self
+                .overviews
+                .iter()
+                .map(|(p, o)| (o.last_used, *p))
+                .collect();
+            by_age.sort();
+            for (_, p) in by_age
+                .into_iter()
+                .take(self.overviews.len() - MAX_OVERVIEWS)
+            {
+                self.overviews.remove(&p);
+            }
+        }
+    }
+
+    /// Transient regions that are drawn become overviews and leave.
+    fn settle_transient(&mut self) {
+        let done: Vec<(RegionPos, Option<u64>)> = self
+            .transient
+            .iter()
+            .filter(|(p, _)| self.regions.get(p).is_some_and(|r| !r.has_dirty()))
+            .map(|(p, c)| (*p, *c))
+            .collect();
+        for (pos, arrived) in done {
+            self.transient.remove(&pos);
+            self.keep_overview(pos);
+            let region = &self.regions[&pos];
+            // Asked for whole meanwhile (shown up close) or written to: keep it.
+            if arrived.is_some_and(|c| region.last_used > c) || region.unsaved {
+                continue;
+            }
+            if region.tile_count() == 0 {
+                self.no_file.insert(pos);
+            }
+            self.regions.remove(&pos);
+        }
+        // A transient region that failed to load or stays undrawn must not
+        // block the others forever.
+        self.transient
+            .retain(|p, _| self.regions.contains_key(p) || self.loading.contains(p));
     }
 
     /// Reads drawn map pixels by block column; transparent where nothing is
@@ -337,6 +529,9 @@ impl MapEngine {
         self.generation += 1;
         self.active = None;
         self.regions.clear();
+        self.overviews.clear();
+        self.transient.clear();
+        self.no_file.clear();
         self.loading.clear();
         self.waiting_tiles.clear();
         self.pending_reads.clear();
@@ -482,6 +677,9 @@ impl MapEngine {
                         None
                     });
                     self.insert_region(region.unwrap_or_else(|| Region::new(pos)));
+                    if let Some(arrived) = self.transient.get_mut(&pos) {
+                        *arrived = self.regions.get(&pos).map(|r| r.last_used);
+                    }
                     report.regions_loaded += 1;
                 }
                 WorkResult::RegionSaved {
@@ -590,6 +788,7 @@ impl MapEngine {
         if self.last_save.elapsed() >= interval {
             report.saves_started += self.flush();
         }
+        self.settle_transient();
         report.regions_evicted = self.evict(focus_region);
         report
     }
@@ -634,6 +833,7 @@ impl MapEngine {
             if self.regions[&pos].unsaved {
                 self.save(pos);
             }
+            self.keep_overview(pos);
             if let Some(r) = self.regions.remove(&pos) {
                 chunks -= r.tile_count();
             }
@@ -1001,6 +1201,70 @@ mod tests {
         assert!(
             files >= 12 - 9,
             "evicted regions were saved ({files} files)"
+        );
+    }
+
+    #[test]
+    fn overview_is_a_quarter_size_mean() {
+        let side = REGION_BLOCKS as usize;
+        let mut px = vec![0u32; side * side];
+        // The top left 4x4: two shades; the next block: only a quarter explored.
+        for y in 0..4 {
+            for x in 0..4 {
+                px[y * side + x] = if x < 2 { 0xFF00_0010 } else { 0xFF00_0030 };
+            }
+        }
+        for y in 0..2 {
+            for x in 4..6 {
+                px[y * side + x] = 0xFFFF_FFFF;
+            }
+        }
+        let o = overview_pixels(&px);
+        assert_eq!(o.len(), OVERVIEW_SIDE * OVERVIEW_SIDE);
+        assert_eq!(o[0], 0xFF00_0020);
+        assert_eq!(o[1], 0, "mostly unexplored stays transparent");
+    }
+
+    #[test]
+    fn far_regions_become_overviews_and_leave() {
+        let world = World::new("engine_overview");
+        let mut e = MapEngine::new(Settings::default(), world.data_dir());
+        e.handle(&world, HostEvent::LevelLoaded(overworld()));
+        for x in 0..6 {
+            e.handle(&world, HostEvent::ChunkLoaded(ChunkPos::new(x * 32, 0)));
+        }
+        settle(&mut e, &world);
+        e.flush();
+        settle(&mut e, &world);
+        // A fresh engine: nothing in memory, the files on disk.
+        let mut e = MapEngine::new(Settings::default(), world.data_dir());
+        e.handle(&world, HostEvent::LevelLoaded(overworld()));
+        e.tick(&world, std::time::Duration::from_millis(50));
+        let near = (RegionPos::new(0, 0), RegionPos::new(0, 0));
+        for _ in 0..200 {
+            e.request_overviews(RegionPos::new(0, -1), RegionPos::new(6, 1), near);
+            e.tick(&world, std::time::Duration::from_millis(50));
+            if e.overview_count() >= 5 && e.is_idle() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        for x in 1..6 {
+            assert!(
+                e.overview(RegionPos::new(x, 0)).is_some(),
+                "overview of region {x}"
+            );
+        }
+        assert!(
+            e.overview(RegionPos::new(6, 0)).is_none(),
+            "no file, no overview"
+        );
+        e.tick(&world, std::time::Duration::from_millis(50));
+        e.tick(&world, std::time::Duration::from_millis(50));
+        assert!(
+            e.loaded_region_count() <= 2,
+            "{} regions still whole",
+            e.loaded_region_count()
         );
     }
 }

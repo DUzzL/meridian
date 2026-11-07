@@ -1745,6 +1745,11 @@ struct MapData {
 /// Regions requested around the map's centre at most (either way); the
 /// rest of a far zoomed-out view shows from the GPU's cache.
 const MAP_REQUEST_RADIUS: i32 = 7;
+/// Regions held whole around the centre when zoomed out.
+const MAP_REQUEST_RADIUS_FAR: i32 = 2;
+/// Below this many GUI pixels per region the map draws overviews outside
+/// the middle.
+const MAP_OVERVIEW_BELOW: f32 = 96.0;
 /// Regions drawn either way of the centre at most.
 const MAP_DRAW_RADIUS: i32 = 48;
 
@@ -1852,8 +1857,15 @@ impl Meridian {
             let clamp = |p: RegionPos, r: i32| {
                 RegionPos::new(p.x.clamp(mid.x - r, mid.x + r), p.z.clamp(mid.z - r, mid.z + r))
             };
-            engine.request_area(clamp(min, MAP_REQUEST_RADIUS), clamp(max, MAP_REQUEST_RADIUS));
+            // Up close every visible region is held whole; zoomed out only
+            // the middle is, the rest comes from overviews (a quarter of the
+            // resolution, which is more than the screen shows there).
+            let region_px = 512.0 * s.map.scale(u) as f32;
+            let whole_radius = if region_px < MAP_OVERVIEW_BELOW { MAP_REQUEST_RADIUS_FAR } else { MAP_REQUEST_RADIUS };
+            let near = (clamp(min, whole_radius), clamp(max, whole_radius));
+            engine.request_area(near.0, near.1);
             let (dmin, dmax) = (clamp(min, MAP_DRAW_RADIUS), clamp(max, MAP_DRAW_RADIUS));
+            engine.request_overviews(dmin, dmax, near);
             let mut regions = Vec::new();
             for x in dmin.x..=dmax.x {
                 for z in dmin.z..=dmax.z {
@@ -1861,15 +1873,19 @@ impl Meridian {
                     let (bx, bz) = pos.min_block();
                     let a = s.map.to_screen([bx as f64, bz as f64], gui, u);
                     let b = s.map.to_screen([(bx + 512) as f64, (bz + 512) as f64], gui, u);
-                    let region = engine.region(pos);
-                    regions.push(gpu_map::RegionQuad {
+                    let quad = |pixels, revision, size| gpu_map::RegionQuad {
                         pos: [x, z],
                         rect: [a[0], a[1], b[0], b[1]],
-                        pixels: region.and_then(|r| r.shared_pixels()),
-                        revision: region.map_or(0, |r| r.revision),
-                        size: 512,
+                        pixels,
+                        revision,
+                        size,
                         alpha: 255,
                         layer: 0,
+                    };
+                    regions.push(match (engine.region(pos), engine.overview(pos)) {
+                        (Some(r), _) => quad(r.shared_pixels(), r.revision, 512),
+                        (None, Some(o)) => quad(Some(o.pixels.clone()), o.revision, meridian_core::engine::OVERVIEW_SIDE as u32),
+                        (None, None) => quad(None, 0, 512),
                     });
                 }
             }

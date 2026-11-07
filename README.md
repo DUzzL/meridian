@@ -29,7 +29,9 @@ The bundle targets the Horizon revision named in `mixins/meridian/horizon-mixin.
 
 Everything else (zoom keys, waypoint sets, radar, cave mode, overlays, dimension switch on the map) is available and unbound by default; see `docs/KEYBINDS.md`. Keys are changed in the game's controls screen.
 
-On the world map: drag to pan, scroll to zoom, arrow keys or WASD move, Space centres on you, right click opens the menu (waypoints, teleport, share, PNG export, Seed Atlas structure actions).
+On the world map: drag to pan, scroll to zoom, arrow keys or WASD move, Space centres on you, right click opens the menu (waypoints, teleport to a spot or a player, share, PNG export, Seed Atlas structure actions). The "?" button on the right lists the controls.
+
+Settings profiles are switched, added, renamed and deleted on the main settings page; "Change Position" lets you drag the minimap where you want it.
 
 ## Seed Atlas
 

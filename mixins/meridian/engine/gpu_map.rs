@@ -138,16 +138,17 @@ fn level_for(side_px: f32) -> u32 {
     }
 }
 
-/// RGBA bytes of a 512-texel region at `lod` texels a side: each texel the
-/// mean of the explored pixels it covers, transparent if none are.
+/// RGBA bytes of a square region image (512 texels a side, or an overview
+/// of 128) at `lod` texels a side: each texel the mean of the explored
+/// pixels it covers, transparent if none are.
 fn downsample(pixels: &[u32], lod: u32) -> Vec<u8> {
-    const SIDE: usize = 512;
-    let lod = lod as usize;
+    let side = (pixels.len() as f64).sqrt() as usize;
+    let lod = (lod as usize).min(side.max(1));
     let mut out = vec![0u8; lod * lod * 4];
-    if pixels.len() < SIDE * SIDE {
+    if side == 0 || side * side != pixels.len() || side % lod != 0 {
         return out;
     }
-    if lod == SIDE {
+    if lod == side {
         for (o, p) in out.chunks_exact_mut(4).zip(pixels) {
             if p >> 24 != 0 {
                 o.copy_from_slice(&[(p >> 16) as u8, (p >> 8) as u8, *p as u8, 255]);
@@ -155,12 +156,12 @@ fn downsample(pixels: &[u32], lod: u32) -> Vec<u8> {
         }
         return out;
     }
-    let f = SIDE / lod;
+    let f = side / lod;
     for ty in 0..lod {
         for tx in 0..lod {
             let (mut r, mut g, mut b, mut n) = (0u32, 0u32, 0u32, 0u32);
             for y in ty * f..(ty + 1) * f {
-                for p in &pixels[y * SIDE + tx * f..y * SIDE + (tx + 1) * f] {
+                for p in &pixels[y * side + tx * f..y * side + (tx + 1) * f] {
                     if p >> 24 != 0 {
                         r += (p >> 16) & 0xFF;
                         g += (p >> 8) & 0xFF;
@@ -433,7 +434,8 @@ impl WorldMapRenderer {
         regions.sort_by(near);
         for r in &regions {
             let side = (r.rect[2] - r.rect[0]) * scale[0];
-            let want = level_for(side);
+            // An overview has no more detail than its own size.
+            let want = level_for(side).min(r.size);
             let key = (frame.world, r.pos[0], r.pos[1], want);
             let ready = match &r.pixels {
                 Some(p) => gpu.upload(world.device, world.queue, key, p, r.revision, None, &mut budget),
