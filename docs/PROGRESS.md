@@ -361,7 +361,7 @@
 
 - 172 Kern-Tests, 2 Host-Tests, 8 Engine-Tests und der Paritätstest grün;
 - Clippy sauber, Adapter-Check grün;
-- Launcher-Build `native-66f3981-da48b31c039d`.
+- Launcher-Build `native-66f3981-7b5f76e57779`.
 
 **Noch nicht im Spiel geprüft**: alles aus diesem Zwischenstand. Der Zugriff auf das Spielfenster wurde in dieser Sitzung nicht freigegeben.
 
