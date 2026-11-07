@@ -9,7 +9,7 @@
  *   V version mc_supported has_terrain
  *   K id name argb                               context biome names/colours
  *   P seed large dim x y z id                    sax_biome_at
- *   A seed large dim ox oz y step w h id...      sax_biome_area_sampled
+ *   A seed large dim ox oz y step w h id...      sax_biome_area_sampled (16x16 to 128x128)
  *   C seed large dim cx cz y step id...          sax_biome_chunk_sampled
  *   T seed large dim ox oz step w h height...    sax_height_area_sampled
  *   N seed ox oz y step w h floor...             sax_nether_floor_area_sampled
@@ -30,11 +30,30 @@ static int32_t ids[1 << 16];
 static float heights[1 << 16];
 static uint64_t mask[1 << 13];
 static uint64_t rng = 0x9E3779B97F4A7C15ULL;
+/* The cases the map's production steps added (steps 32/128/512, whole
+ * 128x128 tiles, height steps 8/32) draw from their own stream, so the
+ * earlier lines stay as they were. */
+static uint64_t rng2 = 0xD1B54A32D192ED03ULL;
 
 static int32_t rnd(int32_t lo, int32_t hi)
 {
     rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
     return lo + (int32_t)(rng % (uint64_t)(hi - lo + 1));
+}
+
+static int32_t rnd2(int32_t lo, int32_t hi)
+{
+    rng2 ^= rng2 << 13; rng2 ^= rng2 >> 7; rng2 ^= rng2 << 17;
+    return lo + (int32_t)(rng2 % (uint64_t)(hi - lo + 1));
+}
+
+static int area(int64_t seed, int large, int dim, sax_context *c, int ox, int oz, int y, int step, int w, int h)
+{
+    if (sax_biome_area_sampled(c, dim, ox, oz, y, step, w, h, ids, NULL, w * h) != SAX_OK) return 0;
+    printf("A %lld %d %d %d %d %d %d %d %d", (long long) seed, large, dim, ox, oz, y, step, w, h);
+    for (int i = 0; i < w * h; i++) printf(" %d", ids[i]);
+    printf("\n");
+    return 1;
 }
 
 static void rows(int n)
@@ -103,6 +122,29 @@ int main(int argc, char **argv)
                         int step = tsteps[k], w = 12, h = 12;
                         int ox = rnd(-3000, 3000), oz = rnd(-3000, 3000);
                         if (dim == SAX_DIM_END) { ox = rnd(-1600, 1600); oz = rnd(-1600, 1600); }
+                        int rc = sax_height_area_sampled(c, dim, ox, oz, step, w, h, heights, w * h);
+                        printf("T %lld %d %d %d %d %d %d %d %d", (long long) seed, large, dim, ox, oz, step, w, h, rc);
+                        if (rc == SAX_OK) floats(w * h);
+                        printf("\n");
+                    }
+                }
+                /* Production steps: the map samples at any power of two up
+                 * to 1024, in 128x128 tiles; End islands refine at step 8. */
+                static const int psteps[] = { 32, 128, 512 };
+                for (int k = 0; k < 3; k++) {
+                    int step = psteps[k];
+                    if (!area(seed, large, dim, c, rnd2(-400, 400) * step, rnd2(-400, 400) * step, 64, step, 16, 16)) return 2;
+                }
+                if (s == 0 && !large) {
+                    int step = dim == SAX_DIM_OVERWORLD ? 4 : dim == SAX_DIM_NETHER ? 32 : 128;
+                    if (!area(seed, large, dim, c, rnd2(-200, 200) * 128 * step, rnd2(-200, 200) * 128 * step, 64, step, 128, 128)) return 2;
+                }
+                if (sax_context_has_terrain(c) && dim != SAX_DIM_NETHER) {
+                    static const int tsteps2[] = { 8, 32 };
+                    for (int k = 0; k < 2; k++) {
+                        int step = tsteps2[k], w = 12, h = 12;
+                        int ox = rnd2(-3000, 3000), oz = rnd2(-3000, 3000);
+                        if (dim == SAX_DIM_END) { ox = rnd2(-1600, 1600); oz = rnd2(-1600, 1600); }
                         int rc = sax_height_area_sampled(c, dim, ox, oz, step, w, h, heights, w * h);
                         printf("T %lld %d %d %d %d %d %d %d %d", (long long) seed, large, dim, ox, oz, step, w, h, rc);
                         if (rc == SAX_OK) floats(w * h);

@@ -12,8 +12,8 @@ use std::path::Path;
 /// Icon pixels per marker at the default size (`IconLayout.DISPLAY_SIZE`).
 pub const DISPLAY_SIZE: f32 = 18.0;
 
-/// One icon, cropped: RGBA pixels, and whether it is a block texture (drawn
-/// with a dark frame).
+/// One icon, cropped: RGBA pixels, and whether it is a full square (a block
+/// texture, or the composed Ocean Ruins bricks) drawn with a dark frame.
 #[derive(Clone, Debug)]
 pub struct Icon {
     pub width: u32,
@@ -48,8 +48,10 @@ impl Icon {
 enum Source {
     Own(&'static [u8]),
     Item(&'static str),
+    /// A block texture, and whether it gets a dark frame.
     Block(&'static str, bool),
-    Composed(fn(&Path) -> Option<Image>),
+    /// A composed image, and whether it gets a dark frame.
+    Composed(fn(&Path) -> Option<Image>, bool),
 }
 
 /// The icon of every marker id (and `orevein_copper`, `camp_special`).
@@ -58,7 +60,7 @@ fn sources() -> Vec<(&'static str, Source)> {
     vec![
         ("camp", Own(include_bytes!("assets/seedatlas/camp.png"))),
         ("camp_special", Own(include_bytes!("assets/seedatlas/camp_special.png"))),
-        ("ancient_city", Composed(warden_head)),
+        ("ancient_city", Composed(warden_head, false)),
         ("bastion", Block("cracked_polished_blackstone_bricks", true)),
         ("chambers", Item("trial_key")),
         ("desert", Block("chiseled_sandstone", true)),
@@ -78,14 +80,14 @@ fn sources() -> Vec<(&'static str, Source)> {
         ("orevein_copper", Item("raw_copper")),
         ("outpost", Item("crossbow_standby")),
         ("portal", Block("crying_obsidian", true)),
-        ("ruins", Composed(cracked_mossy_stone_bricks)),
+        ("ruins", Composed(cracked_mossy_stone_bricks, true)),
         ("shipwreck", Own(include_bytes!("assets/seedatlas/shipwreck.png"))),
         ("slime", Item("slime_ball")),
         ("spawn", Item("compass_00")),
         ("stronghold", Item("ender_eye")),
         ("trails", Item("brush")),
-        ("treasure", Composed(chest)),
-        ("village", Composed(villager_head)),
+        ("treasure", Composed(chest, false)),
+        ("village", Composed(villager_head, false)),
         ("well", Own(include_bytes!("assets/seedatlas/well.png"))),
     ]
 }
@@ -241,7 +243,7 @@ pub fn load(root: Option<&Path>) -> HashMap<&'static str, Icon> {
             Source::Own(bytes) => (decode(bytes), false),
             Source::Item(name) => (root.and_then(|r| texture(r, &format!("item/{name}"))), false),
             Source::Block(name, frame) => (root.and_then(|r| texture(r, &format!("block/{name}"))), frame),
-            Source::Composed(f) => (root.and_then(f), false),
+            Source::Composed(f, frame) => (root.and_then(f), frame),
         };
         let img = img.map(|i| crop(&i)).unwrap_or_else(|| Image::new(1, 1));
         out.insert(id, Icon { width: img.w, height: img.h, rgba: img.px, block, size: display_size(id) });

@@ -333,7 +333,7 @@ fn rows(c: Category) -> Vec<Row> {
             opt(SeedAtlas, "Overworld Y", "Height the Overworld's biomes are taken at."),
             opt(SeedAtlas, "Nether Y", "Height the Nether's biomes are taken at."),
             opt(SeedAtlas, "End Y", "Height the End's biomes are taken at."),
-            opt(SeedAtlas, "Biome highlighting", "Dims every biome but the chosen ones."),
+            opt(SeedAtlas, "Biome highlighting", "Dims every biome but the chosen ones, over explored terrain too."),
             row(SeedAtlas, "Highlighted Biomes", "Chooses the biomes biome highlighting keeps bright.", Button("sa:highlight", |_| "Choose...".into())),
             row(SeedAtlas, "Nearest Biome", "Finds the closest biome of a kind and shows it on the map.", Button("sa:biome", |_| "Find...".into())),
             row(SeedAtlas, "Nearest Structure", "Finds the closest structure of a kind and shows it on the map.", Button("sa:structure", |_| "Find...".into())),
@@ -354,7 +354,7 @@ fn rows(c: Category) -> Vec<Row> {
         Performance => vec![
             opt(Performance, "Biome resolution", "The finest detail of the computed map; coarser is faster."),
             opt(Performance, "Worker threads", "Threads computing the Seed Atlas map. Auto leaves cores for the game."),
-            opt(Performance, "Background prefetch", "Computes the map around the view in advance while the world map is open."),
+            opt(Performance, "Background prefetch", "Computes the map around the player in advance while the world map is open."),
             opt(Performance, "Max Loaded Regions", "Explored regions the world map keeps in memory."),
             opt(Performance, "Map Frame Budget", "Time per frame for drawing explored terrain; more fills the map faster."),
             opt(Performance, "Chunk Reads Per Tick", "Chunks read from the game per tick at most."),

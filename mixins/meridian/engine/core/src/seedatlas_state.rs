@@ -3,15 +3,16 @@
 //! seed an effective dimension generates from, and the allowed values of the
 //! options.
 //!
-//! The seeds live in the [`SeedBook`]; the version chosen per world or
-//! server lives in [`SeedAtlasSettings::game_versions`]. `auto` (no entry)
+//! The seeds live in the [`SeedBook`], and so does the version chosen per
+//! world or server; [`SeedAtlasSettings::game_versions`] mirrors it for the
+//! screens and commands (see [`mirror_versions`]). `auto` (no entry)
 //! follows the game, which is always 26.3 in Horizon.
 
 use meridian_host::WorldSource;
 use meridian_seedatlas::Dimension;
 use meridian_seedatlas::mc;
 
-use crate::config::SeedAtlasSettings;
+use crate::config::{ConfigFile, SeedAtlasSettings};
 use crate::persist;
 use crate::seedatlas::{SeedBook, SeedSpec, dim_index};
 
@@ -254,6 +255,55 @@ pub fn resolve_all(
         out[dim_index(d)] = resolve_seed(book, settings, key, d, detected);
     }
     out
+}
+
+/// Moves the versions older releases kept in each settings profile into the
+/// book (the current profile's first; a context the book has keeps its
+/// version). True when a profile had any: the settings file should be saved
+/// without them.
+pub fn adopt_profile_versions(book: &mut SeedBook, config: &mut ConfigFile) -> bool {
+    let mut versions = book.versions().clone();
+    let current = config.current_profile.clone();
+    let mut found = false;
+    let order = std::iter::once(current.as_str()).chain(
+        config
+            .profiles
+            .keys()
+            .map(String::as_str)
+            .filter(|p| *p != current),
+    );
+    for profile in order {
+        let Some(settings) = config.profiles.get(profile) else {
+            continue;
+        };
+        for (key, version) in &settings.seed_atlas.game_versions {
+            found = true;
+            versions
+                .entry(key.clone())
+                .or_insert_with(|| version.clone());
+        }
+    }
+    book.set_versions(&versions);
+    mirror_versions(book, config);
+    found
+}
+
+/// Gives every profile the book's versions, so switching profiles keeps
+/// each world's version.
+pub fn mirror_versions(book: &SeedBook, config: &mut ConfigFile) {
+    for settings in config.profiles.values_mut() {
+        if settings.seed_atlas.game_versions != *book.versions() {
+            settings.seed_atlas.game_versions = book.versions().clone();
+        }
+    }
+}
+
+/// Stores the versions the current profile's settings were edited to (by
+/// a screen or a command) in the book, and mirrors them to every profile.
+pub fn store_versions(book: &mut SeedBook, config: &mut ConfigFile) {
+    let edited = config.current().seed_atlas.game_versions.clone();
+    book.set_versions(&edited);
+    mirror_versions(book, config);
 }
 
 // ---------------------------------------------------------------- options --
@@ -539,7 +589,8 @@ mod tests {
             (100, 150, 100)
         );
 
-        // The new keys survive a save; the open context does not.
+        // The new keys survive a save; the open context and the versions
+        // (kept in the seed book) do not.
         let mut s = SeedAtlasSettings {
             marker_size: 250,
             completed_opacity: 30,
@@ -554,18 +605,66 @@ mod tests {
         let back: SeedAtlasSettings = serde_json::from_str(&text).unwrap();
         assert_eq!(back.context_key, "");
         assert_eq!(back.highlighted_biomes, s.highlighted_biomes);
-        assert_eq!(back.game_versions, s.game_versions);
+        assert!(back.game_versions.is_empty());
         assert_eq!((back.marker_size, back.completed_opacity), (250, 30));
         assert!(back.biome_highlight && back.overlay_explored);
-        let mut back = back;
-        back.context_key = "sp-w".into();
-        assert_eq!(back.game_version(), Some("1.20.6"));
+        assert_eq!(s.game_version(), Some("1.20.6"));
+        s.context_key = "sp-v".into();
+        assert_eq!(s.game_version(), None);
         assert_eq!(
             toml::from_str::<SeedAtlasSettings>(&toml::to_string(&s).unwrap())
                 .unwrap()
                 .marker_size,
             250
         );
+    }
+
+    #[test]
+    fn versions_belong_to_the_world_not_the_profile() {
+        let dir = temp_dir("versions");
+        // An older settings file: each profile had its own versions.
+        let mut config: ConfigFile = toml::from_str(
+            "current_profile = \"b\"\n\
+             [profiles.a.seed_atlas.game_versions]\nsp-w = \"1.12.2\"\nsp-x = \"1.16.5\"\n\
+             [profiles.b.seed_atlas.game_versions]\nsp-w = \"1.20.6\"\n",
+        )
+        .unwrap();
+        let mut b = book(&dir);
+        assert!(adopt_profile_versions(&mut b, &mut config));
+        // The current profile's wins; the others fill in.
+        assert_eq!(b.versions().get("sp-w").map(String::as_str), Some("1.20.6"));
+        assert_eq!(b.versions().get("sp-x").map(String::as_str), Some("1.16.5"));
+        assert!(
+            config
+                .profiles
+                .values()
+                .all(|p| p.seed_atlas.game_versions == *b.versions())
+        );
+        // Not written to the settings any more; kept in seeds.toml.
+        assert!(!toml::to_string(&config).unwrap().contains("1.16.5"));
+        assert_eq!(book(&dir).versions(), b.versions());
+        assert!(!adopt_profile_versions(
+            &mut book(&dir),
+            &mut ConfigFile::default()
+        ));
+        // Chosen in one profile, the same in another.
+        let key = "sp-w";
+        set_game_version(
+            &mut config.current_mut().seed_atlas,
+            key,
+            GameVersion::parse("1.18"),
+        );
+        store_versions(&mut b, &mut config);
+        assert!(config.select_profile("a"));
+        assert_eq!(
+            game_version(&config.current().seed_atlas, key).0.name,
+            "1.18.2"
+        );
+        assert_eq!(
+            book(&dir).versions().get(key).map(String::as_str),
+            Some("1.18.2")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

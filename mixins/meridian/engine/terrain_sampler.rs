@@ -88,6 +88,11 @@ impl<K: Clone + Eq + std::hash::Hash, V: Clone> Lru<K, V> {
         Some(value.clone())
     }
 
+    fn clear(&mut self) {
+        self.entries = HashMap::new();
+        self.order.clear();
+    }
+
     fn insert(&mut self, key: K, value: V) {
         if let Some((_, used)) = self.entries.remove(&key) {
             self.order.remove(&used);
@@ -308,8 +313,18 @@ struct Context {
     workers: Mutex<Vec<<VanillaTerrain as ChunkGenerator>::Worker>>,
 }
 
+static CONTEXTS: Mutex<Option<Lru<WorldKey, Arc<Context>>>> = Mutex::new(None);
+
+/// Frees the sampled tiles, the generators and the Nether cave masks: Seed
+/// Atlas released its tiles (the map has been closed a while), and they are
+/// made again when it opens. Work still running keeps what it holds.
+pub fn release_caches() {
+    tiles().0.lock().unwrap_or_else(|e| e.into_inner()).cache.clear();
+    *CONTEXTS.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    masks().0.lock().unwrap_or_else(|e| e.into_inner()).cache.clear();
+}
+
 fn context(world: WorldKey) -> Option<Arc<Context>> {
-    static CONTEXTS: Mutex<Option<Lru<WorldKey, Arc<Context>>>> = Mutex::new(None);
     let mut contexts = CONTEXTS.lock().unwrap_or_else(|e| e.into_inner());
     let contexts = contexts.get_or_insert_with(|| Lru::new(MAX_CONTEXTS));
     if let Some(context) = contexts.get(&world) {
@@ -715,18 +730,53 @@ fn sample_coordinate(origin: i32, index: usize, step: i32) -> i32 {
 
 const MAX_CACHED_CHUNKS: usize = 512;
 
-fn chunk_mask(seed: i64, chunk_x: i32, chunk_z: i32) -> Arc<[u64; 512]> {
-    static CACHE: Mutex<Option<Lru<(i64, i32, i32), Arc<[u64; 512]>>>> = Mutex::new(None);
-    // Held while generating, as the Java's `synchronized`: the same chunk is
-    // never carved twice at once.
-    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    let cache = cache.get_or_insert_with(|| Lru::new(MAX_CACHED_CHUNKS));
-    let key = (seed, chunk_x, chunk_z);
-    if let Some(mask) = cache.get(&key) {
-        return mask;
+type MaskKey = (i64, i32, i32);
+
+struct MaskState {
+    cache: Lru<MaskKey, Arc<[u64; 512]>>,
+    /// Chunks some thread is carving: others wait for them.
+    carving: HashSet<MaskKey>,
+}
+
+fn masks() -> &'static (Mutex<MaskState>, Condvar) {
+    static MASKS: OnceLock<(Mutex<MaskState>, Condvar)> = OnceLock::new();
+    MASKS.get_or_init(|| {
+        (Mutex::new(MaskState { cache: Lru::new(MAX_CACHED_CHUNKS), carving: HashSet::new() }), Condvar::new())
+    })
+}
+
+/// Gives the chunk back to the waiters when carving ends, however it ends.
+struct Carving(MaskKey);
+
+impl Drop for Carving {
+    fn drop(&mut self) {
+        let (lock, wake) = masks();
+        lock.lock().unwrap_or_else(|e| e.into_inner()).carving.remove(&self.0);
+        wake.notify_all();
     }
+}
+
+/// A chunk's carved blocks, cached. Carved outside the lock, so workers
+/// refine different Nether tiles at once; the same chunk is still never
+/// carved twice at once (the Java's `synchronized`).
+fn chunk_mask(seed: i64, chunk_x: i32, chunk_z: i32) -> Arc<[u64; 512]> {
+    let key = (seed, chunk_x, chunk_z);
+    let (lock, wake) = masks();
+    let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
+    loop {
+        if let Some(mask) = state.cache.get(&key) {
+            return mask;
+        }
+        if state.carving.insert(key) {
+            break;
+        }
+        state = wake.wait(state).unwrap_or_else(|e| e.into_inner());
+    }
+    drop(state);
+    let guard = Carving(key);
     let mask = Arc::new(carve_chunk(seed, chunk_x, chunk_z));
-    cache.insert(key, mask.clone());
+    lock.lock().unwrap_or_else(|e| e.into_inner()).cache.insert(key, mask.clone());
+    drop(guard);
     mask
 }
 
@@ -1088,6 +1138,18 @@ mod tests {
         }
         assert!(nether_cave_mask(1, 0, 0, 3, 4, 4).is_empty());
         assert!(nether_cave_mask(1, 0, 0, 4, 0, 4).is_empty());
+    }
+
+    #[test]
+    fn nether_masks_carve_at_once_and_survive_a_release() {
+        let serial = nether_cave_mask(77, -300, 140, 2, 96, 96);
+        release_caches();
+        let threads: Vec<_> = (0..4).map(|_| std::thread::spawn(|| nether_cave_mask(77, -300, 140, 2, 96, 96))).collect();
+        for t in threads {
+            assert_eq!(t.join().unwrap(), serial);
+        }
+        release_caches();
+        assert_eq!(nether_cave_mask(77, -300, 140, 2, 96, 96), serial);
     }
 
     #[test]

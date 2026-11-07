@@ -580,9 +580,12 @@ impl BiomeHighlightScreen {
             Some("done") => return parent(),
             Some(b) if b.starts_with("btn:") => {
                 if let Ok(id) = b[4..].parse::<u8>() {
-                    let set = &mut env.settings.seed_atlas.highlighted_biomes;
-                    if !set.remove(&id) {
-                        set.insert(id);
+                    let sa = &mut env.settings.seed_atlas;
+                    // Picking a biome switches highlighting on, as in the
+                    // Fabric version; removing one leaves the switch.
+                    if !sa.highlighted_biomes.remove(&id) {
+                        sa.highlighted_biomes.insert(id);
+                        sa.biome_highlight = true;
                     }
                     env.settings_changed = true;
                 }
@@ -1110,6 +1113,14 @@ mod tests {
         assert!(e.settings.seed_atlas.highlighted_biomes.is_empty());
         click(&mut screen, "highlight", &mut e);
         assert!(!e.settings.seed_atlas.biome_highlight);
+        // Picking a biome switches highlighting on again.
+        click(&mut screen, "btn:2", &mut e);
+        assert!(e.settings.seed_atlas.biome_highlight);
+        click(&mut screen, "btn:2", &mut e);
+        assert!(
+            e.settings.seed_atlas.biome_highlight,
+            "removing one leaves it on"
+        );
         assert_eq!(
             click(&mut screen, "done", &mut e),
             Action::Open(Screen::Settings(
