@@ -1016,6 +1016,7 @@ mod tests {
                 hovered_height: None,
                 hovered_biome: None,
                 waypoints: &[],
+                paired_waypoints: &[],
                 entities: &entities,
                 radar,
                 seed_layer: false,
