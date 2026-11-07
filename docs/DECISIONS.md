@@ -303,3 +303,33 @@ Server-Netzwerke zeigen hinter einer Adresse mehrere Welten (Lobby, Modi). Merid
 - Beim Laden eines Levels gilt zunächst die zuletzt gezeigte Karte, weil der gemeldete Spawn noch vom vorigen Server stammen kann. Sobald der neue Spawn bekannt ist, wechselt die Karte.
 - Einzelspieler hat immer genau eine Karte.
 - Ändert ein Server seinen Spawn (`/setworldspawn`), entsteht eine neue Karte. Mit `/meridian map use default` kehrt man zur alten zurück; das stellt die Auswahl auf manuell.
+
+## D-030: Seed-Atlas-Kacheln: Warteschlange pro Frame, ein Sample je zwei Pixel
+
+Im Spiel lud die Seed-Atlas-Ebene von außen nach innen, die Mitte blieb oft schwarz, und der Rechner lief dauerhaft unter Last. Drei Ursachen:
+
+- **Reihenfolge:**
+  - Die Karte fragte die Kacheln von der Mitte nach außen an, die Worker nahmen aber die neueste Anfrage zuerst.
+  - Die Warteschlange hielt nur 64 Einträge und warf die ältesten weg, also genau die Mitte.
+  - Jeden Frame wurde die Mitte neu angefragt und wieder verdrängt.
+- **Detail:** ein Sample je Bildschirmpixel. Eine Kachel kostet unabhängig von der Schrittweite 20–50 ms. Ein Bildschirm mit 3024 × 1720 Pixeln brauchte so rund 320 Kacheln, etwa 13 s CPU-Zeit.
+- **Zoomen:** Beim Wechsel der Schrittweite gab es nur einen Ersatz, nämlich Kacheln mit vierfacher Schrittweite.
+
+Lösung:
+
+- **Warteschlange pro Frame:**
+  - Was die Karte in einem Frame anfragt, ersetzt beim nächsten `poll` die Warteschlange, in derselben Reihenfolge (Mitte zuerst).
+  - Die Worker nehmen vorne.
+  - Was nicht mehr angefragt wird, wird nie berechnet. Ist die Karte zu, leert sich die Warteschlange.
+  - Laufende Jobs dürfen fertig werden.
+- **Ein Sample je zwei physische Pixel:** Das ist ein Viertel der Arbeit. Auf Retina-Bildschirmen ist es weiterhin ein Sample je Punkt.
+- **Ersatz beim Zoomen:**
+  - Beim Herauszoomen dienen die vier Kacheln der nächstfeineren Schrittweite.
+  - Beim Hineinzoomen dient die nächste vorhandene gröbere Kachel (doppelte bis achtfache Schrittweite).
+- **Gelände-Regionen:** Weit herausgezoomt zeichnet die Karte nur Regionen mit Daten statt bis zu 97 × 97 leerer Flächen je Frame.
+
+Gemessen im Spiel bei 0,1x:
+
+- Der Bildschirm ist nach rund 2 s gefüllt, von der Mitte nach außen.
+- Danach liegt die CPU-Last auf dem Niveau des Spiels ohne Karte.
+- Zurückschieben zeigt die Kacheln sofort aus dem Cache.

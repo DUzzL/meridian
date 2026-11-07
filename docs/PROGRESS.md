@@ -444,3 +444,21 @@ Nicht im Spiel geprüft: gefärbtes Glas und kurze Blöcke (gelten nur für neu 
 - Spielerköpfe mit ihrem Skin.
 - Vom Server erzwungene Regeln über Signale (SRV-01, SRV-03): Dafür braucht es eine dokumentierte Quelle für die Signale.
 - Claims (OV-06): Dafür gibt es in Horizon noch keinen Anbieter.
+
+### Phase 6, Fehlerbehebung: Seed-Atlas-Ebene lädt von außen, keine Wiederverwendung, hohe Last
+
+Rückmeldung aus dem Spiel: Die Ebene lud von außen nach innen und musste nach jedem Verschieben neu laden; der Lüfter lief sofort hoch. Ursachen und Lösung stehen in D-030.
+
+| Messung (M6, 3024 × 1720 Pixel, 4 Worker) | vorher | nachher |
+|---|---|---|
+| Kacheln je Bildschirm | ~320 | ~80 |
+| Zoom 0,1x: Bildschirm gefüllt | Mitte blieb schwarz | ~2 s, Mitte zuerst |
+| Zurückschieben | neu berechnet | sofort aus dem Cache |
+| CPU nach dem Laden (Karte offen, 0,016x) | dauerhaft hoch | ~40 %, wie im Spiel ohne Karte |
+
+Neue Tests:
+
+- `the_queue_follows_the_latest_frame`: Angefragte Kacheln eines alten Frames werden nicht mehr berechnet.
+- `tile_cost` (ignoriert): misst die Kosten je Kachel.
+
+**Build und Tests**: 185 Kern-Tests und der Paritätstest grün; Clippy sauber, Adapter-Check grün; Launcher-Build `native-66f3981-ce15819d4afb`.

@@ -2141,11 +2141,16 @@ impl Meridian {
                         alpha: 255,
                         layer: 0,
                     };
-                    regions.push(match (engine.region(pos), engine.overview(pos)) {
-                        (Some(r), _) => quad(r.shared_pixels(), r.revision, 512),
-                        (None, Some(o)) => quad(Some(o.pixels.clone()), o.revision, meridian_core::engine::OVERVIEW_SIDE as u32),
-                        (None, None) => quad(None, 0, 512),
-                    });
+                    match (engine.region(pos), engine.overview(pos)) {
+                        (Some(r), _) => regions.push(quad(r.shared_pixels(), r.revision, 512)),
+                        (None, Some(o)) => regions.push(quad(Some(o.pixels.clone()), o.revision, meridian_core::engine::OVERVIEW_SIDE as u32)),
+                        // Never explored, or not loaded yet: the GPU may still
+                        // hold it up close, nothing to draw far out.
+                        (None, None) if (x - mid.x).abs() <= whole_radius && (z - mid.z).abs() <= whole_radius => {
+                            regions.push(quad(None, 0, 512))
+                        }
+                        (None, None) => {}
+                    }
                 }
             }
             let world = {
@@ -2207,14 +2212,37 @@ impl Meridian {
                     for t in &tiles {
                         let job = sa::Job::Tile { dimension: dim, region: *t, step, y, refine: false };
                         let tile = s.seed_svc.tile(job);
-                        if tile.is_none() && step < 1024 {
-                            let cstep = (step * 4).min(1024);
-                            let f = sa::tile_span(cstep) / span;
-                            let c = RegionPos::new(t.x.div_euclid(f), t.z.div_euclid(f));
-                            if !coarse.iter().any(|q| q.pos == [c.x, c.z])
-                                && let Some(ct) = s.seed_svc.cached_tile(sa::Job::Tile { dimension: dim, region: c, step: cstep, y, refine: false })
-                            {
-                                coarse.push(tile_quad(&s.map, c, cstep, Some(ct)));
+                        if tile.is_none() {
+                            // Meanwhile what is already computed: the four
+                            // tiles one step finer (zooming out), else a
+                            // coarser one (zooming in).
+                            let finer: Vec<_> = if step > 1 {
+                                let fstep = step / 2;
+                                (0..4)
+                                    .map(|i| RegionPos::new(t.x * 2 + i % 2, t.z * 2 + i / 2))
+                                    .map(|c| (c, s.seed_svc.cached_tile(sa::Job::Tile { dimension: dim, region: c, step: fstep, y, refine: false })))
+                                    .collect()
+                            } else {
+                                Vec::new()
+                            };
+                            if !finer.is_empty() && finer.iter().all(|(_, t)| t.is_some()) {
+                                for (c, ft) in finer {
+                                    coarse.push(tile_quad(&s.map, c, step / 2, ft));
+                                }
+                            } else {
+                                let mut cstep = step * 2;
+                                while cstep <= (step * 8).min(1024) {
+                                    let f = sa::tile_span(cstep) / span;
+                                    let c = RegionPos::new(t.x.div_euclid(f), t.z.div_euclid(f));
+                                    if coarse.iter().any(|q| q.pos == [c.x, c.z] && q.layer == cstep as u32) {
+                                        break;
+                                    }
+                                    if let Some(ct) = s.seed_svc.cached_tile(sa::Job::Tile { dimension: dim, region: c, step: cstep, y, refine: false }) {
+                                        coarse.push(tile_quad(&s.map, c, cstep, Some(ct)));
+                                        break;
+                                    }
+                                    cstep *= 2;
+                                }
                             }
                         }
                         fine.push(tile_quad(&s.map, *t, step, tile));

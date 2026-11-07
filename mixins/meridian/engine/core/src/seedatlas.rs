@@ -491,11 +491,11 @@ pub fn tile_span(step: i32) -> i32 {
     TILE_SAMPLES * step
 }
 
-/// Previews (and marker scans) waiting at most; older requests are dropped,
-/// newer ones run first.
-const MAX_QUEUED: usize = 64;
+/// Previews (and marker scans) waiting at most. The queue holds what the
+/// last frame asked for, most wanted first (see [`SeedService::poll`]).
+const MAX_QUEUED: usize = 512;
 /// Refinements waiting at most.
-const MAX_QUEUED_REFINE: usize = 12;
+const MAX_QUEUED_REFINE: usize = 48;
 
 /// The seed's strongholds and spawn, computed once and shared by every
 /// marker scan of that seed.
@@ -505,8 +505,9 @@ struct Globals {
     spawn: std::sync::OnceLock<(i32, i32)>,
 }
 
-/// The jobs waiting for the workers: newest first, previews before
-/// refinements, refinements on at most all but one worker.
+/// The jobs waiting for the workers, in the order the map asked for them
+/// (nearest the middle first), previews before refinements, refinements on
+/// at most all but one worker.
 #[derive(Default)]
 struct Queue {
     preview: std::collections::VecDeque<Work>,
@@ -553,6 +554,9 @@ pub struct SeedService {
     tiles: HashMap<Job, (Tile, u64)>,
     markers: HashMap<Job, Arc<Vec<Hit>>>,
     pending: HashSet<Job>,
+    /// What was asked for since the last poll, in order.
+    wanted: Vec<Job>,
+    wanted_set: HashSet<Job>,
     look: TileLook,
     clock: u64,
     jobs: Option<SharedQueue>,
@@ -585,6 +589,8 @@ impl Default for SeedService {
             tiles: HashMap::new(),
             markers: HashMap::new(),
             pending: HashSet::new(),
+            wanted: Vec::new(),
+            wanted_set: HashSet::new(),
             look: TileLook {
                 terrain: true,
                 looks: Arc::new(VanillaLooks),
@@ -838,11 +844,11 @@ impl SeedService {
                                 if q.closed {
                                     return;
                                 }
-                                if let Some(w) = q.preview.pop_back() {
+                                if let Some(w) = q.preview.pop_front() {
                                     break (w, false);
                                 }
                                 if q.refining + 1 < q.workers.max(2)
-                                    && let Some(w) = q.refine.pop_back()
+                                    && let Some(w) = q.refine.pop_front()
                                 {
                                     q.refining += 1;
                                     break (w, true);
@@ -923,6 +929,7 @@ impl SeedService {
 
     /// Collects finished work.
     pub fn poll(&mut self) {
+        self.commit();
         while let Ok((generation, done)) = self.done.try_recv() {
             if generation != self.generation {
                 continue;
@@ -961,40 +968,80 @@ impl SeedService {
         }
     }
 
+    /// Asks for a job; the queue takes it at the next poll (see
+    /// [`SeedService::commit`]).
     fn submit(&mut self, job: Job) {
-        let d = dim_index(job_dimension(&job));
-        let (Some(atlas), Some(queue)) = (&self.atlases[d], &self.jobs) else {
-            return;
-        };
-        if self.pending.contains(&job) {
-            return;
+        if self.wanted_set.insert(job) {
+            self.wanted.push(job);
         }
-        let refine = matches!(job, Job::Tile { refine: true, .. });
-        let work = (
+    }
+
+    fn work_for(&self, job: Job) -> Option<Work> {
+        let d = dim_index(job_dimension(&job));
+        let atlas = self.atlases[d].as_ref()?;
+        Some((
             self.generation,
             atlas.clone(),
             self.kinds.clone(),
             self.look.clone(),
             job,
             self.globals[d].clone(),
-        );
-        let (lock, cv) = &**queue;
-        let mut q = lock.lock();
-        let (list, cap) = if refine {
-            (&mut q.refine, MAX_QUEUED_REFINE)
-        } else {
-            (&mut q.preview, MAX_QUEUED)
+        ))
+    }
+
+    /// Replaces the waiting jobs with what was asked for since the last
+    /// poll, in that order: what scrolled out of view is never computed,
+    /// and the middle of the view comes first. Jobs a worker is already on
+    /// are left to finish.
+    fn commit(&mut self) {
+        let wanted = std::mem::take(&mut self.wanted);
+        self.wanted_set.clear();
+        let Some(queue) = self.jobs.clone() else {
+            return;
         };
-        list.push_back(work);
-        // What scrolled out of view long ago is not computed late.
-        while list.len() > cap {
-            if let Some((_, _, _, _, old, _)) = list.pop_front() {
-                self.pending.remove(&old);
+        let (lock, cv) = &*queue;
+        let mut guard = lock.lock();
+        let q = &mut *guard;
+        let mut waiting: HashMap<Job, Work> = q
+            .preview
+            .drain(..)
+            .chain(q.refine.drain(..))
+            .map(|w| (w.4, w))
+            .collect();
+        for job in wanted {
+            let refine = matches!(job, Job::Tile { refine: true, .. });
+            let (len, cap) = if refine {
+                (q.refine.len(), MAX_QUEUED_REFINE)
+            } else {
+                (q.preview.len(), MAX_QUEUED)
+            };
+            if len >= cap {
+                continue;
             }
+            let work = match waiting.remove(&job) {
+                Some(w) => w,
+                // Running on a worker already.
+                None if self.pending.contains(&job) => continue,
+                None => match self.work_for(job) {
+                    Some(w) => w,
+                    None => continue,
+                },
+            };
+            if refine {
+                q.refine.push_back(work);
+            } else {
+                q.preview.push_back(work);
+            }
+            self.pending.insert(job);
         }
-        drop(q);
-        cv.notify_one();
-        self.pending.insert(job);
+        for job in waiting.keys() {
+            self.pending.remove(job);
+        }
+        let any = !q.preview.is_empty() || !q.refine.is_empty();
+        drop(guard);
+        if any {
+            cv.notify_all();
+        }
     }
 
     /// A tile's best colours so far: refined when ready, else the preview.
@@ -1108,13 +1155,17 @@ fn job_dimension(job: &Job) -> Dimension {
     }
 }
 
+/// Physical pixels per sample: two keeps biome edges crisp on high-density
+/// screens at a quarter of the work of one per pixel.
+const PIXELS_PER_SAMPLE: f32 = 2.0;
+
 /// The sample step for a region drawn `side_px` physical pixels wide: about
-/// one sample per screen pixel (a power of two, 1 to 1024), no finer than the
-/// configured resolution.
+/// one sample per [`PIXELS_PER_SAMPLE`] screen pixels (a power of two, 1 to
+/// 1024), no finer than the configured resolution.
 pub fn step_for(side_px: f32, resolution: u8) -> i32 {
-    let blocks_per_px = 512.0 / side_px.max(0.001);
+    let blocks_per_sample = 512.0 * PIXELS_PER_SAMPLE / side_px.max(0.001);
     let mut step = 1;
-    while step < 1024 && (step * 2) as f32 <= blocks_per_px {
+    while step < 1024 && (step * 2) as f32 <= blocks_per_sample {
         step *= 2;
     }
     step.max(resolution.clamp(1, 16) as i32)
@@ -1177,9 +1228,103 @@ mod tests {
         assert_eq!(tile.size, TILE_SAMPLES as u32);
         assert!(tile.pixels.iter().all(|p| p >> 24 == 0xFF));
         assert!(marks.is_some());
+        assert_eq!(step_for(1200.0, 1), 1);
         assert_eq!(step_for(600.0, 1), 1);
+        assert_eq!(step_for(400.0, 1), 2);
         assert_eq!(step_for(400.0, 4), 4);
-        assert_eq!(step_for(10.0, 1), 32);
+        assert_eq!(step_for(10.0, 1), 64);
         assert_eq!(step_for(0.1, 1), 1024);
+    }
+
+    #[test]
+    fn the_queue_follows_the_latest_frame() {
+        let mut svc = SeedService::default();
+        svc.configure(
+            Some((7, false)),
+            &SeedAtlasSettings {
+                worker_threads: 1,
+                ..SeedAtlasSettings::default()
+            },
+        );
+        let job = |x| Job::Tile {
+            dimension: Dimension::Overworld,
+            region: RegionPos::new(x, 0),
+            step: 64,
+            y: 255,
+            refine: false,
+        };
+        // Frame 1 asks for 0..40, frame 2 only for 100..103: what frame 1
+        // wanted and nobody runs yet is dropped.
+        for x in 0..40 {
+            svc.tile(job(x));
+        }
+        svc.poll();
+        for x in 100..103 {
+            svc.tile(job(x));
+        }
+        svc.poll();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while svc.pending() > 0 && std::time::Instant::now() < deadline {
+            for x in 100..103 {
+                svc.tile(job(x));
+            }
+            svc.poll();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        for x in 100..103 {
+            assert!(
+                svc.cached_tile(job(x)).is_some(),
+                "tile {x} of the latest frame"
+            );
+        }
+        let early = (0..40)
+            .filter(|&x| svc.cached_tile(job(x)).is_some())
+            .count();
+        assert!(
+            early <= 2,
+            "{early} tiles of the old frame were still computed"
+        );
+        // Not drawn any more: nothing waits.
+        svc.poll();
+        assert_eq!(svc.pending(), 0);
+    }
+
+    /// The cost of one tile by step (run by hand:
+    /// `cargo test -p meridian-core --release tile_cost -- --ignored --nocapture`).
+    #[test]
+    #[ignore = "measurement"]
+    fn tile_cost() {
+        let atlas = Atlas::versioned(42, false, meridian_seedatlas::mc::MC_NEWEST);
+        let look = TileLook {
+            terrain: true,
+            looks: Arc::new(VanillaLooks),
+            highlight: Arc::new(Vec::new()),
+            surface: None,
+            cave_mask: None,
+        };
+        for step in [1, 2, 4, 8, 16, 32, 64, 128, 256] {
+            for (terrain, label) in [(false, "biomes"), (true, "terrain look")] {
+                let look = TileLook {
+                    terrain,
+                    ..look.clone()
+                };
+                let t = std::time::Instant::now();
+                let n = 4;
+                for i in 0..n {
+                    let job = Job::Tile {
+                        dimension: Dimension::Overworld,
+                        region: RegionPos::new(i, 3),
+                        step,
+                        y: 255,
+                        refine: false,
+                    };
+                    std::hint::black_box(tile_pixels(&atlas, &look, job));
+                }
+                println!(
+                    "step {step:>3} {label:>12}: {:.1} ms per tile",
+                    t.elapsed().as_secs_f64() * 1000.0 / n as f64
+                );
+            }
+        }
     }
 }
