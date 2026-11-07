@@ -344,8 +344,12 @@ Bisher fragte Meridian Marker je Region (512 Blöcke) an, nur im Umkreis von 7 R
   - Die Mitte rastet auf dieses Raster ein, kleine Bewegungen behalten den Scan.
   - Die Sicht in Blöcken ist die tatsächlich sichtbare Fläche; die Fabric-Version rechnet mit Fensterpixeln und dem Maßstab von Xaero.
 - **Ergebnisgrenzen der Glue-Schicht:** 1024 je Art, 4096 Schleimchunks (`scan_structures_capped`, `scan_slime_chunks_capped`, wie `append_result`).
-  - Der Scan endet bei der Grenze, also in Zeilen von Nord nach Süd.
-  - Weit herausgezoomt zeigen dichte Arten (z. B. Ozeanmonumente) deshalb nur im Norden des Scans Marker, wie in der Fabric-Version.
+  - In der Fabric-Version endet der Scan bei der Grenze, also in Zeilen von Nord nach Süd. Weit herausgezoomt zeigten dichte Arten (Ozeanmonumente) deshalb nur im Norden Marker.
+  - **Bewusste Abweichung (auf Wunsch):** Meridian verteilt die Treffer gleichmäßig (`Atlas::scan_spread`, `thin_evenly`).
+    - Hat das Quadrat weit mehr Kandidaten-Zellen als das Vierfache der Grenze, prüft der Scan nur jede k-te Zelle in beide Richtungen (Region, Erzader-Zelle, Chunk).
+    - Danach bleibt höchstens ein Treffer je Zelle eines Zweierpotenz-Rasters, bis die Grenze erreicht ist.
+    - Beide Raster sind an der Welt ausgerichtet, damit Marker beim Verschieben an ihrem Platz bleiben.
+    - Kleine Quadrate behalten alle Treffer, genau wie die Glue-Schicht.
 - **Zoomfilter (`visibleAtZoom`)** mit dem Zoom der Karte (wie Xaeros Anzeige, z. B. „0.1x“):
 
   | Arten | sichtbar ab Zoom | höchstens bis Radius |

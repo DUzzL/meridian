@@ -378,6 +378,7 @@ impl Atlas {
         requested: i32,
         b: [i32; 4],
         cap: usize,
+        stride: i32,
     ) -> Result<Vec<Hit>, AtlasError> {
         const SIZE: i32 = 128;
         let (mx0, mz0, mx1, mz1) = (
@@ -396,6 +397,9 @@ impl Atlas {
         let mut out = Vec::new();
         for mz in mz0..=mz1 {
             for mx in mx0..=mx1 {
+                if stride > 1 && (mx.rem_euclid(stride) != 0 || mz.rem_euclid(stride) != 0) {
+                    continue;
+                }
                 let mut found = false;
                 'cells: for cz in 0..8 {
                     for cx in 0..8 {
@@ -514,6 +518,19 @@ impl Atlas {
         check_biome: bool,
         cap: usize,
     ) -> Result<Vec<Hit>, AtlasError> {
+        self.scan_structures_strided(structure, b, check_biome, cap, 1)
+    }
+
+    /// The scan over every `stride`-th cell (region, ore cell) in both
+    /// directions, on a grid aligned to the world.
+    fn scan_structures_strided(
+        &self,
+        structure: i32,
+        b: [i32; 4],
+        check_biome: bool,
+        cap: usize,
+        stride: i32,
+    ) -> Result<Vec<Hit>, AtlasError> {
         if b[0] > b[2] || b[1] > b[3] {
             return Err(AtlasError::Argument);
         }
@@ -524,7 +541,7 @@ impl Atlas {
         ]
         .contains(&structure)
         {
-            return self.scan_ore_veins(structure, b, cap);
+            return self.scan_ore_veins(structure, b, cap, stride);
         }
         if structure == kind::END_ISLAND {
             return self.scan_end_islands(b, check_biome, cap);
@@ -579,6 +596,9 @@ impl Atlas {
         }
         for rz in rz0..=rz1 {
             for rx in rx0..=rx1 {
+                if stride > 1 && (rx.rem_euclid(stride) != 0 || rz.rem_euclid(stride) != 0) {
+                    continue;
+                }
                 let Some((x, z)) = structure_pos(engine, self.mc, seed, rx, rz) else {
                     continue;
                 };
@@ -698,6 +718,15 @@ impl Atlas {
         b: [i32; 4],
         cap: usize,
     ) -> Result<Vec<Hit>, AtlasError> {
+        self.scan_slime_chunks_strided(b, cap, 1)
+    }
+
+    fn scan_slime_chunks_strided(
+        &self,
+        b: [i32; 4],
+        cap: usize,
+        stride: i32,
+    ) -> Result<Vec<Hit>, AtlasError> {
         if b[0] > b[2] || b[1] > b[3] {
             return Err(AtlasError::Argument);
         }
@@ -713,6 +742,9 @@ impl Atlas {
         let mut out = Vec::new();
         for cz in z0..=z1 {
             for cx in x0..=x1 {
+                if stride > 1 && (cx.rem_euclid(stride) != 0 || cz.rem_euclid(stride) != 0) {
+                    continue;
+                }
                 if is_slime_chunk(self.seed as u64, cx, cz) {
                     if out.len() >= cap {
                         return Ok(out);
@@ -730,6 +762,103 @@ impl Atlas {
         }
         Ok(out)
     }
+}
+
+// ------------------------------------------------------ even thinning --
+
+/// Candidates checked per result kept when a scan is thinned.
+const SPREAD_OVERSAMPLE: i64 = 4;
+
+impl Atlas {
+    /// The blocks one candidate cell of a scan covers (a structure's region,
+    /// an ore vein cell, a chunk), if the kind scans by cells.
+    fn scan_cell(&self, structure: i32) -> Option<i32> {
+        if [
+            marker::ORE_VEIN,
+            marker::ORE_VEIN_COPPER,
+            marker::ORE_VEIN_IRON,
+        ]
+        .contains(&structure)
+        {
+            return Some(128);
+        }
+        if structure == marker::SLIME_CHUNK {
+            return Some(16);
+        }
+        let engine = if structure == marker::END_SHIP {
+            kind::END_CITY
+        } else {
+            structure
+        };
+        if !(1..kind::COUNT).contains(&engine) || structure == kind::END_ISLAND {
+            return None;
+        }
+        config(engine, self.mc).map(|c| c.region_size as i32 * 16)
+    }
+
+    /// A scan of `structure` (structures, ore veins, slime chunks) that
+    /// keeps at most `cap` results spread evenly over the box, instead of
+    /// the first ones in scan order: where the box holds far more candidates
+    /// than that, only every k-th cell is checked, and the results are
+    /// thinned to one per cell of a grid. Both grids are aligned to the
+    /// world, so moving the view keeps the markers in place.
+    pub fn scan_spread(
+        &self,
+        structure: i32,
+        b: [i32; 4],
+        check_biome: bool,
+        cap: usize,
+    ) -> Result<Vec<Hit>, AtlasError> {
+        if b[0] > b[2] || b[1] > b[3] {
+            return Err(AtlasError::Argument);
+        }
+        let cap = cap.max(1);
+        let stride = match self.scan_cell(structure) {
+            Some(cell) => {
+                let w = (b[2] as i64 - b[0] as i64) / cell as i64 + 1;
+                let h = (b[3] as i64 - b[1] as i64) / cell as i64 + 1;
+                let budget = cap as i64 * SPREAD_OVERSAMPLE;
+                let mut k = 1i64;
+                while (w / k) * (h / k) > budget && k < 1 << 16 {
+                    k *= 2;
+                }
+                k as i32
+            }
+            None => 1,
+        };
+        let all = if structure == marker::SLIME_CHUNK {
+            self.scan_slime_chunks_strided(b, usize::MAX, stride)?
+        } else {
+            self.scan_structures_strided(structure, b, check_biome, usize::MAX, stride)?
+        };
+        Ok(thin_evenly(all, b, cap))
+    }
+}
+
+/// At most `cap` hits, one per cell of a world-aligned power-of-two grid
+/// fine enough to hold `cap` cells over the box; the first hit in scan
+/// order wins a cell.
+pub fn thin_evenly(hits: Vec<Hit>, b: [i32; 4], cap: usize) -> Vec<Hit> {
+    if hits.len() <= cap {
+        return hits;
+    }
+    let side = (b[2] as i64 - b[0] as i64 + 1).max(b[3] as i64 - b[1] as i64 + 1);
+    let per_side = (cap as f64).sqrt().floor().max(1.0) as i64;
+    let mut cell = 1i64;
+    while side.div_euclid(cell) + 1 > per_side {
+        cell *= 2;
+    }
+    let mut taken = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(cap);
+    for h in hits {
+        if taken.insert((h.x as i64).div_euclid(cell) * 1_000_003 + (h.z as i64).div_euclid(cell)) {
+            out.push(h);
+            if out.len() >= cap {
+                break;
+            }
+        }
+    }
+    out
 }
 
 // ------------------------------------------------- terrain (ABI 6, 1.18+) --

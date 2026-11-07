@@ -473,3 +473,5 @@ Neue Tests:
 - **Neue Tests:** `view_boxes_like_the_fabric_version`, `dense_markers_only_up_close`; der Servicetest nutzt jetzt den Sicht-Scan.
 
 **Build und Tests**: 187 Kern-Tests, die Engine-Tests und der Paritätstest grün; Clippy sauber, Adapter-Check grün; Launcher-Build `native-66f3981-85c46d528fc6`.
+
+- **Nachtrag:** Weit herausgezoomt verteilen sich die Marker dichter Arten jetzt gleichmäßig über die ganze Sicht, statt nur im Norden zu stehen (D-031, bewusste Abweichung von der Fabric-Version). Im Spiel bei 0,018x geprüft, auch nach dem Verschieben. Neuer Test: `capped_scans_spread_over_the_whole_box`. Der Paritätstest bleibt grün. Launcher-Build `native-66f3981-098c8f7d2b74`.

@@ -791,7 +791,9 @@ fn run(atlas: &Atlas, kinds: &[i32], look: &TileLook, job: Job, globals: &Global
                             .copied()
                             .collect())
                     }
-                    marker::SLIME_CHUNK => atlas.scan_slime_chunks_capped(b, SLIME_RESULTS),
+                    // Spread over the whole box rather than the first
+                    // results in scan order (which would fill the north).
+                    marker::SLIME_CHUNK => atlas.scan_spread(k, b, false, SLIME_RESULTS),
                     marker::SPAWN => {
                         let (x, z) = *globals.spawn.get_or_init(|| atlas.spawn(true));
                         let spawn = Hit {
@@ -808,7 +810,7 @@ fn run(atlas: &Atlas, kinds: &[i32], look: &TileLook, job: Job, globals: &Global
                             Vec::new()
                         })
                     }
-                    k => atlas.scan_structures_capped(k, b, true, RESULTS_PER_KIND),
+                    k => atlas.scan_spread(k, b, true, RESULTS_PER_KIND),
                 }
             };
             Done::Markers(job, Arc::new(found.unwrap_or_default()))
@@ -1477,6 +1479,36 @@ mod tests {
         assert_eq!(
             view_box([10.0, 10.0], [400.0, 300.0]).0,
             view_box([900.0, 900.0], [400.0, 300.0]).0
+        );
+    }
+
+    #[test]
+    fn capped_scans_spread_over_the_whole_box() {
+        let atlas = Atlas::versioned(42, false, meridian_seedatlas::mc::MC_NEWEST);
+        let (b, _) = view_box([0.0, 0.0], [200_000.0, 200_000.0]);
+        let kind = meridian_seedatlas::structures::kind::MONUMENT;
+        let hits = atlas.scan_spread(kind, b, true, RESULTS_PER_KIND).unwrap();
+        assert!(!hits.is_empty() && hits.len() <= RESULTS_PER_KIND);
+        // Every quarter of the box has markers, the south as well as the north.
+        let (mx, mz) = ((b[0] + b[2]) / 2, (b[1] + b[3]) / 2);
+        for (east, south) in [(false, false), (true, false), (false, true), (true, true)] {
+            let n = hits
+                .iter()
+                .filter(|h| (h.x >= mx) == east && (h.z >= mz) == south)
+                .count();
+            assert!(
+                n > hits.len() / 8,
+                "quarter east={east} south={south}: {n} of {}",
+                hits.len()
+            );
+        }
+        // A small box keeps every result.
+        let small = [0, 0, 4095, 4095];
+        assert_eq!(
+            atlas
+                .scan_spread(kind, small, true, RESULTS_PER_KIND)
+                .unwrap(),
+            atlas.scan_structures(kind, small, true).unwrap()
         );
     }
 
