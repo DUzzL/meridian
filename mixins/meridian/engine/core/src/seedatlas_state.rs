@@ -259,8 +259,9 @@ pub fn resolve_all(
 
 /// Moves the versions older releases kept in each settings profile into the
 /// book (the current profile's first; a context the book has keeps its
-/// version). True when a profile had any: the settings file should be saved
-/// without them.
+/// version), and mirrors the book to every profile. True when a profile
+/// had versions and the book or a profile changed: the settings file should
+/// be saved again.
 pub fn adopt_profile_versions(book: &mut SeedBook, config: &mut ConfigFile) -> bool {
     let mut versions = book.versions().clone();
     let current = config.current_profile.clone();
@@ -283,19 +284,22 @@ pub fn adopt_profile_versions(book: &mut SeedBook, config: &mut ConfigFile) -> b
                 .or_insert_with(|| version.clone());
         }
     }
-    book.set_versions(&versions);
-    mirror_versions(book, config);
-    found
+    let stored = book.set_versions(&versions);
+    let mirrored = mirror_versions(book, config);
+    found && (stored || mirrored)
 }
 
 /// Gives every profile the book's versions, so switching profiles keeps
 /// each world's version.
-pub fn mirror_versions(book: &SeedBook, config: &mut ConfigFile) {
+pub fn mirror_versions(book: &SeedBook, config: &mut ConfigFile) -> bool {
+    let mut changed = false;
     for settings in config.profiles.values_mut() {
         if settings.seed_atlas.game_versions != *book.versions() {
             settings.seed_atlas.game_versions = book.versions().clone();
+            changed = true;
         }
     }
+    changed
 }
 
 /// Stores the versions the current profile's settings were edited to (by
@@ -605,7 +609,7 @@ mod tests {
         let back: SeedAtlasSettings = serde_json::from_str(&text).unwrap();
         assert_eq!(back.context_key, "");
         assert_eq!(back.highlighted_biomes, s.highlighted_biomes);
-        assert!(back.game_versions.is_empty());
+        assert_eq!(back.game_versions, s.game_versions, "a copy stays");
         assert_eq!((back.marker_size, back.completed_opacity), (250, 30));
         assert!(back.biome_highlight && back.overlay_explored);
         assert_eq!(s.game_version(), Some("1.20.6"));
@@ -640,13 +644,14 @@ mod tests {
                 .values()
                 .all(|p| p.seed_atlas.game_versions == *b.versions())
         );
-        // Not written to the settings any more; kept in seeds.toml.
-        assert!(!toml::to_string(&config).unwrap().contains("1.16.5"));
+        // Kept in seeds.toml; the settings keep a copy in case the book
+        // cannot be written.
+        assert!(toml::to_string(&config).unwrap().contains("1.16.5"));
         assert_eq!(book(&dir).versions(), b.versions());
-        assert!(!adopt_profile_versions(
-            &mut book(&dir),
-            &mut ConfigFile::default()
-        ));
+        assert!(
+            !adopt_profile_versions(&mut book(&dir), &mut config.clone()),
+            "nothing new the next time"
+        );
         // Chosen in one profile, the same in another.
         let key = "sp-w";
         set_game_version(

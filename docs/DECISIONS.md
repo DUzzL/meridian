@@ -522,14 +522,14 @@ Das Audit vom 2026-11-07 (Commit `92c0fd5`) fand 42 Punkte (AUD-001 bis AUD-042)
 - **Beenden (AUD-023):** Beenden und Trennen warten bis zu 5 s auf offene Speicher-Jobs (`flush_and_wait`).
 - **Reihenfolge (AUD-037):** Laden wartet auf frühere Speicher-Jobs derselben Datei. Temporäre Dateien heißen nach Prozess und Zähler; der Ordner wird unter Unix mit `fsync` gesichert.
 - **Zweites Spiel (WM-20):** Eine Sperrdatei `meridian.lock` mit Betriebssystem-Sperre; ein zweites Spiel speichert keine Regionen und zeigt einen Hinweis. Wegpunkte, Seeds und Einstellungen sind davon nicht erfasst.
-- **Kartennamen** werden ohne Groß-/Kleinschreibung verglichen. Umbenennen nimmt Seeds, erledigte Strukturen und Spielversionen mit.
+- **Kartennamen** werden ohne Groß-/Kleinschreibung verglichen. Umbenennen nimmt Seeds, erledigte Strukturen und Spielversionen mit, wartet vorher auf laufende Speicher-Jobs und wird abgelehnt, wenn die Kartenliste des Servers nicht lesbar war.
 
 **Weltkarte und Engine**
 
 - **Speicherbudget (AUD-009):** Neben `max_loaded_regions` gilt `world_map.max_region_mib` (Standard 512 MiB). Weit herausgezoomt werden alle Regionen außerhalb der 5 × 5 um die Kartenmitte und der 3 × 3 um den Spieler zu Übersichtsbildern. D-027 stimmt damit. GPU-Texturen werden beim Trennen und beim Kartenwechsel verworfen.
 - **Höhlenebenen (AUD-012):** Chunk-Antworten tragen ihren Lesemodus; Antworten für eine andere Ebene werden verworfen. Die Bridge führt Anfragen nach Position und Modus (Version 11).
 - **Revisionen (AUD-013)** kommen aus einem prozessweiten Zähler; der Texturschlüssel enthält den Kartennamen.
-- **Spawn auf Servern (AUD-022):** Horizon meldet nicht, wann ein Server einen neuen Spawn angekündigt hat. Nach dem Laden einer Ebene gilt ein Spawn erst, wenn ein anderer gemeldet wird oder 5 s vergangen sind (`SPAWN_GRACE`). Bis dahin liest die Engine weiter, speichert aber nichts. Fällt die Wahl auf eine andere Karte, wird das Gelesene verworfen und neu gelesen.
+- **Spawn auf Servern (AUD-022):** Horizon meldet nicht, wann ein Server einen neuen Spawn angekündigt hat. Nach dem Laden einer Ebene gilt ein Spawn erst, wenn ein anderer gemeldet wird oder 5 s vergangen sind (`SPAWN_GRACE`). Bis dahin liest die Engine weiter, speichert aber nichts. Fällt die Wahl auf eine andere Karte, wird das Gelesene verworfen und neu gelesen. Ein Wechsel der Höhlenebene wartet so lange, damit das Gelesene nicht verloren geht. Wechselt die Ebene (Portal) oder endet das Spiel in diesen 5 s, gehen höchstens diese Sekunden Kartierung verloren.
 - **Zeit statt Frames (AUD-038):** Das Anfrage-Timeout sind 10 s, `chunk_reads_per_tick` gilt pro 50 ms Wanduhrzeit (nicht Spielzeit, die unter `/tick freeze` steht). Standard jetzt 64 (rund 1280 Chunks/s); vorher waren es 16 pro Frame. `frame_budget_us` und das 1,5-ms-Budget der Bridge bleiben bewusst pro Frame.
 - **Threads (AUD-039):** Kartenworker, Nächste-Suche und PNG-Export laufen mit niedriger Priorität. Die Ansicht einer anderen Dimension hat höchstens 2 Worker und wird auf einem eigenen Thread abgebaut.
 
@@ -573,7 +573,7 @@ Das Audit vom 2026-11-07 (Commit `92c0fd5`) fand 42 Punkte (AUD-001 bis AUD-042)
 
 - **Kleinster Zoom:** mit Seed-Ebene 1/512 wie in der Fabric-Version.
 - **Y-Werte:** Oberwelt-, Nether- und End-Y sind Textfelder (−2048 bis 2048) wie in der Fabric-Version, statt 9 Voreinstellungen.
-- **Spielversion pro Welt** liegt jetzt in `seeds.toml` (`[versions]`) statt im Einstellungsprofil; alte Einträge werden beim Start übernommen.
+- **Spielversion pro Welt** liegt jetzt in `seeds.toml` (`[versions]`) statt im Einstellungsprofil; alte Einträge werden beim Start übernommen. Jedes Profil behält eine Kopie, damit die Versionen auch dann erhalten bleiben, wenn `seeds.toml` nicht geschrieben werden kann; beim Start gilt das Buch.
 - **Fabric-Details (AUD-036):** Spawn als Schätzung mit „(approx.)“; einzeiliger Marker-Tooltip mit Lagerbiom und `Y=?`; Biomnamen der gewählten Version; Ozeanruinen-Icon mit Rahmen; die Wahl eines Bioms schaltet die Hervorhebung ein; Ergebnisse der Nächste-Suche verfallen, wenn der Screen verlassen oder die Welt gewechselt wurde; „Copy coordinates“ mit Y; „Create waypoint“ öffnet den Editor.
 - **Worker** starten erst mit dem ersten Auftrag, laufen also nicht bei abgeschaltetem Seed Atlas. Die Nether-Höhlenmasken werden außerhalb der globalen Sperre geschnitzt.
 - **Fixtures (AUD-029):** zusätzlich Schrittweiten 32/128/512, je Dimension eine ganze 128 × 128-Kachel und Höhenschritte 8 und 32 (End 8). Alle bisherigen Zeilen sind unverändert.

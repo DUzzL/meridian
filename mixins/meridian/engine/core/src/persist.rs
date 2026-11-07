@@ -263,11 +263,16 @@ impl FileOrder {
         }
     }
 
-    /// A save of `path` is done (written or failed).
+    /// A save of `path` is done (written or failed). A file with no save
+    /// left running is forgotten (waiters take a missing file as done), so
+    /// the table only holds files being saved.
     pub fn save_finished(&self, path: &Path) {
         let mut files = self.files.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(e) = files.get_mut(path) {
             e.1 += 1;
+            if e.1 >= e.0 {
+                files.remove(path);
+            }
         }
         self.changed.notify_all();
     }
@@ -591,6 +596,10 @@ mod tests {
         done.fetch_add(1, Ordering::SeqCst);
         order.save_finished(path);
         assert_eq!(loader.join().unwrap(), 2, "the load ran after both saves");
+        assert!(
+            order.files.lock().unwrap().is_empty(),
+            "a file is forgotten once no save of it runs"
+        );
         // Other files never wait.
         order.wait_finished(Path::new("/x/2_2.mrg"), 0);
     }

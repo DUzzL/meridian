@@ -230,6 +230,10 @@ impl SeedBook {
                 moved = true;
             }
         }
+        if let Some(v) = self.versions.remove(old) {
+            self.versions.insert(new.to_owned(), v);
+            moved = true;
+        }
         if moved {
             self.save();
         }
@@ -1806,8 +1810,15 @@ mod tests {
                 seed: 2,
             },
         );
+        let versions = BTreeMap::from([("mp-x/old".to_owned(), "1.20.6".to_owned())]);
+        book.set_versions(&versions);
         assert!(book.rename_context("mp-x/old", "mp-x/new"));
         let back = SeedBook::load(&dir);
+        assert_eq!(
+            back.versions().get("mp-x/new").map(String::as_str),
+            Some("1.20.6"),
+            "the version moves with the map"
+        );
         assert_eq!(back.get("mp-x/new"), Some(&entry));
         assert_eq!(
             back.dimension_seed("mp-x/new", Dimension::Nether)

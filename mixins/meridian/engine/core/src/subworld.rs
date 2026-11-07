@@ -69,6 +69,12 @@ impl ServerMaps {
         maps
     }
 
+    /// Whether [`ServerMaps::save`] writes (false for a list that could not
+    /// be read).
+    pub fn writable(&self) -> bool {
+        self.path.is_some()
+    }
+
     pub fn save(&self) -> Result<(), persist::PersistError> {
         let Some(path) = &self.path else {
             return Ok(());

@@ -159,6 +159,9 @@ pub struct MapEngine {
     /// Nothing is saved: it is not known yet which map of a server the
     /// chunks read belong to.
     hold_saves: bool,
+    /// A layer switch asked for while saves were held, applied when they
+    /// resume (switching drops the regions, and held ones are unsaved).
+    deferred_layer: Option<Option<i32>>,
     /// Requests that went unanswered, per chunk.
     failures: HashMap<ChunkPos, u8>,
     /// Chunks the client holds, whatever map is open.
@@ -260,6 +263,7 @@ impl MapEngine {
             read_credit: 0.0,
             last_tick: None,
             hold_saves: false,
+            deferred_layer: None,
             failures: HashMap::new(),
             loaded_chunks: HashSet::new(),
             layer: None,
@@ -301,9 +305,9 @@ impl MapEngine {
         self.map = map.to_owned();
         if let Some(active) = self.active.as_ref() {
             let context = active.context.clone();
-            let layer = self.layer;
+            let layer = self.deferred_layer.take().unwrap_or(self.layer);
             self.open(context);
-            self.set_layer(layer);
+            self.switch_layer(layer);
         }
     }
 
@@ -345,7 +349,18 @@ impl MapEngine {
     /// Switches between the surface and a cave layer: the current one is
     /// saved, and the loaded chunks are read again for the new one (which
     /// keeps its own files).
+    /// While saves are held the switch waits until they resume, so what
+    /// was read meanwhile is not lost.
     pub fn set_layer(&mut self, layer: Option<i32>) {
+        if self.hold_saves && self.regions.values().any(|r| r.unsaved) {
+            self.deferred_layer = (layer != self.layer).then_some(layer);
+            return;
+        }
+        self.deferred_layer = None;
+        self.switch_layer(layer);
+    }
+
+    fn switch_layer(&mut self, layer: Option<i32>) {
         if self.layer == layer {
             return;
         }
@@ -808,6 +823,9 @@ impl MapEngine {
     /// ends up in the wrong one.
     pub fn hold_saves(&mut self, hold: bool) {
         self.hold_saves = hold;
+        if !hold && let Some(layer) = self.deferred_layer.take() {
+            self.switch_layer(layer);
+        }
     }
 
     /// Keeps only the regions in a rectangle (inclusive) and around the
@@ -828,10 +846,23 @@ impl MapEngine {
     pub fn flush_and_wait(&mut self, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
         let mut report = TickReport::default();
+        // Saves per region: a failing disk is tried twice, not until the
+        // deadline.
+        let mut tries: HashMap<RegionPos, u8> = HashMap::new();
         loop {
             // Tiles that arrive meanwhile change regions again.
-            if self.regions.values().any(|r| r.unsaved) {
-                self.flush();
+            let unsaved: Vec<RegionPos> = self
+                .regions
+                .values()
+                .filter(|r| r.unsaved)
+                .map(|r| r.pos)
+                .collect();
+            for pos in unsaved {
+                let n = tries.entry(pos).or_default();
+                if *n < 2 {
+                    *n += 1;
+                    self.save(pos);
+                }
             }
             if self.saves_in_flight == 0 {
                 return true;
@@ -1697,11 +1728,15 @@ mod tests {
                 .region_file(RegionPos::new(0, 0))
                 .exists()
         );
-        // Released without a switch, the held changes are saved.
+        // Released without a switch, the held changes are saved, also when
+        // a cave layer was asked for meanwhile: it follows on release.
         e.hold_saves(true);
         e.handle(&world, HostEvent::ChunkLoaded(ChunkPos::new(40, 40)));
         settle(&mut e, &world);
+        e.set_layer(Some(40));
+        assert_eq!(e.layer(), None, "waits while held");
         e.hold_saves(false);
+        assert_eq!(e.layer(), Some(40));
         assert!(e.flush_and_wait(Duration::from_secs(5)));
         assert!(
             paths(&world, "map-2")

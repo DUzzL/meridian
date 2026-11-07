@@ -579,11 +579,17 @@ impl State {
                 let Some(data_dir) = self.export_dir.parent().map(std::path::Path::to_path_buf) else {
                     return "No data folder".to_owned();
                 };
+                if !maps.writable() {
+                    return "The server's map list could not be read, so it is not changed".to_owned();
+                }
                 let mut renamed = maps.clone();
                 let (old, new) = match renamed.rename(&old, &new) {
                     Ok(names) => names,
                     Err(e) => return e,
                 };
+                // Saves of the map just left may still be running; they would
+                // recreate its folder after the move.
+                self.engine.flush_and_wait(SAVE_WAIT);
                 // The files move with the name: maps live in one folder each.
                 let dir = meridian_core::persist::server_dir(&data_dir, &context.source);
                 let from = dir.join(meridian_core::persist::escape_component(&old));
@@ -598,13 +604,11 @@ impl State {
                 // So do its seeds, completed structures and game version.
                 let key = |map: &str| meridian_core::seedatlas_state::SeedContext::of_map(&context.source, map).key;
                 let (old_key, new_key) = (key(&old), key(&new));
-                self.seeds.rename_context(&old_key, &new_key);
-                self.completed.rename_world(&old_key, &new_key);
-                let versions = &mut self.config.current_mut().seed_atlas.game_versions;
-                if let Some(v) = versions.remove(&old_key) {
-                    versions.insert(new_key, v);
+                if self.seeds.rename_context(&old_key, &new_key) {
+                    meridian_core::seedatlas_state::mirror_versions(&self.seeds, &mut self.config);
                     self.save_config();
                 }
+                self.completed.rename_world(&old_key, &new_key);
                 format!("Renamed map {old} to {new}")
             }
             _ => "/meridian map [list | use <name> | new <name> | rename <old> <new>]".to_owned(),
@@ -1468,7 +1472,7 @@ impl Hooks for Meridian {
                 s.map.press = None;
                 s.reset_waypoint_place();
                 if !s.map_open {
-                    s.viewer = None;
+                    s.close_viewer();
                 }
             });
             gpu_map::set_frame(None);
@@ -1842,7 +1846,7 @@ impl Hooks for Meridian {
                 s.screen = None;
                 s.return_to_map = false;
                 s.map.press = None;
-                s.viewer = None;
+                s.close_viewer();
                 s.reset_waypoint_place();
                 gpu_map::set_frame(None);
             }
