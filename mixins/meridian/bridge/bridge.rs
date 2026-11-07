@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 /// Bumped when the shapes below change, so a trait mod can refuse a bridge
 /// it doesn't understand.
-pub const VERSION: u32 = 7;
+pub const VERSION: u32 = 8;
 /// Main-thread time per frame for chunk reads.
 const READ_BUDGET: Duration = Duration::from_micros(1500);
 
@@ -264,6 +264,13 @@ pub fn under_roof() -> bool {
 }
 
 /// Puts text on the system clipboard (`KeyboardHandler.setClipboard`).
+/// Lowers the calling thread as the game's far terrain threads are: long
+/// background work the frames and near chunks never wait behind (utility
+/// quality of service on macOS). Whether the OS took it.
+pub fn lower_current_thread() -> bool {
+    horizon_threads::far_terrain_current()
+}
+
 pub fn copy_to_clipboard(text: &str) {
     with(|s| s.clipboard = Some(text.to_owned()));
 }

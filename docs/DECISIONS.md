@@ -401,3 +401,23 @@ Die Seed-Atlas-Einstellungen waren bisher eine Gruppe im Raster der Minimap-Eins
   - Ozeanmonumente erst ab Zoom 0,0625 statt immer, weil sie in Ozeanen dicht stehen.
   - Antike Städte auf der Karte 24 statt 18 Pixel: Der Wardenkopf ist breit und dunkel und wirkte neben den Block-Icons klein.
   - Die Markerliste in den Einstellungen behält 18 Pixel.
+
+## D-034: Minimap nach ESC, Rechenlast der Seed-Atlas-Weltkarte
+
+- **Minimap nach ESC:** Horizon meldet das Schließen eines Mod-Screens erst im Frame danach, wenn er schon zu ist. Die Prüfung „unser Screen ist offen“ in `screen_closing` griff deshalb nie, `map_open` blieb gesetzt und das HUD ließ die Minimap weg.
+  - Jetzt setzt `screen_closing` den Zustand zurück, sobald unser Screen nicht mehr offen ist.
+  - Zusätzlich gleicht das HUD jeden Frame ab: Karte als offen gemerkt, aber kein Screen von uns offen, dann wird zurückgesetzt.
+- **Ursache der Dauerlast:** Gemessen im Testspiel (M-Serie, 3024×1720): Mit offener Seed-Atlas-Karte bei 0,3x lag der Prozess über 90 s bei ~290 % CPU.
+  - Profil: drei Seed-Atlas-Worker in der Gelände-Verfeinerung (Vanilla-Oberfläche).
+  - Keine Kachel wurde doppelt gerechnet. Die Verfeinerung war einfach zu teuer: ~3 s pro Kachel und Kern, ~200 Kacheln je Bildschirm.
+- **Gemeinsames Dichtegitter:** Die Oberfläche einer 16×16-Kachel kommt jetzt aus einem gemeinsamen Dichtegitter (`lod_grid` von Horizon, Bandmodus um die Oberfläche) statt aus 256 einzeln gerechneten Spalten (`surface_column`).
+  - Gemessen 11,9× schneller.
+  - Gegen die Einzelspalten: 99,0 % gleiche Höhe, 99,5 % höchstens einen Block daneben, 99,3 % gleiche Farbe.
+  - Weggelassen werden Aquifer-Taschen; Meerwasser bleibt.
+  - Test: `lattice_columns_match_single_columns`, braucht die Horizon-Ressourcen.
+- **Halbe Auflösung:** Die Verfeinerung tastet die Oberfläche mit halber Kachelauflösung ab (`SURFACE_SPACING` = 2). Höhen und Böden werden bilinear verteilt, Farben vom nächsten Sample übernommen (`upsample_surface`).
+  - Bei ein bis zwei Bildschirmpixeln pro Sample zeigt das dasselbe Relief, kostet aber ein Viertel.
+  - Bewusste Abweichung von der Fabric-Version, die jede Probe einzeln rechnet.
+- **Niedrige Priorität:** Seed-Atlas-Worker senken sich beim Start wie die Fern-Gelände-Threads des Spiels: macOS-QoS „utility“, unter Windows „below normal“.
+  - Über die Bridge, Version 8 (`lower_current_thread`, `seedatlas::WORKER_START`).
+- **Ergebnis im Spiel:** Nach starkem Herauszoomen rechnen die Worker ~18 s statt minutenlang. Danach liegt der Prozess wieder bei ~50 %, dem Wert beim Spielen.

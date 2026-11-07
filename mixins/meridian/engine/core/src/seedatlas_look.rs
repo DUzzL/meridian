@@ -977,6 +977,63 @@ pub struct SurfaceGrid {
     pub colors: Vec<i32>,
 }
 
+/// Samples a refined tile's surface is sampled apart, in tile samples: the
+/// vanilla base terrain is by far the dearest part of a tile, and at one or
+/// two screen pixels a sample half its resolution shows the same relief.
+pub const SURFACE_SPACING: usize = 2;
+
+/// The side of the coarse surface grid behind a tile of `size` samples: its
+/// samples [`SURFACE_SPACING`] tile samples apart, from one coarse sample
+/// before the tile's halo.
+pub fn coarse_surface_side(size: usize) -> usize {
+    (size + 2) / SURFACE_SPACING + 2
+}
+
+/// A tile's surface grid (`(size+2)^2`, with its one-sample halo) from the
+/// coarse one ([`coarse_surface_side`]): heights and floors bilinear,
+/// colours from the nearest coarse sample. Fine sample `i` (halo origin)
+/// sits at coarse position `(i + SURFACE_SPACING - 1) / SURFACE_SPACING`
+/// when the coarse grid starts `SURFACE_SPACING` tile samples before the halo.
+pub fn upsample_surface(coarse: &SurfaceGrid, size: usize) -> Option<SurfaceGrid> {
+    let side = coarse_surface_side(size);
+    if coarse.heights.len() != side * side
+        || coarse.floors.len() != side * side
+        || coarse.colors.len() != side * side
+    {
+        return None;
+    }
+    let fine = size + 2;
+    let k = SURFACE_SPACING as f32;
+    let at = |i: usize| {
+        let u = (i as f32 + k - 1.0) / k;
+        let j = (u.floor() as usize).min(side - 2);
+        (j, u - j as f32)
+    };
+    let mut out = SurfaceGrid {
+        heights: vec![0.0; fine * fine],
+        floors: vec![0.0; fine * fine],
+        colors: vec![-1; fine * fine],
+    };
+    for z in 0..fine {
+        let (jz, tz) = at(z);
+        for x in 0..fine {
+            let (jx, tx) = at(x);
+            let idx = |dx: usize, dz: usize| (jz + dz) * side + jx + dx;
+            let mix = |v: &[f32]| {
+                let top = v[idx(0, 0)] + (v[idx(1, 0)] - v[idx(0, 0)]) * tx;
+                let bottom = v[idx(0, 1)] + (v[idx(1, 1)] - v[idx(0, 1)]) * tx;
+                top + (bottom - top) * tz
+            };
+            let o = z * fine + x;
+            out.heights[o] = mix(&coarse.heights);
+            out.floors[o] = mix(&coarse.floors).min(out.heights[o]);
+            let near = idx(usize::from(tx >= 0.5), usize::from(tz >= 0.5));
+            out.colors[o] = coarse.colors[near];
+        }
+    }
+    Some(out)
+}
+
 /// What the tile worker asks the atlas for besides the biomes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HeightsRequest {
@@ -1221,6 +1278,26 @@ mod tests {
         apply(&mut c, &ids, 0, 0, 1, 2, 1, Some(&flat_heights(2, 60.0)));
         apply(&mut d, &ids, 0, 0, 1, 2, 1, Some(&flat_heights(2, -20.0)));
         assert!(sum(d[0]) < sum(c[0]));
+    }
+
+    #[test]
+    fn coarse_surfaces_upsample_to_the_tile() {
+        let size = 4;
+        let side = coarse_surface_side(size);
+        assert_eq!(side, 5);
+        // Heights rise one a coarse sample eastwards; colours by column.
+        let coarse = SurfaceGrid {
+            heights: (0..side * side).map(|i| (i % side) as f32 * 2.0).collect(),
+            floors: vec![-10.0; side * side],
+            colors: (0..side * side).map(|i| (i % side) as i32).collect(),
+        };
+        let fine = upsample_surface(&coarse, size).unwrap();
+        let row: Vec<f32> = fine.heights[..size + 2].to_vec();
+        // Fine sample i at coarse (i + 1) / 2.
+        assert_eq!(row, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+        assert_eq!(&fine.colors[..size + 2], &[1, 1, 2, 2, 3, 3]);
+        assert!(fine.floors.iter().all(|&f| f == -10.0));
+        assert!(upsample_surface(&coarse, size + 2).is_none(), "wrong coarse side");
     }
 
     #[test]

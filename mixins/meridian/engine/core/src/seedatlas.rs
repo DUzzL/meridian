@@ -586,6 +586,10 @@ struct Queue {
     closed: bool,
 }
 
+/// Run by each Seed Atlas worker as it starts: the host lowers the thread's
+/// priority there (the work is long and nothing the frames wait for).
+pub static WORKER_START: std::sync::OnceLock<fn()> = std::sync::OnceLock::new();
+
 type SharedQueue = Arc<(parking_lot::Mutex<Queue>, parking_lot::Condvar)>;
 
 /// How tiles are coloured: the terrain look and the biome data it reads.
@@ -713,15 +717,21 @@ fn tile_pixels(atlas: &Atlas, look: &TileLook, job: Job) -> Vec<u32> {
     // Detailed Overworld tiles: the game's vanilla base terrain, with a
     // one-sample halo (the Fabric version's refinement pass).
     let surface = match (&look.surface, dimension) {
-        (Some(sample), Dimension::Overworld) if refine && step <= 4 => sample(
-            atlas.seed,
-            atlas.large_biomes,
-            x0 - step,
-            z0 - step,
-            step,
-            size + 2,
-            size + 2,
-        ),
+        (Some(sample), Dimension::Overworld) if refine && step <= 4 => {
+            // At half the tile's resolution, then spread over it.
+            let k = seedatlas_look::SURFACE_SPACING as i32;
+            let side = seedatlas_look::coarse_surface_side(size);
+            sample(
+                atlas.seed,
+                atlas.large_biomes,
+                x0 - k * step,
+                z0 - k * step,
+                k * step,
+                side,
+                side,
+            )
+            .and_then(|coarse| seedatlas_look::upsample_surface(&coarse, size))
+        }
         _ => None,
     };
     let request = seedatlas_look::heights_request(
@@ -915,6 +925,9 @@ impl SeedService {
             let spawned = std::thread::Builder::new()
                 .name(format!("meridian-seedatlas-{i}"))
                 .spawn(move || {
+                    if let Some(start) = WORKER_START.get() {
+                        start();
+                    }
                     loop {
                         let (work, refining) = {
                             let (lock, cv) = &*queue;

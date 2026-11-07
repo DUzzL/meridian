@@ -342,11 +342,34 @@ fn context(world: WorldKey) -> Option<Arc<Context>> {
     Some(context)
 }
 
+/// How a tile's columns are sampled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ColumnSource {
+    /// Every column on its own, with the full aquifer (slow: each column
+    /// evaluates the density lattice around it again).
+    Single,
+    /// One shared density lattice for the whole tile (Horizon's far
+    /// sampling at full detail): the same cell interpolation the game
+    /// generates with, at a fraction of the work; aquifer pockets are left
+    /// out, sea level water is kept.
+    Lattice,
+    /// The shared lattice, fine only in the band around the surface (found
+    /// on a coarse lattice first): the surface the same, far less density
+    /// work in the deep rock and the sky.
+    Band,
+}
+
+const COLUMN_SOURCE: ColumnSource = ColumnSource::Band;
+
+const fn columns_len() -> usize {
+    TILE_SIZE * TILE_SIZE
+}
+
 impl Context {
     fn generate(&self, key: &TileKey, still_current: &dyn Fn() -> bool) -> Option<Arc<Tile>> {
         let pooled = self.workers.lock().unwrap_or_else(|e| e.into_inner()).pop();
         let mut worker = pooled.unwrap_or_else(|| self.terrain.worker());
-        let tile = self.fill(&mut worker, key, still_current);
+        let tile = self.fill(&mut worker, key, still_current, COLUMN_SOURCE);
         let mut idle = self.workers.lock().unwrap_or_else(|e| e.into_inner());
         if idle.len() < MAX_IDLE_WORKERS {
             idle.push(worker);
@@ -359,6 +382,7 @@ impl Context {
         worker: &mut <VanillaTerrain as ChunkGenerator>::Worker,
         key: &TileKey,
         still_current: &dyn Fn() -> bool,
+        source: ColumnSource,
     ) -> Option<Tile> {
         let states = self.terrain.generator_data().block_states().clone();
         let origin_x = i64::from(key.x) * TILE_SIZE as i64 * i64::from(key.step) + i64::from(key.phase_x);
@@ -368,14 +392,27 @@ impl Context {
         let mut floors = [MIN_Y - 1; TILE_SIZE * TILE_SIZE];
         let mut fluid = [false; TILE_SIZE * TILE_SIZE];
         let mut blocks = [[0i32; 2]; TILE_SIZE * TILE_SIZE];
-        for index in 0..columns {
-            if index % 4 == 0 && !still_current() {
-                return None;
+        if !still_current() {
+            return None;
+        }
+        let (ox, oz, step) = (origin_x as i32, origin_z as i32, key.step);
+        let spans_of: Vec<_> = match source {
+            ColumnSource::Lattice | ColumnSource::Band => {
+                let band = source == ColumnSource::Band;
+                let columns = worker.lod_grid(ox, oz, step, TILE_SIZE, band).ok()?;
+                if columns.len() != columns_len() {
+                    return None;
+                }
+                columns.into_iter().map(|(_, spans)| spans).collect()
             }
+            ColumnSource::Single => (0..columns_len())
+                .map(|i| worker.surface_column(ox + (i % TILE_SIZE) as i32 * step, oz + (i / TILE_SIZE) as i32 * step).1)
+                .collect(),
+        };
+        for (index, spans) in spans_of.into_iter().enumerate() {
             let block_x = (origin_x + (index % TILE_SIZE) as i64 * i64::from(key.step)) as i32;
             let block_z = (origin_z + (index / TILE_SIZE) as i64 * i64::from(key.step)) as i32;
             blocks[index] = [block_x, block_z];
-            let (_, spans) = worker.surface_column(block_x, block_z);
             // The runs of non-air blocks, half-open; the top slide's air
             // above `TOP_SLIDE_START` is never looked at.
             let (mut top, mut top_fluid) = (None::<i32>, false);
@@ -1118,6 +1155,45 @@ mod tests {
         colors.sort_unstable();
         colors.dedup();
         eprintln!("{} distinct colours, first {:06x?}", colors.len(), &colors[..colors.len().min(6)]);
+    }
+
+    #[test]
+    #[ignore = "needs Horizon's prepared resources"]
+    fn lattice_columns_match_single_columns() {
+        let world = WorldKey { seed: 1, large_biomes: false };
+        let context = context(world).expect("generator");
+        let mut worker = context.terrain.worker();
+        let mut timing = [std::time::Duration::ZERO; 3];
+        let (mut columns, mut same_height, mut near_height, mut same_color) = (0, 0, 0, 0);
+        let (mut band_height, mut band_near, mut band_color) = (0, 0, 0);
+        for step in [1, 2, 4] {
+            for t in 0..12 {
+                let key = TileKey { world, step, x: t * 7 - 40, z: 13 - t * 5, phase_x: 0, phase_z: 0 };
+                let started = std::time::Instant::now();
+                let single = context.fill(&mut worker, &key, &|| true, ColumnSource::Single).unwrap();
+                timing[0] += started.elapsed();
+                let started = std::time::Instant::now();
+                let lattice = context.fill(&mut worker, &key, &|| true, ColumnSource::Lattice).unwrap();
+                timing[1] += started.elapsed();
+                let started = std::time::Instant::now();
+                let band = context.fill(&mut worker, &key, &|| true, ColumnSource::Band).unwrap();
+                timing[2] += started.elapsed();
+                for i in 0..TILE_SIZE * TILE_SIZE {
+                    band_height += usize::from(single.heights[i] == band.heights[i]);
+                    band_near += usize::from((single.heights[i] - band.heights[i]).abs() <= 1.0);
+                    band_color += usize::from(single.colors[i] == band.colors[i]);
+                    columns += 1;
+                    same_height += usize::from(single.heights[i] == lattice.heights[i]);
+                    near_height += usize::from((single.heights[i] - lattice.heights[i]).abs() <= 1.0);
+                    same_color += usize::from(single.colors[i] == lattice.colors[i]);
+                }
+            }
+        }
+        eprintln!("single {:?}, lattice {:?} ({:.1}x)", timing[0], timing[1], timing[0].as_secs_f64() / timing[1].as_secs_f64());
+        eprintln!("{columns} columns: same height {same_height}, within a block {near_height}, same colour {same_color}");
+        eprintln!("band {:?} ({:.1}x): same height {band_height}, within a block {band_near}, same colour {band_color}", timing[2], timing[0].as_secs_f64() / timing[2].as_secs_f64());
+        assert!(timing[1] < timing[0]);
+        assert!(near_height * 100 >= columns * 97);
     }
 
     #[test]

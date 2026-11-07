@@ -47,7 +47,7 @@ use parking_lot::Mutex;
 pub const MOD_ID: &str = "meridian";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The bridge shape this adapter was written for.
-const BRIDGE_VERSION: u32 = 7;
+const BRIDGE_VERSION: u32 = 8;
 
 /// The singleplayer world's folder name, set by the integrated server's
 /// thread (the window's client only knows the world's display name).
@@ -615,6 +615,9 @@ impl Meridian {
             let engine = MapEngine::new(config.current().clone(), data_dir(host));
             if bridge::VERSION == BRIDGE_VERSION {
                 bridge::enable();
+                let _ = meridian_core::seedatlas::WORKER_START.set(|| {
+                    bridge::lower_current_thread();
+                });
             } else {
                 log::error!(
                     "meridian: bridge version {} (expected {BRIDGE_VERSION}): no map data",
@@ -1258,7 +1261,9 @@ impl Hooks for Meridian {
     }
 
     fn screen_closing(&self, host: &dyn Host, event: &mut ScreenClosingEvent<'_>) {
-        if event.screen.id == "mod" && host.mod_screen() == Some(MOD_ID) {
+        // The host reports a closed screen in the frame after it closed, when
+        // ours is no longer the open one: reset unless ours is still open.
+        if event.screen.id == "mod" && host.mod_screen() != Some(MOD_ID) {
             self.with_state(host, |s| {
                 s.screen = None;
                 s.map_open = false;
@@ -1612,6 +1617,15 @@ impl Hooks for Meridian {
             if host.playing() {
                 // Alive again: the next death gets its own deathpoint.
                 s.death_recorded = false;
+            }
+            if s.map_open && host.mod_screen() != Some(MOD_ID) {
+                // Closed without a closing event (Escape, another screen).
+                s.map_open = false;
+                s.screen = None;
+                s.return_to_map = false;
+                s.map.press = None;
+                s.viewer = None;
+                gpu_map::set_frame(None);
             }
             if s.map_open {
                 // The world map covers the screen; nothing of the HUD shows.

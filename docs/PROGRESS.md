@@ -496,3 +496,15 @@ Neue Tests:
 - Monumente verschwinden unter 0,0625x; antike Städte sind auf der Karte größer. Beides auch in der Java-Mod (Commit `007f94f`, `./gradlew check` grün, PR DUzzL/seed-atlas-xaero#12).
 - **Im Spiel geprüft:** Strukturmenü auf einem Ruinenportal mit passender Breite.
 - **Nicht geprüft:** „Copy coordinates“, weil der Test sonst die Zwischenablage überschrieben hätte; die Java-Mod im Spiel.
+
+### Phase 6: Minimap nach ESC, Leistung der Seed-Atlas-Karte (D-034)
+
+- Nach ESC aus der Weltkarte (oder aus einem Menü über ihr) erscheint die Minimap wieder.
+- **Seed-Atlas-Karte:**
+  - Die Gelände-Verfeinerung rechnet mit einem gemeinsamen Dichtegitter und halber Auflösung, zusammen etwa 40× weniger Arbeit.
+  - Die Worker laufen mit niedriger Priorität.
+  - Gemessen bei 0,3x: vorher über 90 s ~290 % CPU, jetzt ~18 s, danach ~50 % wie beim Spielen.
+- **Im Spiel geprüft:** ESC aus der Karte und aus den Kartenoptionen (Minimap da); CPU-Verlauf nach Herauszoomen und Verschieben; verfeinerte Ansicht ohne sichtbare Treppen.
+- **Neue Tests:** `coarse_surfaces_upsample_to_the_tile`, `lattice_columns_match_single_columns` (ignoriert, braucht die Horizon-Ressourcen).
+
+**Build und Tests**: 195 Kern-Tests und der Paritätstest grün; Clippy sauber, Adapter-Check grün; Launcher-Build `native-66f3981-57ea076f40cc`.
