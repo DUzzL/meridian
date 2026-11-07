@@ -139,7 +139,8 @@ impl Default for CaveSettings {
             allowed_dimensions: Vec::new(),
             auto: AutoCaveMode::Roof3x3,
             depth: 30,
-            legible: false,
+            // Readable by default: the map's own caves were always drawn so.
+            legible: true,
             toggle_delay_ms: 1000,
             extra_zoom: 2,
         }

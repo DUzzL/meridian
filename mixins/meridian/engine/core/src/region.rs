@@ -252,9 +252,12 @@ pub fn shade(col: &TileColumn, north: Option<i16>, west: Option<i16>, sh: &Shadi
     if sh.lighting {
         c = color::scale(
             c,
-            if sh.cave {
-                // Caves are lit by the map, not the sky: torches still brighten.
+            if sh.cave && sh.legible {
+                // Legible: caves are lit by the map, torches still brighten.
                 0.7 + 0.3 * col.block_light() as f32 / 15.0
+            } else if sh.cave {
+                // Dark caves: what torches light stands out.
+                0.35 + 0.65 * col.block_light() as f32 / 15.0
             } else {
                 color::light_factor(col.block_light(), col.sky_light(), sh.daylight)
             },
@@ -363,6 +366,26 @@ mod tests {
             r.height_at(16, 0),
             Some(64),
             "neighbours see the water surface"
+        );
+    }
+
+    #[test]
+    fn dark_caves_are_darker_than_legible_ones() {
+        let col = crate::tile::TileColumn {
+            accurate: [200, 200, 200],
+            vanilla: [200, 200, 200],
+            height: 20,
+            ..Default::default()
+        };
+        let base = Shading::new(&TerrainStyle::default(), Some(6000));
+        let lum = |c: u32| ((c >> 16) & 0xFF) + ((c >> 8) & 0xFF) + (c & 0xFF);
+        let legible = shade(&col, Some(20), Some(20), &base.for_cave(true, true));
+        let dark = shade(&col, Some(20), Some(20), &base.for_cave(true, false));
+        assert!(lum(dark) < lum(legible));
+        let lit = crate::tile::TileColumn { light: 0xF0, ..col };
+        assert!(
+            lum(shade(&lit, Some(20), Some(20), &base.for_cave(true, false))) > lum(dark),
+            "torches light dark caves"
         );
     }
 }

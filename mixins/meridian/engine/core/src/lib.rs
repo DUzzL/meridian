@@ -41,6 +41,7 @@ pub mod texture;
 pub mod tile;
 pub mod ui;
 pub mod waypoint;
+pub mod waypoint_io;
 pub mod worker;
 pub mod worldmap;
 

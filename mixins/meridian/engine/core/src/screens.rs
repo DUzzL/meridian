@@ -7,7 +7,8 @@
 //! the screen, run a command, open another screen).
 
 use crate::config::{
-    BlockColors, ClockInfo, Corner, LightInfo, MinimapShape, MinimapSize, Settings, Slopes,
+    AutoCaveMode, BlockColors, ClockInfo, Corner, LightInfo, MinimapShape, MinimapSize, Settings,
+    Slopes,
 };
 use crate::minimap::Align;
 use crate::nearest::WaypointMode;
@@ -1013,6 +1014,43 @@ pub fn options() -> Vec<Opt> {
                     s.minimap.info.real_time,
                     b,
                 )
+            },
+        },
+        toggle!("Cave Mode", Misc, minimap.cave.allowed),
+        Opt {
+            label: "Auto Cave Mode",
+            group: Misc,
+            value: |s| match s.minimap.cave.auto {
+                AutoCaveMode::Off => "OFF".into(),
+                AutoCaveMode::Roof1x1 => "1x1 Roof".into(),
+                AutoCaveMode::Roof3x3 => "3x3 Roof".into(),
+                AutoCaveMode::Roof5x5 => "5x5 Roof".into(),
+            },
+            step: |s, b| {
+                use AutoCaveMode::*;
+                s.minimap.cave.auto =
+                    cycle(&[Off, Roof1x1, Roof3x3, Roof5x5], s.minimap.cave.auto, b);
+            },
+        },
+        Opt {
+            label: "Cave Mode Toggle Delay",
+            group: Misc,
+            value: |s| format!("{:.1}s", s.minimap.cave.toggle_delay_ms as f32 / 1000.0),
+            step: |s, b| {
+                s.minimap.cave.toggle_delay_ms = cycle(
+                    &[0u32, 500, 1000, 2000, 4000],
+                    s.minimap.cave.toggle_delay_ms,
+                    b,
+                )
+            },
+        },
+        toggle!("Legible Cave Maps", Misc, minimap.cave.legible),
+        Opt {
+            label: "Cave Mode Extra Zoom",
+            group: Misc,
+            value: |s| format!("{}", s.minimap.cave.extra_zoom),
+            step: |s, b| {
+                s.minimap.cave.extra_zoom = cycle(&[0u8, 1, 2, 3], s.minimap.cave.extra_zoom, b)
             },
         },
         toggle!("Hide Under Screens", Misc, minimap.hide_under_screens),

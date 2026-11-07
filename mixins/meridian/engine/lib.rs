@@ -27,7 +27,7 @@ use horizon_client::mod_api::{
     MenuBackgroundEvent, ScreenRenderPostEvent, Text, TintSource, WorldLifecycleEvent, WorldPhase, WorldPrimitivesEvent,
 };
 use meridian_core::MapEngine;
-use meridian_core::config::{ConfigFile, ConfigStore};
+use meridian_core::config::{ConfigFile, ConfigStore, MinimapSettings};
 use meridian_core::engine::DEFAULT_MAP;
 use meridian_core::geom::RegionPos;
 use meridian_core::keybinds::{KEY_BINDINGS, bindings_for_key};
@@ -702,8 +702,10 @@ impl Meridian {
     /// `/meridian ...`; answers what to tell the player and a chat line to
     /// send (a teleport or a shared waypoint).
     fn on_command(&self, host: &dyn Host, args: &[&str]) -> (String, Option<String>) {
-        const USAGE: &str = "/meridian waypoint add|remove|tp|share|list [name]";
+        const USAGE: &str = "/meridian waypoint add|remove|tp|share|list [name], /meridian waypoint export, /meridian waypoint import <file or folder>";
         self.with_state(host, |s| {
+            let export_dir = s.export_dir.clone();
+            let world_name = context_labels(s).0.trim_end_matches(" (auto)").to_owned();
             let player = HorizonHost {
                 host,
                 dimension: s.dimension.as_deref(),
@@ -764,6 +766,48 @@ impl Meridian {
                     Some(w) => ("Shared".to_owned(), Some(waypoint::share_text(&w, &dim))),
                     None => (format!("No waypoint named {name}"), None),
                 },
+                Some("export") => {
+                    let safe: String = world_name
+                        .chars()
+                        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+                        .collect();
+                    let path = export_dir.join(format!("waypoints-{safe}.json"));
+                    let written = std::fs::create_dir_all(&export_dir)
+                        .and_then(|_| std::fs::write(&path, meridian_core::waypoint_io::export_json(book)));
+                    match written {
+                        Ok(()) => (format!("Waypoints exported to {}", path.display()), None),
+                        Err(e) => (format!("Export failed: {e}"), None),
+                    }
+                }
+                Some("import") => {
+                    if name.is_empty() {
+                        return ("/meridian waypoint import <file.json | waypoint folder>".to_owned(), None);
+                    }
+                    let given = std::path::PathBuf::from(&name);
+                    let path = if given.is_absolute() { given } else { export_dir.join(given) };
+                    let now = waypoint::now();
+                    let added = if path.is_dir() {
+                        let found = meridian_core::waypoint_io::read_text_folder(&path);
+                        if found.is_empty() {
+                            return (format!("No waypoint files in {}", path.display()), None);
+                        }
+                        found.into_iter().map(|(d, ws)| meridian_core::waypoint_io::merge(book, &d, ws, now)).sum()
+                    } else {
+                        let text = match std::fs::read_to_string(&path) {
+                            Ok(t) => t,
+                            Err(e) => return (format!("Cannot read {}: {e}", path.display()), None),
+                        };
+                        if path.extension().is_some_and(|e| e == "txt") {
+                            meridian_core::waypoint_io::merge(book, &dim, meridian_core::waypoint_io::parse_text(&text), now)
+                        } else {
+                            match meridian_core::waypoint_io::import_json(&text) {
+                                Ok(dims) => meridian_core::waypoint_io::merge_export(book, dims, now),
+                                Err(e) => return (format!("Not a waypoint export: {e}"), None),
+                            }
+                        }
+                    };
+                    (format!("Imported {added} waypoints"), None)
+                }
                 Some("list") => {
                     let names: Vec<String> = book
                         .dimension(&dim)
@@ -1423,6 +1467,14 @@ fn minimap_ops(
     };
     let lines: Vec<(String, u32)> =
         meridian_core::info::lines(settings, &input).into_iter().map(|l| (l, 0xFFFF_FFFF)).collect();
+    // In cave mode the minimap zooms in by the extra steps asked for.
+    let zoomed;
+    let settings = if s.engine.layer().is_some() && settings.cave.extra_zoom > 0 {
+        zoomed = MinimapSettings { zoom: settings.zoom.saturating_sub(settings.cave.extra_zoom), ..settings.clone() };
+        &zoomed
+    } else {
+        settings
+    };
     let layout = minimap::layout(settings, gui, gui_scale, s.controls.enlarged(), lines.len());
     s.minimap_place = Some(meridian_core::screens::MinimapPlace {
         rect: [layout.x, layout.y, layout.size, layout.size],
@@ -2227,7 +2279,7 @@ impl State {
         let engine = self.viewer.as_ref().map_or(&self.engine, |(_, e)| e);
         let Some(regions) = engine.regions_dir() else { return };
         let shading = meridian_core::color::Shading::new(&self.config.current().world_map.terrain, None)
-            .for_cave(engine.layer().is_some());
+            .for_cave(engine.layer().is_some(), self.config.current().minimap.cave.legible);
         let name = {
             let (world, dim) = context_labels(self);
             let dim = self.viewer.as_ref().map_or(dim, |(d, _)| d.clone());

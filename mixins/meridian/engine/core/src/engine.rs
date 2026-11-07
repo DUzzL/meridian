@@ -750,7 +750,7 @@ impl MapEngine {
 
         // 3. Redraw, nearest regions first.
         let shading = Shading::new(&self.settings.world_map.terrain, host.day_time())
-            .for_cave(self.layer.is_some());
+            .for_cave(self.layer.is_some(), self.settings.minimap.cave.legible);
         if self.shading.is_none_or(|s| s.differs(&shading)) {
             self.shading = Some(shading);
             for r in self.regions.values_mut() {
