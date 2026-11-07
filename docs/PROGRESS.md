@@ -475,3 +475,7 @@ Neue Tests:
 **Build und Tests**: 187 Kern-Tests, die Engine-Tests und der Paritätstest grün; Clippy sauber, Adapter-Check grün; Launcher-Build `native-66f3981-85c46d528fc6`.
 
 - **Nachtrag:** Weit herausgezoomt verteilen sich die Marker dichter Arten jetzt gleichmäßig über die ganze Sicht, statt nur im Norden zu stehen (D-031, bewusste Abweichung von der Fabric-Version). Im Spiel bei 0,018x geprüft, auch nach dem Verschieben. Neuer Test: `capped_scans_spread_over_the_whole_box`. Der Paritätstest bleibt grün. Launcher-Build `native-66f3981-098c8f7d2b74`.
+- **Nachtrag 2:** Der Radius des Sicht-Scans wird jetzt wie in der Fabric-Version aus den Fensterpixeln und dem Zoom berechnet.
+  - Im Spiel geprüft: Bei 0,3x sind alle Arten sichtbar. Bei 0,2x bleiben Dörfer, Ruinen und Tempel, Schätze, Minenschächte und Erzadern verschwinden. Bei 0,094x bleiben nur Monumente, Festungen und antike Städte.
+  - Ein Bildschirmfoto mit Markern im Quadrat stammte aus Build `5e33e0f60780` von vor dieser Änderung: Ein offener Launcher hatte die Instanz beim Starten auf diesen Build zurückgesetzt.
+  - Launcher-Build `native-66f3981-436b2aa39fc3`.

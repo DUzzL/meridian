@@ -2264,9 +2264,12 @@ impl Meridian {
                     let completed_alpha = sa_settings.completed_opacity_pct() as f32 / 100.0;
                     // The whole view at once, as the Fabric version scans it:
                     // dense kinds only when zoomed in far enough.
-                    let per_block = s.map.scale(u).max(1e-9);
-                    let (bbox, radius) = sa::view_box(s.map.center, [gui[0] as f64 / per_block, gui[1] as f64 / per_block]);
+                    // `request`: the window's pixels over the map's scale (its
+                    // zoom, as the reference map shows it), at least 1/512.
                     let zoom = s.map.zoom;
+                    let window = bridge::window_size().map_or([gui[0] as f64 * 2.0, gui[1] as f64 * 2.0], |w| [w[0] as f64, w[1] as f64]);
+                    let safe = zoom.max(1.0 / 512.0);
+                    let (bbox, radius) = sa::view_box(s.map.center, [window[0] / safe, window[1] / safe]);
                     let shows = |k: i32| sa::marker_for(k).is_some_and(|m| sa::visible_at_zoom(m.id, zoom, radius));
                     let hits = s.seed_svc.view_markers(dim, bbox, shows, Instant::now());
                     {

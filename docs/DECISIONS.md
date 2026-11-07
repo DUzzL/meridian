@@ -342,7 +342,7 @@ Bisher fragte Meridian Marker je Region (512 Blöcke) an, nur im Umkreis von 7 R
   - Radius: halbe Sicht plus 1024 Blöcke, mindestens 1024, höchstens 65536, aufgerundet auf ein Raster.
   - Raster: die höchste Zweierpotenz von `Radius / 4`, begrenzt auf 1024 bis 16384.
   - Die Mitte rastet auf dieses Raster ein, kleine Bewegungen behalten den Scan.
-  - Die Sicht in Blöcken ist die tatsächlich sichtbare Fläche; die Fabric-Version rechnet mit Fensterpixeln und dem Maßstab von Xaero.
+  - Die Sicht in Blöcken ist wie in der Fabric-Version (`request`): Fensterpixel geteilt durch den Maßstab der Karte (ihren Zoom, mindestens 1/512).
 - **Ergebnisgrenzen der Glue-Schicht:** 1024 je Art, 4096 Schleimchunks (`scan_structures_capped`, `scan_slime_chunks_capped`, wie `append_result`).
   - In der Fabric-Version endet der Scan bei der Grenze, also in Zeilen von Nord nach Süd. Weit herausgezoomt zeigten dichte Arten (Ozeanmonumente) deshalb nur im Norden Marker.
   - **Bewusste Abweichung (auf Wunsch):** Meridian verteilt die Treffer gleichmäßig (`Atlas::scan_spread`, `thin_evenly`).
