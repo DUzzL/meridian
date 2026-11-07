@@ -415,6 +415,10 @@ Nicht eigens geprüft: Spieler als Punkt, Teleport zu Spielern (braucht einen zw
 - Gesichter von Creeper, Skelett, Enderman, Zombie und Spinne sind erkennbar; der Name „Bob“ steht unter seiner Marke.
 - Einzelspieler bleibt auf der Standardkarte.
 
-Nicht im Spiel geprüft: Mehrspieler-Karten (dafür braucht es einen Server; Unit-Tests decken die Auswahl ab), Import und Export, die Höhlenoptionen.
+- Export: `/meridian waypoint export` schreibt `exports/waypoints-MeridianTest.json`.
+- Import: Der Re-Import dieser Datei und der Import des Prism-Weltordners melden beide „Imported 0 waypoints“. Der einzige Wegpunkt dort („Home“) ist schon vorhanden, Doppelte werden also übersprungen.
+- `/meridian map` meldet im Einzelspieler „Worlds in singleplayer have one map“.
+
+Nicht im Spiel geprüft: Mehrspieler-Karten (dafür braucht es einen Server; Unit-Tests decken die Auswahl ab), die Höhlenoptionen.
 
 **Build und Tests**: 182 Kern-Tests und der Paritätstest grün; Clippy sauber, Adapter-Check grün; Launcher-Build `native-66f3981-4b682b06b3b7`.
