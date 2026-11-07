@@ -1297,7 +1297,10 @@ mod tests {
         assert_eq!(row, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
         assert_eq!(&fine.colors[..size + 2], &[1, 1, 2, 2, 3, 3]);
         assert!(fine.floors.iter().all(|&f| f == -10.0));
-        assert!(upsample_surface(&coarse, size + 2).is_none(), "wrong coarse side");
+        assert!(
+            upsample_surface(&coarse, size + 2).is_none(),
+            "wrong coarse side"
+        );
     }
 
     #[test]

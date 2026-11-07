@@ -1050,10 +1050,7 @@ impl SeedService {
     /// Collects finished work.
     pub fn poll(&mut self) {
         self.compose_budget = COMPOSE_PER_FRAME;
-        if self
-            .last_use
-            .is_some_and(|t| t.elapsed() >= RELEASE_AFTER)
-        {
+        if self.last_use.is_some_and(|t| t.elapsed() >= RELEASE_AFTER) {
             self.release_tiles();
         }
         self.commit();
@@ -1240,11 +1237,12 @@ impl SeedService {
                 let has_terrain = self.atlas_for(dimension).is_some_and(|a| a.has_terrain());
                 if refine_allowed
                     && seedatlas_look::needs_surface_refinement(
-                    dimension,
-                    self.look.terrain && has_terrain,
-                    !self.look.highlight.is_empty(),
-                    step,
-                ) {
+                        dimension,
+                        self.look.terrain && has_terrain,
+                        !self.look.highlight.is_empty(),
+                        step,
+                    )
+                {
                     self.submit(refined);
                 }
             }
@@ -1603,9 +1601,15 @@ mod tests {
         assert_eq!(pixels_per_sample(1000.0), 8.0);
         // Samples a 3000 px wide view needs, at 2 and 32 blocks a pixel.
         let samples = |bpp: f32| 3000.0 * bpp / step_for(512.0 / bpp, 1) as f32;
-        assert!(samples(32.0) * 2.0 <= samples(2.0), "a quarter of the samples or fewer");
+        assert!(
+            samples(32.0) * 2.0 <= samples(2.0),
+            "a quarter of the samples or fewer"
+        );
         assert!(refine_allowed(600.0));
-        assert!(!refine_allowed(400.0), "under a pixel a block: preview only");
+        assert!(
+            !refine_allowed(400.0),
+            "under a pixel a block: preview only"
+        );
     }
 
     #[test]
@@ -1624,23 +1628,37 @@ mod tests {
             refine,
         };
         // Step 2 tiles 2..3 x 2..3 make step 4 tile (1, 1); one is refined.
-        for (i, c) in [0xFF00_0000u32, 0xFF00_0004, 0xFF00_0008, 0xFF00_000C].into_iter().enumerate() {
+        for (i, c) in [0xFF00_0000u32, 0xFF00_0004, 0xFF00_0008, 0xFF00_000C]
+            .into_iter()
+            .enumerate()
+        {
             let (x, z) = (2 + i as i32 % 2, 2 + i as i32 / 2);
             svc.tiles.insert(job(x, z, 2, i == 0), (tile(c), 1));
         }
-        let made = svc.tile(job(1, 1, 4, false), false).expect("made from memory");
+        let made = svc
+            .tile(job(1, 1, 4, false), false)
+            .expect("made from memory");
         let n = TILE_SAMPLES as usize;
         assert_eq!(made.pixels[0], 0xFF00_0000);
         assert_eq!(made.pixels[n - 1], 0xFF00_0004);
         assert_eq!(made.pixels[(n - 1) * n], 0xFF00_0008);
         assert_eq!(made.pixels[n * n - 1], 0xFF00_000C);
-        assert!(svc.tiles.contains_key(&job(1, 1, 4, false)), "kept, not refined");
+        assert!(
+            svc.tiles.contains_key(&job(1, 1, 4, false)),
+            "kept, not refined"
+        );
         assert!(svc.wanted.is_empty(), "nothing computed");
         // Two steps down: step 8 tile (0, 0) needs step 4 tiles 0..1, made
         // from step 2 tiles 0..3 in turn; three of four missing here.
         assert!(svc.tile(job(0, 0, 8, false), false).is_none());
-        assert!(svc.wanted.contains(&job(0, 0, 8, false)), "computed instead");
-        assert_eq!(mean_argb([0xFF00_0000, 0xFF00_0001, 0xFF00_0002, 0xFF00_0003]), 0xFF00_0002);
+        assert!(
+            svc.wanted.contains(&job(0, 0, 8, false)),
+            "computed instead"
+        );
+        assert_eq!(
+            mean_argb([0xFF00_0000, 0xFF00_0001, 0xFF00_0002, 0xFF00_0003]),
+            0xFF00_0002
+        );
         // Released when the map stops asking.
         svc.last_use = Some(std::time::Instant::now() - RELEASE_AFTER);
         svc.poll();
@@ -1669,12 +1687,20 @@ mod tests {
             let now = if first { t0 } else { t0 + SCAN_DEBOUNCE };
             first = false;
             marks = svc.view_markers(Dimension::Overworld, bbox, shows, now);
-            if marks.iter().any(|h| h.kind == marker::STRONGHOLD) && marks.iter().any(|h| marker_for(h.kind).is_some_and(|m| m.id == "mansion")) {
+            if marks.iter().any(|h| h.kind == marker::STRONGHOLD)
+                && marks
+                    .iter()
+                    .any(|h| marker_for(h.kind).is_some_and(|m| m.id == "mansion"))
+            {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-        let ids: std::collections::BTreeSet<_> = marks.iter().filter_map(|h| marker_for(h.kind)).map(|m| m.id).collect();
+        let ids: std::collections::BTreeSet<_> = marks
+            .iter()
+            .filter_map(|h| marker_for(h.kind))
+            .map(|m| m.id)
+            .collect();
         assert!(ids.contains("stronghold"), "{ids:?}");
         assert!(ids.contains("mansion"), "{ids:?}");
     }
@@ -1756,21 +1782,40 @@ mod tests {
         let kind = meridian_seedatlas::structures::kind::MONUMENT;
         // Too large a box to scan whole: the kind is left out, never thinned.
         let (huge, _) = view_box([0.0, 0.0], [200_000.0, 200_000.0]);
-        assert_eq!(atlas.scan_complete(kind, huge, true, RESULTS_PER_KIND).unwrap(), None);
+        assert_eq!(
+            atlas
+                .scan_complete(kind, huge, true, RESULTS_PER_KIND)
+                .unwrap(),
+            None
+        );
         // A box that can be: every monument in it.
         let small = [0, 0, 4095, 4095];
         assert_eq!(
-            atlas.scan_complete(kind, small, true, RESULTS_PER_KIND).unwrap(),
+            atlas
+                .scan_complete(kind, small, true, RESULTS_PER_KIND)
+                .unwrap(),
             Some(atlas.scan_structures(kind, small, true).unwrap())
         );
         // More than the limit: none rather than some.
-        let all = atlas.scan_structures(kind, [0, 0, 16383, 16383], true).unwrap();
+        let all = atlas
+            .scan_structures(kind, [0, 0, 16383, 16383], true)
+            .unwrap();
         assert!(all.len() > 2);
-        assert_eq!(atlas.scan_complete(kind, [0, 0, 16383, 16383], true, all.len() - 1).unwrap(), None);
+        assert_eq!(
+            atlas
+                .scan_complete(kind, [0, 0, 16383, 16383], true, all.len() - 1)
+                .unwrap(),
+            None
+        );
         // At the zoom monuments are shown from, their box is scanned whole.
         let (b, radius) = view_box([0.0, 0.0], [3840.0 / 0.0625, 2160.0 / 0.0625]);
         assert!(visible_at_zoom("monument", 0.0625, radius));
-        assert!(atlas.scan_complete(kind, b, true, RESULTS_PER_KIND).unwrap().is_some());
+        assert!(
+            atlas
+                .scan_complete(kind, b, true, RESULTS_PER_KIND)
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]
@@ -1778,7 +1823,10 @@ mod tests {
         assert!(visible_at_zoom("village", 0.2, 10000));
         assert!(!visible_at_zoom("village", 0.1, 10000));
         assert!(!visible_at_zoom("village", 0.2, 30000), "too large a scan");
-        assert!(visible_at_zoom("fortress", 0.001, 65536), "Nether and End landmarks always");
+        assert!(
+            visible_at_zoom("fortress", 0.001, 65536),
+            "Nether and End landmarks always"
+        );
         for id in ["stronghold", "mansion"] {
             assert!(visible_at_zoom(id, 0.04, 65536));
             assert!(!visible_at_zoom(id, 0.02, 65536), "{id} gone far out");

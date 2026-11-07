@@ -446,7 +446,12 @@ impl WorldMap {
             {
                 let (half, rim) = (ENTITY_FACE_HALF * u, 0.6 * u);
                 ops.push(DrawOp::Fill {
-                    rect: [x - half - rim, y - half - rim, 2.0 * (half + rim), 2.0 * (half + rim)],
+                    rect: [
+                        x - half - rim,
+                        y - half - rim,
+                        2.0 * (half + rim),
+                        2.0 * (half + rim),
+                    ],
                     argb: 0xFF00_0000,
                 });
                 ops.push(DrawOp::Blit {
@@ -561,12 +566,20 @@ impl WorldMap {
         ops.extend(compass(gui, u));
         // The toolbar on the right edge, its tooltips to the left.
         let buttons = toolbar(self.seed_atlas);
-        let hovered = if self.menu.is_none() { button_at(o.mouse, gui, self.seed_atlas) } else { None };
+        let hovered = if self.menu.is_none() {
+            button_at(o.mouse, gui, self.seed_atlas)
+        } else {
+            None
+        };
         for (i, b) in buttons.iter().enumerate() {
             let rect = toolbar_rect(i, buttons.len(), gui);
             let hover = hovered == Some(*b);
             ops.push(DrawOp::NineSlice {
-                sprite: if hover { "gui/sprites/widget/button_highlighted" } else { "gui/sprites/widget/button" },
+                sprite: if hover {
+                    "gui/sprites/widget/button_highlighted"
+                } else {
+                    "gui/sprites/widget/button"
+                },
                 rect,
                 argb: 0xFFFF_FFFF,
             });
@@ -861,7 +874,12 @@ const TOOL_GAP: f32 = 2.0;
 fn toolbar_rect(i: usize, n: usize, gui: [f32; 2]) -> [f32; 4] {
     let height = n as f32 * (TOOL + TOOL_GAP) - TOOL_GAP;
     let top = ((gui[1] - height) / 2.0).max(TOOL + 4.0).floor();
-    [gui[0] - TOOL - 4.0, top + i as f32 * (TOOL + TOOL_GAP), TOOL, TOOL]
+    [
+        gui[0] - TOOL - 4.0,
+        top + i as f32 * (TOOL + TOOL_GAP),
+        TOOL,
+        TOOL,
+    ]
 }
 
 /// The toolbar button under `p`.
@@ -874,8 +892,16 @@ pub fn button_at(p: [f32; 2], gui: [f32; 2], seed_atlas: bool) -> Option<Button>
 }
 
 /// A tooltip left of a toolbar button, kept on screen.
-fn side_tooltip(lines: &[String], button: [f32; 4], gui: [f32; 2], first_is_title: bool) -> Vec<DrawOp> {
-    let width = lines.iter().map(|l| crate::ui::text_width(l)).fold(0.0, f32::max);
+fn side_tooltip(
+    lines: &[String],
+    button: [f32; 4],
+    gui: [f32; 2],
+    first_is_title: bool,
+) -> Vec<DrawOp> {
+    let width = lines
+        .iter()
+        .map(|l| crate::ui::text_width(l))
+        .fold(0.0, f32::max);
     let h = lines.len() as f32 * 10.0 + 6.0;
     let x = (button[0] - width - 10.0).max(2.0);
     let y = (button[1] + (button[3] - h) / 2.0).clamp(2.0, (gui[1] - h - 2.0).max(2.0));
@@ -888,7 +914,11 @@ fn side_tooltip(lines: &[String], button: [f32; 4], gui: [f32; 2], first_is_titl
             x,
             y: y + 3.0 + i as f32 * 10.0,
             text: line.clone(),
-            argb: if first_is_title && i == 0 { 0xFFFF_FF55 } else { 0xFFFF_FFFF },
+            argb: if first_is_title && i == 0 {
+                0xFFFF_FF55
+            } else {
+                0xFFFF_FFFF
+            },
             align: Align::Left,
             scale: 1.0,
         });
@@ -1028,7 +1058,10 @@ mod tests {
         assert_eq!(m.release(p, GUI, 1.0), MapAction::None);
         assert_eq!(m.center, [10.0, 20.0]);
         // Seed Atlas buttons only while it is on; the host carries them out.
-        assert_eq!(button_at(at(Button::Settings, false), GUI, false), Some(Button::Settings));
+        assert_eq!(
+            button_at(at(Button::Settings, false), GUI, false),
+            Some(Button::Settings)
+        );
         assert!(!toolbar(false).contains(&Button::SeedLayer));
         m.seed_atlas = true;
         let p = at(Button::SeedLayer, true);

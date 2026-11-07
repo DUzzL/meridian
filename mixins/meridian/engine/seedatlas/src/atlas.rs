@@ -859,7 +859,11 @@ impl Atlas {
         if let Some(cell) = self.scan_cell(structure) {
             let w = (b[2] as i64 - b[0] as i64) / cell as i64 + 1;
             let h = (b[3] as i64 - b[1] as i64) / cell as i64 + 1;
-            let limit = if cell <= 128 { COMPLETE_CELLS_CHEAP } else { COMPLETE_CELLS };
+            let limit = if cell <= 128 {
+                COMPLETE_CELLS_CHEAP
+            } else {
+                COMPLETE_CELLS
+            };
             if w * h > limit {
                 return Ok(None);
             }
