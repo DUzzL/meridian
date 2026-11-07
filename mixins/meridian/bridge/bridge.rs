@@ -528,6 +528,22 @@ fn snapshot_entities(game: &super::Game<'_>) -> Vec<EntitySnap> {
             name: None,
         });
     }
+    // Vehicles: the radar's "other" entities.
+    let vehicles = game
+        .boats
+        .iter()
+        .map(|b| (b.id, "minecraft:boat", b.previous, b.position))
+        .chain(game.carts.iter().map(|c| (c.id, "minecraft:minecart", c.previous, c.position)));
+    for (id, kind, previous, position) in vehicles {
+        out.push(EntitySnap {
+            id,
+            kind: kind.to_owned(),
+            class: EntityClass::Other,
+            pos: [lerp(previous.x, position.x), lerp(previous.y, position.y), lerp(previous.z, position.z)],
+            invisible: false,
+            name: None,
+        });
+    }
     out
 }
 

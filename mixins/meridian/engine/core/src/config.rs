@@ -602,6 +602,20 @@ impl ConfigFile {
         }
     }
 
+    /// Renames the current profile; false when the name is empty or taken.
+    pub fn rename_profile(&mut self, name: &str) -> bool {
+        let name = name.trim();
+        if name.is_empty() || self.profiles.contains_key(name) {
+            return false;
+        }
+        let Some(settings) = self.profiles.remove(&self.current_profile) else {
+            return false;
+        };
+        self.profiles.insert(name.to_owned(), settings);
+        self.current_profile = name.to_owned();
+        true
+    }
+
     /// Deletes a profile other than the last one; the current profile moves
     /// to the default when it was deleted.
     pub fn delete_profile(&mut self, name: &str) -> bool {
@@ -769,6 +783,18 @@ mod tests {
         assert!(file.delete_profile("b"));
         assert_eq!(file.current_profile, DEFAULT_PROFILE);
         assert!(!file.select_profile("b"));
+    }
+
+    #[test]
+    fn rename_keeps_the_settings() {
+        let mut f = ConfigFile::default();
+        f.current_mut().minimap.zoom = 3;
+        assert!(f.create_profile("pvp"));
+        assert!(!f.rename_profile("pvp"), "taken");
+        assert!(f.rename_profile("survival"));
+        assert_eq!(f.current_profile, "survival");
+        assert_eq!(f.current().minimap.zoom, 3);
+        assert!(!f.profiles.contains_key(DEFAULT_PROFILE));
     }
 
     #[test]

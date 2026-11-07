@@ -58,6 +58,29 @@ pub struct Env<'a> {
     /// What the Seed Atlas screens need of the game (dimension, seed,
     /// completed count, nearest options).
     pub seed_atlas: SeedAtlasEnv,
+    /// The settings profiles by name, and the current one.
+    pub profiles: Vec<String>,
+    pub profile: String,
+    /// Where the minimap is drawn now (for the position editor).
+    pub minimap: Option<MinimapPlace>,
+}
+
+/// The minimap's rectangle on screen and its margin from the corner (GUI
+/// pixels), as the layout placed it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MinimapPlace {
+    pub rect: [f32; 4],
+    pub margin: f32,
+}
+
+/// A change to the settings profiles, applied by the host.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ProfileOp {
+    Select(String),
+    /// A copy of the current profile under a new name, then selected.
+    Create(String),
+    Rename(String),
+    Delete(String),
 }
 
 impl Env<'_> {
@@ -94,6 +117,7 @@ pub enum Action {
     /// (`CompletedStore::reset_prompt` + `confirm_reset`), then open the
     /// Seed Atlas settings again.
     ResetCompleted,
+    Profile(ProfileOp),
 }
 
 #[derive(Debug, PartialEq)]
@@ -105,6 +129,7 @@ pub enum Screen {
     BiomeHighlight(BiomeHighlightScreen),
     WorldGeneration(WorldGenerationScreen),
     ConfirmReset(ConfirmResetScreen),
+    Position(PositionScreen),
 }
 
 impl Screen {
@@ -117,6 +142,7 @@ impl Screen {
             Screen::BiomeHighlight(s) => s.widgets(env),
             Screen::WorldGeneration(s) => s.widgets(env),
             Screen::ConfirmReset(s) => s.widgets(env),
+            Screen::Position(s) => s.widgets(env),
         }
     }
 
@@ -125,6 +151,7 @@ impl Screen {
         let widgets = self.widgets(env);
         let id = ui::hit(&widgets, at).map(|w| w.id.clone());
         match self {
+            Screen::Position(s) => s.click(id.as_deref(), at, env),
             Screen::Editor(s) => s.click(id.as_deref(), right, env),
             Screen::List(s) => s.click(id.as_deref(), right, env),
             Screen::Settings(s) => s.click(id.as_deref(), right, env),
@@ -142,9 +169,23 @@ impl Screen {
             Screen::Settings(s) => s.typed(c),
             Screen::Nearest(s) => s.typed(c),
             Screen::BiomeHighlight(s) => s.typed(c),
-            Screen::WorldGeneration(_) | Screen::ConfirmReset(_) => {}
+            Screen::WorldGeneration(_) | Screen::ConfirmReset(_) | Screen::Position(_) => {}
         }
         let _ = env;
+    }
+
+    /// The mouse moved with the left button down.
+    pub fn drag(&mut self, at: [f32; 2], env: &mut Env<'_>) {
+        if let Screen::Position(s) = self {
+            s.drag(at, env);
+        }
+    }
+
+    /// The left button went up.
+    pub fn release(&mut self) {
+        if let Screen::Position(s) = self {
+            s.grab = None;
+        }
     }
 
     /// A key by Minecraft name (`key.keyboard.backspace`).
@@ -152,10 +193,12 @@ impl Screen {
         match self {
             Screen::Editor(s) => s.key(key, env),
             Screen::List(s) => s.key(key, env),
-            Screen::Settings(s) => s.key(key),
+            Screen::Settings(s) => s.key(key, env),
             Screen::Nearest(s) => s.key(key),
             Screen::BiomeHighlight(s) => s.key(key),
-            Screen::WorldGeneration(_) | Screen::ConfirmReset(_) => Action::None,
+            Screen::WorldGeneration(_) | Screen::ConfirmReset(_) | Screen::Position(_) => {
+                Action::None
+            }
         }
     }
 
@@ -1137,6 +1180,8 @@ pub struct SettingsScreen {
     /// Opened straight on a group (the world map key, the map's buttons):
     /// Back closes instead of returning to the main page.
     pub direct: bool,
+    /// The profile name being typed (renaming the current profile).
+    pub profile_name: Option<String>,
 }
 
 impl Default for SettingsScreen {
@@ -1146,6 +1191,7 @@ impl Default for SettingsScreen {
             search: String::new(),
             search_focused: false,
             direct: false,
+            profile_name: None,
         }
     }
 }
@@ -1262,12 +1308,12 @@ impl SettingsScreen {
                 "delete_profile",
                 [cx + 130.0, c - 106.0, 74.0, ui::BUTTON_H],
                 "Delete Profile",
-                false,
+                env.profiles.len() > 1,
             ));
             ws.push(Widget::selector(
                 "profile",
                 [cx - 205.0, c - 78.0, 200.0, ui::SELECTOR_H],
-                "Default",
+                profile_title(&env.profile),
                 0xFFFF_FFFF,
             ));
         }
@@ -1282,10 +1328,10 @@ impl SettingsScreen {
             SettingsPage::Main { page: 0 } => {
                 let minimap = format!("Minimap: {}", on_off(env.settings.minimap.enabled));
                 let entries: [(&str, String, bool); 12] = [
-                    ("id", "ID: default".into(), false),
-                    ("profile_name", "Profile Name".into(), false),
+                    ("id", format!("ID: {}", env.profile), true),
+                    ("new_profile", "New Profile".into(), true),
                     ("minimap", minimap, true),
-                    ("position", "Change Position".into(), false),
+                    ("position", "Change Position".into(), true),
                     ("g:view", "View Settings".into(), true),
                     ("g:blockmap", "Block Map Settings".into(), true),
                     ("g:radar", "Entity Radar Settings".into(), true),
@@ -1296,6 +1342,18 @@ impl SettingsScreen {
                     ("waypoints", "Waypoints".into(), true),
                 ];
                 for (i, (id, label, enabled)) in entries.into_iter().enumerate() {
+                    if id == "id"
+                        && let Some(name) = &self.profile_name
+                    {
+                        ws.push(Widget::field(
+                            "profile_name",
+                            Self::grid(env, i),
+                            name,
+                            "Profile Name",
+                            true,
+                        ));
+                        continue;
+                    }
                     ws.push(Widget::button(id, Self::grid(env, i), label, enabled));
                 }
             }
@@ -1356,9 +1414,37 @@ impl SettingsScreen {
 
     fn click(&mut self, id: Option<&str>, right: bool, env: &mut Env<'_>) -> Action {
         self.search_focused = false;
+        if id != Some("profile_name") && self.profile_name.is_some() {
+            // Clicking elsewhere confirms the name.
+            if let Some(op) = self.confirm_name(env) {
+                return Action::Profile(op);
+            }
+        }
         let group = |g| SettingsPage::Group { group: g, page: 0 };
         match id {
             Some("search") => self.search_focused = true,
+            Some("profile") if !env.profiles.is_empty() => {
+                let i = env
+                    .profiles
+                    .iter()
+                    .position(|p| *p == env.profile)
+                    .unwrap_or(0);
+                let n = env.profiles.len();
+                let next = if right { (i + n - 1) % n } else { (i + 1) % n };
+                return Action::Profile(ProfileOp::Select(env.profiles[next].clone()));
+            }
+            Some("id") => self.profile_name = Some(env.profile.clone()),
+            Some("new_profile") => {
+                let name = (2..)
+                    .map(|i| format!("profile{i}"))
+                    .find(|n| !env.profiles.contains(n))
+                    .expect("a free name");
+                return Action::Profile(ProfileOp::Create(name));
+            }
+            Some("delete_profile") if env.profiles.len() > 1 => {
+                return Action::Profile(ProfileOp::Delete(env.profile.clone()));
+            }
+            Some("position") => return Action::Open(Screen::Position(PositionScreen::default())),
             Some("minimap") => {
                 env.settings.minimap.enabled = !env.settings.minimap.enabled;
                 env.settings_changed = true;
@@ -1421,12 +1507,39 @@ impl SettingsScreen {
     }
 
     fn typed(&mut self, c: char) {
+        if let Some(name) = &mut self.profile_name {
+            ui::type_char(name, c, 24, |c| c.is_alphanumeric() || "_- ".contains(c));
+            return;
+        }
         if self.search_focused && ui::type_char(&mut self.search, c, 24, |_| true) {
             self.page = SettingsPage::Search;
         }
     }
 
-    fn key(&mut self, key: &str) -> Action {
+    /// Ends renaming: the op when the name changed and is free.
+    fn confirm_name(&mut self, env: &Env<'_>) -> Option<ProfileOp> {
+        let name = self.profile_name.take()?;
+        let name = name.trim();
+        (!name.is_empty() && name != env.profile && !env.profiles.iter().any(|p| p == name))
+            .then(|| ProfileOp::Rename(name.to_owned()))
+    }
+
+    fn key(&mut self, key: &str, env: &mut Env<'_>) -> Action {
+        if let Some(name) = &mut self.profile_name {
+            match key {
+                "key.keyboard.backspace" => {
+                    ui::backspace(name);
+                }
+                "key.keyboard.enter" | "key.keyboard.keypad.enter" => {
+                    if let Some(op) = self.confirm_name(env) {
+                        return Action::Profile(op);
+                    }
+                }
+                "key.keyboard.escape" => self.profile_name = None,
+                _ => {}
+            }
+            return Action::None;
+        }
         if key == "key.keyboard.backspace" && self.search_focused {
             ui::backspace(&mut self.search);
             if self.search.is_empty() {
@@ -1439,6 +1552,105 @@ impl SettingsScreen {
 
 /// The kinds a waypoint of the list can be (re-exported for hosts).
 pub type WaypointKind = Kind;
+
+fn profile_title(name: &str) -> String {
+    let mut c = name.chars();
+    c.next()
+        .map_or_else(String::new, |f| f.to_uppercase().chain(c).collect())
+}
+
+// ------------------------------------------------------- position editor --
+
+/// "Change Position": the minimap is dragged where it should be; it snaps
+/// to the nearest corner and keeps its distance from it.
+#[derive(Debug, Default, PartialEq)]
+pub struct PositionScreen {
+    /// Where in the minimap the cursor grabbed it, while dragging.
+    pub grab: Option<[f32; 2]>,
+}
+
+impl PositionScreen {
+    fn widgets(&self, env: &Env<'_>) -> Vec<Widget> {
+        let [cx, c] = env.center();
+        vec![
+            Widget::label(cx, c - 30.0, "Drag the minimap to move it", Align::Center),
+            Widget::button(
+                "reset",
+                [cx - 100.0, c - 10.0, 98.0, ui::BUTTON_H],
+                "Reset",
+                true,
+            ),
+            Widget::button(
+                "done",
+                [cx + 2.0, c - 10.0, 98.0, ui::BUTTON_H],
+                "Done",
+                true,
+            ),
+        ]
+    }
+
+    fn click(&mut self, id: Option<&str>, at: [f32; 2], env: &mut Env<'_>) -> Action {
+        match id {
+            Some("done") => return Action::Open(Screen::Settings(SettingsScreen::default())),
+            Some("reset") => {
+                env.settings.minimap.corner = Corner::TopLeft;
+                env.settings.minimap.offset = [0, 0];
+                env.settings_changed = true;
+            }
+            _ => {
+                if let Some(MinimapPlace { rect, .. }) = env.minimap
+                    && at[0] >= rect[0]
+                    && at[0] < rect[0] + rect[2]
+                    && at[1] >= rect[1]
+                    && at[1] < rect[1] + rect[3]
+                {
+                    self.grab = Some([at[0] - rect[0], at[1] - rect[1]]);
+                }
+            }
+        }
+        Action::None
+    }
+
+    fn drag(&mut self, at: [f32; 2], env: &mut Env<'_>) {
+        let (Some(grab), Some(place)) = (self.grab, env.minimap) else {
+            return;
+        };
+        let (corner, offset) = place_minimap([at[0] - grab[0], at[1] - grab[1]], place, env.gui);
+        let m = &mut env.settings.minimap;
+        if m.corner != corner || m.offset != offset {
+            m.corner = corner;
+            m.offset = offset;
+            env.settings_changed = true;
+        }
+    }
+}
+
+/// The corner and offset that put the minimap's top left at `top_left`,
+/// kept on screen.
+pub fn place_minimap(top_left: [f32; 2], place: MinimapPlace, gui: [f32; 2]) -> (Corner, [i32; 2]) {
+    let size = place.rect[2];
+    let x = top_left[0].clamp(0.0, (gui[0] - size).max(0.0));
+    let y = top_left[1].clamp(0.0, (gui[1] - place.rect[3]).max(0.0));
+    let right = x + size / 2.0 > gui[0] / 2.0;
+    let bottom = y + place.rect[3] / 2.0 > gui[1] / 2.0;
+    let ox = if right {
+        gui[0] - size - place.margin - x
+    } else {
+        x - place.margin
+    };
+    let oy = if bottom {
+        gui[1] - size - place.margin - y
+    } else {
+        y - place.margin
+    };
+    let corner = match (right, bottom) {
+        (false, false) => Corner::TopLeft,
+        (true, false) => Corner::TopRight,
+        (false, true) => Corner::BottomLeft,
+        (true, true) => Corner::BottomRight,
+    };
+    (corner, [ox.round() as i32, oy.round() as i32])
+}
 
 macro_rules! marker {
     ($label:literal, $id:literal) => {
@@ -1656,6 +1868,9 @@ mod tests {
             waypoints_changed: false,
             settings_changed: false,
             seed_atlas: SeedAtlasEnv::default(),
+            profiles: vec!["default".into()],
+            profile: "default".into(),
+            minimap: None,
         }
     }
 
@@ -1909,5 +2124,105 @@ mod tests {
         (world.step)(&mut s, true);
         (world.step)(&mut s, true);
         assert_eq!((world.value)(&s), "Large Biomes, Auto (26.3)");
+    }
+
+    #[test]
+    fn profiles_from_the_main_page() {
+        let (mut w, mut s) = (DimensionWaypoints::default(), Settings::default());
+        let mut e = env(&mut w, &mut s);
+        e.profiles = vec!["default".into(), "pvp".into()];
+        let screen = SettingsScreen::default();
+        let at = |screen: &SettingsScreen, e: &Env<'_>, id: &str| {
+            let r = screen
+                .widgets(e)
+                .into_iter()
+                .find(|w| w.id == id)
+                .unwrap()
+                .rect;
+            [r[0] + 2.0, r[1] + 2.0]
+        };
+        let p = at(&screen, &e, "profile");
+        let mut sc = Screen::Settings(screen);
+        assert_eq!(
+            sc.click(p, false, &mut e),
+            Action::Profile(ProfileOp::Select("pvp".into()))
+        );
+        let Screen::Settings(s2) = &sc else {
+            unreachable!()
+        };
+        let p = at(s2, &e, "new_profile");
+        assert_eq!(
+            sc.click(p, false, &mut e),
+            Action::Profile(ProfileOp::Create("profile2".into()))
+        );
+        let Screen::Settings(s2) = &sc else {
+            unreachable!()
+        };
+        let p = at(s2, &e, "delete_profile");
+        assert_eq!(
+            sc.click(p, false, &mut e),
+            Action::Profile(ProfileOp::Delete("default".into()))
+        );
+        // Renaming: click the ID, type, Enter.
+        let Screen::Settings(s2) = &sc else {
+            unreachable!()
+        };
+        let p = at(s2, &e, "id");
+        assert_eq!(sc.click(p, false, &mut e), Action::None);
+        for _ in 0..7 {
+            sc.key("key.keyboard.backspace", &mut e);
+        }
+        for c in "main".chars() {
+            sc.typed(c, &mut e);
+        }
+        assert_eq!(
+            sc.key("key.keyboard.enter", &mut e),
+            Action::Profile(ProfileOp::Rename("main".into()))
+        );
+    }
+
+    #[test]
+    fn minimap_snaps_to_the_nearest_corner() {
+        let gui = [400.0, 300.0];
+        let place = MinimapPlace {
+            rect: [5.0, 5.0, 80.0, 80.0],
+            margin: 5.0,
+        };
+        assert_eq!(
+            place_minimap([25.0, 15.0], place, gui),
+            (Corner::TopLeft, [20, 10])
+        );
+        assert_eq!(
+            place_minimap([300.0, 5.0], place, gui),
+            (Corner::TopRight, [15, 0])
+        );
+        assert_eq!(
+            place_minimap([10.0, 200.0], place, gui),
+            (Corner::BottomLeft, [5, 15])
+        );
+        assert_eq!(
+            place_minimap([900.0, 900.0], place, gui),
+            (Corner::BottomRight, [-5, -5]),
+            "kept on screen"
+        );
+    }
+
+    #[test]
+    fn dragging_the_minimap_moves_it() {
+        let (mut w, mut s) = (DimensionWaypoints::default(), Settings::default());
+        let mut e = env(&mut w, &mut s);
+        e.minimap = Some(MinimapPlace {
+            rect: [5.0, 5.0, 80.0, 80.0],
+            margin: 5.0,
+        });
+        let mut sc = Screen::Position(PositionScreen::default());
+        sc.click([20.0, 20.0], false, &mut e);
+        sc.drag([60.0, 30.0], &mut e);
+        assert!(e.settings_changed);
+        assert_eq!(e.settings.minimap.offset, [40, 10]);
+        sc.release();
+        e.settings_changed = false;
+        sc.drag([200.0, 200.0], &mut e);
+        assert!(!e.settings_changed, "no drag after release");
     }
 }

@@ -848,6 +848,9 @@ mod tests {
                 completed_count: Some(3),
                 ..SeedAtlasEnv::default()
             },
+            profiles: vec!["default".into()],
+            profile: "default".into(),
+            minimap: None,
         }
     }
 

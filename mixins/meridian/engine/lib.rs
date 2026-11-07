@@ -192,6 +192,8 @@ struct State {
     menu_marker: Option<HoveredMarker>,
     /// The other player the map menu was opened on.
     menu_player: Option<String>,
+    /// Where the minimap was drawn last (the position editor drags it).
+    minimap_place: Option<meridian_core::screens::MinimapPlace>,
     /// The nearest search's options, kept for the session.
     nearest_opts: meridian_core::nearest::NearestOptions,
 }
@@ -519,6 +521,7 @@ impl Meridian {
                 looks_ready: false,
                 menu_marker: None,
                 menu_player: None,
+                minimap_place: None,
                 nearest_opts: Default::default(),
             }
         });
@@ -873,7 +876,16 @@ impl Hooks for Meridian {
     }
 
     fn screen_mouse_button_released_pre(&self, host: &dyn Host, event: &mut ScreenMouseButtonReleasedPreEvent<'_>) -> Flow {
-        if host.mod_screen() != Some(MOD_ID) || !self.map_open(host) {
+        if host.mod_screen() != Some(MOD_ID) {
+            return Flow::Continue;
+        }
+        if !self.map_open(host) {
+            if event.button == 0 {
+                self.with_screen(host, |screen, _| {
+                    screen.release();
+                    ((), Action::None)
+                });
+            }
             return Flow::Continue;
         }
         let at = host.cursor();
@@ -884,7 +896,17 @@ impl Hooks for Meridian {
     }
 
     fn screen_mouse_dragged_pre(&self, host: &dyn Host, event: &mut ScreenMouseDraggedPreEvent<'_>) -> Flow {
-        if host.mod_screen() != Some(MOD_ID) || !self.map_open(host) {
+        if host.mod_screen() != Some(MOD_ID) {
+            return Flow::Continue;
+        }
+        if !self.map_open(host) {
+            if event.button == 0 {
+                let at = host.cursor();
+                self.with_screen(host, |screen, env| {
+                    screen.drag(at, env);
+                    ((), Action::None)
+                });
+            }
             return Flow::Continue;
         }
         if event.button == 0 {
@@ -1315,7 +1337,9 @@ impl Hooks for Meridian {
             world_waypoints(host, s, gui, gui_scale, &mut ops);
             let settings = &s.config.current().minimap;
             let under_debug = settings.hide_under_debug && bridge::debug_shown();
-            if settings.enabled && !under_debug && !(settings.hide_under_screens && !host.playing()) {
+            // The position editor shows the minimap it moves.
+            let positioning = matches!(s.screen, Some(Screen::Position(_)));
+            if positioning || (settings.enabled && !under_debug && !(settings.hide_under_screens && !host.playing())) {
                 minimap_ops(host, s, &player, gui, gui_scale, &mut ops);
             } else {
                 gpu::set_frame(None);
@@ -1398,6 +1422,10 @@ fn minimap_ops(
     let lines: Vec<(String, u32)> =
         meridian_core::info::lines(settings, &input).into_iter().map(|l| (l, 0xFFFF_FFFF)).collect();
     let layout = minimap::layout(settings, gui, gui_scale, s.controls.enlarged(), lines.len());
+    s.minimap_place = Some(meridian_core::screens::MinimapPlace {
+        rect: [layout.x, layout.y, layout.size, layout.size],
+        margin: 5.0 * layout.unit + layout.frame_width(),
+    });
     compose_map(s, &layout, player);
     let settings = &s.config.current().minimap;
     let axes = minimap::Axes::new(layout.rotate, player.yaw);
@@ -1554,6 +1582,8 @@ impl Meridian {
                 completed_count: s.seed_key.as_ref().map(|k| s.completed.count(k, None)),
                 nearest: s.nearest_opts,
             };
+            let profiles: Vec<String> = s.config.profiles.keys().cloned().collect();
+            let profile = s.config.current_profile.clone();
             let (result, action, waypoints_changed, settings_changed) = {
                 let waypoints = book.dimension_mut(&dim);
                 let mut env = Env {
@@ -1566,6 +1596,9 @@ impl Meridian {
                     waypoints_changed: false,
                     settings_changed: false,
                     seed_atlas: sa_env,
+                    profiles: profiles.clone(),
+                    profile: profile.clone(),
+                    minimap: s.minimap_place,
                 };
                 let (result, action) = f(&mut screen, &mut env);
                 (result, action, env.waypoints_changed, env.settings_changed)
@@ -1612,6 +1645,20 @@ impl Meridian {
                 Action::FindNearest { kind, waypoint, skip_completed } => {
                     s.nearest_opts = meridian_core::nearest::NearestOptions { waypoint, skip_completed };
                     s.find_nearest(kind, waypoint, skip_completed, sa_dim, player_block);
+                }
+                Action::Profile(op) => {
+                    use meridian_core::screens::ProfileOp;
+                    let c = &mut s.config;
+                    let changed = match op {
+                        ProfileOp::Select(name) => c.select_profile(&name),
+                        ProfileOp::Create(name) => c.create_profile(&name) && c.select_profile(&name),
+                        ProfileOp::Rename(name) => c.rename_profile(&name),
+                        ProfileOp::Delete(name) => c.delete_profile(&name),
+                    };
+                    if changed {
+                        s.engine.set_settings(s.config.current().clone());
+                        s.save_config();
+                    }
                 }
                 Action::ResetCompleted => {
                     if let Some(key) = s.seed_key.clone()
