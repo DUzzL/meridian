@@ -32,6 +32,7 @@ Meridian übernimmt die Standardbelegung der beiden Referenz-Mods 1:1, damit Ums
 | `meridian.overlay.light` | Licht-Overlay ein/aus | ungebunden | `gui.xaero_toggle_light_overlay` |
 | `meridian.radar.toggle` | Entity-Radar ein/aus | ungebunden | `gui.xaero_toggle_entity_radar` |
 | `meridian.radar.reverse` | Radar-Filter umkehren | ungebunden | `gui.xaero_reverse_entity_radar` |
+| `meridian.radar.faces` | Gesichter von Mobs, Tieren und Spielern auf Minimap und Weltkarte, solange gehalten | **Tab** `key.keyboard.tab` | — (eigene Taste; Standard wie die Spielerliste) |
 | `meridian.cave.toggle_manual` | Manuellen Höhlenmodus umschalten | ungebunden | `gui.xaero_toggle_manual_cave_mode` |
 | `meridian.players.alt_list` | Alternative Spielerliste | ungebunden | `gui.xaero_alternative_list_players` |
 | `meridian.players.tracked_map` | Verfolgte Spieler auf der Karte ein/aus | ungebunden | `gui.xaero_toggle_tracked_players_on_map` |

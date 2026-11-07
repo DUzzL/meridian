@@ -379,6 +379,9 @@ pub enum NameMode {
 pub struct RadarSettings {
     /// Mobs as their faces (from the game's textures) instead of dots.
     pub faces: bool,
+    /// Faces while the faces key (Tab, the player list's) is held, on the
+    /// minimap and the world map.
+    pub faces_while_held: bool,
     pub names: NameMode,
     /// Entity ids never shown (`minecraft:bat`), whatever their category.
     pub excluded: std::collections::BTreeSet<String>,
@@ -406,6 +409,7 @@ impl Default for RadarSettings {
     fn default() -> Self {
         Self {
             faces: false,
+            faces_while_held: true,
             names: NameMode::Players,
             excluded: std::collections::BTreeSet::new(),
             enabled: true,

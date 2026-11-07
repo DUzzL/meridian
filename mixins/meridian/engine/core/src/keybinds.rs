@@ -34,6 +34,7 @@ pub const KEY_BINDINGS: &[KeyBinding] = bindings! {
     "overlay.light", "Show/hide light overlay", UNBOUND;
     "radar.toggle", "Show/hide entity radar", UNBOUND;
     "radar.reverse", "Reverse entity radar filter", UNBOUND;
+    "radar.faces", "Entity faces (hold)", "key.keyboard.tab";
     "cave.toggle_manual", "Manual cave mode", UNBOUND;
     "players.alt_list", "Alternative player list", UNBOUND;
     "players.tracked_map", "Tracked players on the map", UNBOUND;
@@ -74,8 +75,8 @@ mod tests {
     use std::collections::HashSet;
 
     #[test]
-    fn thirty_unique_bindings() {
-        assert_eq!(KEY_BINDINGS.len(), 30);
+    fn thirty_one_unique_bindings() {
+        assert_eq!(KEY_BINDINGS.len(), 31);
         let ids: HashSet<_> = KEY_BINDINGS.iter().map(|b| b.id).collect();
         assert_eq!(ids.len(), KEY_BINDINGS.len());
     }
@@ -94,6 +95,8 @@ mod tests {
                 ("waypoint.menu", "key.keyboard.u"),
                 ("minimap.enlarge", "key.keyboard.z"),
                 ("waypoint.instant", "key.keyboard.keypad.add"),
+                // Meridian's own: faces while held, on the player list's key.
+                ("radar.faces", "key.keyboard.tab"),
                 ("settings", "key.keyboard.y"),
                 ("worldmap.open", "key.keyboard.m"),
                 ("worldmap.settings", "key.keyboard.right.bracket"),

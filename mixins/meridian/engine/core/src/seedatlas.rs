@@ -480,9 +480,9 @@ const MIN_GRID: i32 = 1024;
 const MAX_GRID: i32 = 16384;
 const MAX_RADIUS: i32 = 65536;
 /// Results per kind and scan (`NORMAL_RESULTS_PER_TYPE`).
-pub const RESULTS_PER_KIND: usize = 1024;
+pub const RESULTS_PER_KIND: usize = 8192;
 /// Slime chunk results per scan (`NORMAL_SLIME_RESULTS`).
-pub const SLIME_RESULTS: usize = 4096;
+pub const SLIME_RESULTS: usize = 8192;
 /// A view must stay this long before it is scanned (`SCAN_DEBOUNCE_MILLIS`).
 pub const SCAN_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(150);
 /// Scans kept: 8 views of all kinds (`scanCache`).
@@ -506,8 +506,9 @@ fn scan_grid(radius: i32) -> i32 {
 }
 
 /// Whether a marker shows at this zoom (`visibleAtZoom`): dense kinds only
-/// up close, landmarks always. `scale` is the map's zoom, `radius` the scan
-/// radius in blocks.
+/// up close, the rarest landmarks furthest out. `scale` is the map's zoom,
+/// `radius` the scan radius in blocks. A kind whose scan would be too
+/// large or find too many is left out as well (see `Atlas::scan_complete`).
 pub fn visible_at_zoom(marker_id: &str, scale: f64, radius: i32) -> bool {
     match marker_id {
         "slime" => scale >= 0.5 && radius <= 2048,
@@ -515,10 +516,11 @@ pub fn visible_at_zoom(marker_id: &str, scale: f64, radius: i32) -> bool {
         "mineshaft" => scale >= 0.25 && radius <= 12288,
         "camp" | "village" | "shipwreck" | "ruins" | "portal" | "trails" | "chambers"
         | "outpost" | "desert" | "jungle" | "hut" | "igloo" => scale >= 0.125 && radius <= 24576,
-        // Monuments are frequent in oceans: hidden before the true landmarks.
-        "monument" => scale >= 0.0625,
-        "spawn" | "stronghold" | "mansion" | "ancient_city" | "fortress" | "bastion"
-        | "endcity" | "gateway" => true,
+        // Monuments are frequent in oceans, ancient cities under every
+        // mountain range: hidden first of the landmarks.
+        "monument" | "ancient_city" => scale >= 0.0625,
+        "stronghold" | "mansion" => scale >= 0.03125,
+        "spawn" | "fortress" | "bastion" | "endcity" | "gateway" => true,
         _ => scale >= 0.03125,
     }
 }
@@ -824,9 +826,12 @@ fn run(atlas: &Atlas, kinds: &[i32], look: &TileLook, job: Job, globals: &Global
                             .copied()
                             .collect())
                     }
-                    // Spread over the whole box rather than the first
-                    // results in scan order (which would fill the north).
-                    marker::SLIME_CHUNK => atlas.scan_spread(k, b, false, SLIME_RESULTS),
+                    // All of them or none: a box too large to scan whole,
+                    // or holding more than the limit, leaves the kind out
+                    // at this zoom (markers are never thinned or merged).
+                    marker::SLIME_CHUNK => atlas
+                        .scan_complete(k, b, false, SLIME_RESULTS)
+                        .map(Option::unwrap_or_default),
                     marker::SPAWN => {
                         let (x, z) = *globals.spawn.get_or_init(|| atlas.spawn(true));
                         let spawn = Hit {
@@ -843,7 +848,9 @@ fn run(atlas: &Atlas, kinds: &[i32], look: &TileLook, job: Job, globals: &Global
                             Vec::new()
                         })
                     }
-                    k => atlas.scan_spread(k, b, true, RESULTS_PER_KIND),
+                    k => atlas
+                        .scan_complete(k, b, true, RESULTS_PER_KIND)
+                        .map(Option::unwrap_or_default),
                 }
             };
             Done::Markers(job, Arc::new(found.unwrap_or_default()))
@@ -1641,6 +1648,38 @@ mod tests {
     }
 
     #[test]
+    fn strongholds_and_mansions_far_out() {
+        let mut s = SeedAtlasSettings {
+            structures: true,
+            ..Default::default()
+        };
+        for id in ["stronghold", "mansion", "ancient_city", "monument"] {
+            s.markers.insert(id.into(), true);
+        }
+        let mut svc = SeedService::default();
+        svc.configure(Some((1, false)), &s);
+        let zoom = 0.054;
+        let (bbox, radius) = view_box([900.0, -5000.0], [3024.0 / zoom, 1720.0 / zoom]);
+        let shows = |k: i32| marker_for(k).is_some_and(|m| visible_at_zoom(m.id, zoom, radius));
+        let t0 = std::time::Instant::now();
+        let mut marks = Arc::new(Vec::new());
+        let mut first = true;
+        while t0.elapsed() < std::time::Duration::from_secs(60) {
+            svc.poll();
+            let now = if first { t0 } else { t0 + SCAN_DEBOUNCE };
+            first = false;
+            marks = svc.view_markers(Dimension::Overworld, bbox, shows, now);
+            if marks.iter().any(|h| h.kind == marker::STRONGHOLD) && marks.iter().any(|h| marker_for(h.kind).is_some_and(|m| m.id == "mansion")) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let ids: std::collections::BTreeSet<_> = marks.iter().filter_map(|h| marker_for(h.kind)).map(|m| m.id).collect();
+        assert!(ids.contains("stronghold"), "{ids:?}");
+        assert!(ids.contains("mansion"), "{ids:?}");
+    }
+
+    #[test]
     fn the_queue_follows_the_latest_frame() {
         let mut svc = SeedService::default();
         svc.configure(
@@ -1712,33 +1751,26 @@ mod tests {
     }
 
     #[test]
-    fn capped_scans_spread_over_the_whole_box() {
+    fn scans_show_every_marker_or_none() {
         let atlas = Atlas::versioned(42, false, meridian_seedatlas::mc::MC_NEWEST);
-        let (b, _) = view_box([0.0, 0.0], [200_000.0, 200_000.0]);
         let kind = meridian_seedatlas::structures::kind::MONUMENT;
-        let hits = atlas.scan_spread(kind, b, true, RESULTS_PER_KIND).unwrap();
-        assert!(!hits.is_empty() && hits.len() <= RESULTS_PER_KIND);
-        // Every quarter of the box has markers, the south as well as the north.
-        let (mx, mz) = ((b[0] + b[2]) / 2, (b[1] + b[3]) / 2);
-        for (east, south) in [(false, false), (true, false), (false, true), (true, true)] {
-            let n = hits
-                .iter()
-                .filter(|h| (h.x >= mx) == east && (h.z >= mz) == south)
-                .count();
-            assert!(
-                n > hits.len() / 8,
-                "quarter east={east} south={south}: {n} of {}",
-                hits.len()
-            );
-        }
-        // A small box keeps every result.
+        // Too large a box to scan whole: the kind is left out, never thinned.
+        let (huge, _) = view_box([0.0, 0.0], [200_000.0, 200_000.0]);
+        assert_eq!(atlas.scan_complete(kind, huge, true, RESULTS_PER_KIND).unwrap(), None);
+        // A box that can be: every monument in it.
         let small = [0, 0, 4095, 4095];
         assert_eq!(
-            atlas
-                .scan_spread(kind, small, true, RESULTS_PER_KIND)
-                .unwrap(),
-            atlas.scan_structures(kind, small, true).unwrap()
+            atlas.scan_complete(kind, small, true, RESULTS_PER_KIND).unwrap(),
+            Some(atlas.scan_structures(kind, small, true).unwrap())
         );
+        // More than the limit: none rather than some.
+        let all = atlas.scan_structures(kind, [0, 0, 16383, 16383], true).unwrap();
+        assert!(all.len() > 2);
+        assert_eq!(atlas.scan_complete(kind, [0, 0, 16383, 16383], true, all.len() - 1).unwrap(), None);
+        // At the zoom monuments are shown from, their box is scanned whole.
+        let (b, radius) = view_box([0.0, 0.0], [3840.0 / 0.0625, 2160.0 / 0.0625]);
+        assert!(visible_at_zoom("monument", 0.0625, radius));
+        assert!(atlas.scan_complete(kind, b, true, RESULTS_PER_KIND).unwrap().is_some());
     }
 
     #[test]
@@ -1746,7 +1778,13 @@ mod tests {
         assert!(visible_at_zoom("village", 0.2, 10000));
         assert!(!visible_at_zoom("village", 0.1, 10000));
         assert!(!visible_at_zoom("village", 0.2, 30000), "too large a scan");
-        assert!(visible_at_zoom("mansion", 0.001, 65536), "landmarks always");
+        assert!(visible_at_zoom("fortress", 0.001, 65536), "Nether and End landmarks always");
+        for id in ["stronghold", "mansion"] {
+            assert!(visible_at_zoom(id, 0.04, 65536));
+            assert!(!visible_at_zoom(id, 0.02, 65536), "{id} gone far out");
+        }
+        assert!(visible_at_zoom("ancient_city", 0.07, 65536));
+        assert!(!visible_at_zoom("ancient_city", 0.04, 65536));
         assert!(visible_at_zoom("monument", 0.07, 65536));
         assert!(
             !visible_at_zoom("monument", 0.04, 65536),

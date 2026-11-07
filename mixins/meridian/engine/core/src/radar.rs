@@ -60,24 +60,46 @@ pub struct Entity {
     pub kind: String,
     /// A player's name or a custom name.
     pub name: Option<String>,
+    /// Its face, when the radar shows faces (see [`face_for`]).
+    pub face: Option<Face>,
 }
 
 /// Where a mob's face is in its texture: the front of its model's head
 /// cube (texture path under `textures/`, and u, v, width, height in texels
 /// of a 64-wide texture).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Face {
-    pub texture: &'static str,
+    pub texture: String,
     pub uv: [u16; 4],
+}
+
+/// Humanoid heads: 8x8x8 at (0, 0).
+const HEAD: [u16; 4] = [8, 8, 8, 8];
+
+/// The face of an entity: a player's from their skin (the default skin of
+/// their id when the game has no other texture for it), else its kind's.
+pub fn face_for(kind: &str, skin: Option<&str>) -> Option<Face> {
+    if kind == "minecraft:player" {
+        return Some(Face {
+            texture: skin.unwrap_or("entity/player/wide/steve").to_owned(),
+            uv: HEAD,
+        });
+    }
+    face(kind)
 }
 
 /// The face of an entity kind, for kinds whose model has a plain head.
 pub fn face(kind: &str) -> Option<Face> {
     let id = kind.strip_prefix("minecraft:").unwrap_or(kind);
-    let f = |texture, uv| Some(Face { texture, uv });
-    // Humanoid heads: 8x8x8 at (0, 0); villagers and illagers 8x10x8.
-    const HEAD: [u16; 4] = [8, 8, 8, 8];
+    let f = |texture: &str, uv| {
+        Some(Face {
+            texture: texture.to_owned(),
+            uv,
+        })
+    };
+    // Villagers and illagers 8x10x8; piglins 10x8x8.
     const LONG: [u16; 4] = [8, 8, 8, 10];
+    const WIDE: [u16; 4] = [8, 8, 10, 8];
     match id {
         "zombie" => f("entity/zombie/zombie", HEAD),
         "husk" => f("entity/zombie/husk", HEAD),
@@ -88,7 +110,7 @@ pub fn face(kind: &str) -> Option<Face> {
         "bogged" => f("entity/skeleton/bogged", HEAD),
         "creeper" => f("entity/creeper/creeper", HEAD),
         "enderman" => f("entity/enderman/enderman", HEAD),
-        "blaze" => f("entity/blaze", HEAD),
+        "blaze" => f("entity/blaze/blaze", HEAD),
         "slime" => f("entity/slime/slime", HEAD),
         "spider" => f("entity/spider/spider", [40, 12, 8, 8]),
         "cave_spider" => f("entity/spider/cave_spider", [40, 12, 8, 8]),
@@ -98,7 +120,13 @@ pub fn face(kind: &str) -> Option<Face> {
         "chicken" => f("entity/chicken/chicken_temperate", [3, 3, 4, 6]),
         "villager" => f("entity/villager/villager", LONG),
         "zombie_villager" => f("entity/zombie_villager/zombie_villager", LONG),
-        "witch" => f("entity/witch", LONG),
+        "witch" => f("entity/witch/witch", LONG),
+        "wandering_trader" => f("entity/wandering_trader/wandering_trader", LONG),
+        "piglin" => f("entity/piglin/piglin", WIDE),
+        "piglin_brute" => f("entity/piglin/piglin_brute", WIDE),
+        "zombified_piglin" => f("entity/piglin/zombified_piglin", WIDE),
+        "snow_golem" => f("entity/snow_golem/snow_golem", HEAD),
+        "wolf" => f("entity/wolf/wolf", [4, 4, 6, 6]),
         "pillager" => f("entity/illager/pillager", LONG),
         "vindicator" => f("entity/illager/vindicator", LONG),
         "evoker" => f("entity/illager/evoker", LONG),
@@ -173,7 +201,7 @@ pub fn dots(
         } else {
             e.class.rgb()
         };
-        let face = if s.faces { face(&e.kind) } else { None };
+        let face = if s.faces { e.face.as_ref() } else { None };
         if let Some(face) = face {
             // The face, a little larger than a dot, on a dark rim.
             let half = r * 1.6;
@@ -189,7 +217,7 @@ pub fn dots(
             });
             let shade = rgb_to_shade(e.class.rgb(), rgb);
             ops.push(DrawOp::Blit {
-                texture: face.texture.to_owned(),
+                texture: face.texture.clone(),
                 rect: [x - half, y - half, 2.0 * half, 2.0 * half],
                 uv: face.uv,
                 argb: 0xFF00_0000 | shade,
@@ -262,6 +290,7 @@ mod tests {
             invisible: false,
             kind: "minecraft:zombie".into(),
             name: None,
+            face: face_for("minecraft:zombie", None),
         }
     }
 
@@ -359,6 +388,7 @@ mod tests {
         let mut steve = e(2, Class::Player, [-5.0, 64.0, 0.0]);
         steve.kind = "minecraft:player".into();
         steve.name = Some("Steve".into());
+        steve.face = face_for("minecraft:player", Some("entity/player/slim/alex"));
         zombie.name = Some("Bob".into());
         let ops =
             |s: &RadarSettings, list: &[Entity]| dots(&layout(), [0.0, 64.0, 0.0], 0.0, list, s);
@@ -394,10 +424,18 @@ mod tests {
             .into_iter()
             .filter(|o| matches!(o, DrawOp::Blit { .. }))
             .collect();
-        assert_eq!(blits.len(), 1, "the zombie's face; the player stays a dot");
+        assert_eq!(blits.len(), 2, "the zombie's face and the player's");
         assert!(
             matches!(&blits[0], DrawOp::Blit { texture, uv: [8, 8, 8, 8], .. } if texture == "entity/zombie/zombie")
         );
+        assert!(
+            matches!(&blits[1], DrawOp::Blit { texture, uv: [8, 8, 8, 8], .. } if texture == "entity/player/slim/alex")
+        );
+        // A kind without a known face (or whose texture is missing) stays a dot.
+        zombie.face = None;
+        let blits = ops(&s, &[zombie]).into_iter().filter(|o| matches!(o, DrawOp::Blit { .. })).count();
+        assert_eq!(blits, 0);
         assert!(face("minecraft:ender_dragon").is_none());
+        assert_eq!(face_for("minecraft:player", None).unwrap().texture, "entity/player/wide/steve");
     }
 }

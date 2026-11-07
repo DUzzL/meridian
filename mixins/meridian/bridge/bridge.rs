@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 /// Bumped when the shapes below change, so a trait mod can refuse a bridge
 /// it doesn't understand.
-pub const VERSION: u32 = 8;
+pub const VERSION: u32 = 9;
 /// Main-thread time per frame for chunk reads.
 const READ_BUDGET: Duration = Duration::from_micros(1500);
 
@@ -90,6 +90,9 @@ pub struct EntitySnap {
     pub invisible: bool,
     /// A player's name or a custom name.
     pub name: Option<String>,
+    /// A player's skin texture under `textures/` (their own when the game
+    /// drew it from its textures, else the default skin of their id).
+    pub skin: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -535,7 +538,12 @@ fn snapshot_entities(game: &super::Game<'_>) -> Vec<EntitySnap> {
         if m.removed || !m.alive() || m.kind.id.ends_with("armor_stand") {
             continue;
         }
-        let player = game.remote_player_uuid(m.id).is_some();
+        let uuid = game.remote_player_uuid(m.id);
+        let player = uuid.is_some();
+        let skin = uuid.map(|uuid| match &m.skin {
+            Some(skin) if skin.starts_with("entity/") => skin.clone(),
+            _ => horizon_client::tab_list::default_skin(uuid).to_owned(),
+        });
         let class = if player {
             EntityClass::Player
         } else if m.hostile() {
@@ -559,6 +567,7 @@ fn snapshot_entities(game: &super::Game<'_>) -> Vec<EntitySnap> {
             ],
             invisible: m.invisible || m.has_effect("minecraft:invisibility"),
             name,
+            skin,
         });
     }
     for item in game.dropped.iter() {
@@ -573,6 +582,7 @@ fn snapshot_entities(game: &super::Game<'_>) -> Vec<EntitySnap> {
             ],
             invisible: false,
             name: None,
+            skin: None,
         });
     }
     // Vehicles: the radar's "other" entities.
@@ -589,6 +599,7 @@ fn snapshot_entities(game: &super::Game<'_>) -> Vec<EntitySnap> {
             pos: [lerp(previous.x, position.x), lerp(previous.y, position.y), lerp(previous.z, position.z)],
             invisible: false,
             name: None,
+            skin: None,
         });
     }
     out

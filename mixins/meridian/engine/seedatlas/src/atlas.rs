@@ -835,6 +835,44 @@ impl Atlas {
     }
 }
 
+/// Candidate cells a complete scan checks at most, for kinds placed per
+/// chunk or ore-vein cell (cheap: a random draw per cell) and for the rest
+/// (a biome check per cell).
+const COMPLETE_CELLS_CHEAP: i64 = 1 << 20;
+const COMPLETE_CELLS: i64 = 1 << 15;
+
+impl Atlas {
+    /// Every `structure` in the box, or `None` when the box is too large to
+    /// scan whole for it or holds more than `cap`: the map then leaves the
+    /// kind out at that zoom rather than showing some of them (markers are
+    /// never thinned or merged).
+    pub fn scan_complete(
+        &self,
+        structure: i32,
+        b: [i32; 4],
+        check_biome: bool,
+        cap: usize,
+    ) -> Result<Option<Vec<Hit>>, AtlasError> {
+        if b[0] > b[2] || b[1] > b[3] {
+            return Err(AtlasError::Argument);
+        }
+        if let Some(cell) = self.scan_cell(structure) {
+            let w = (b[2] as i64 - b[0] as i64) / cell as i64 + 1;
+            let h = (b[3] as i64 - b[1] as i64) / cell as i64 + 1;
+            let limit = if cell <= 128 { COMPLETE_CELLS_CHEAP } else { COMPLETE_CELLS };
+            if w * h > limit {
+                return Ok(None);
+            }
+        }
+        let all = if structure == marker::SLIME_CHUNK {
+            self.scan_slime_chunks_strided(b, cap + 1, 1)?
+        } else {
+            self.scan_structures_strided(structure, b, check_biome, cap + 1, 1)?
+        };
+        Ok((all.len() <= cap).then_some(all))
+    }
+}
+
 /// At most `cap` hits, one per cell of a world-aligned power-of-two grid
 /// fine enough to hold `cap` cells over the box; the first hit in scan
 /// order wins a cell.

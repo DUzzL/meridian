@@ -22,7 +22,7 @@ use horizon_client::mod_api::{
     ClientLevelUnloadEvent, ClientResourcesReloadedEvent, ClientStoppingEvent, CommandEvent,
     CommandsEvent, Flow, FrameEvent, Hooks, Host, HudBatch, HudEvent, KeyEvent, ModsEvent,
     NativeMod, RenderHooks, ScreenCharTypedPreEvent, ScreenClosingEvent,
-    ScreenKeyPressedPreEvent, ScreenMouseButtonPressedPreEvent, ScreenMouseButtonReleasedPreEvent,
+    ScreenKeyPressedPreEvent, ScreenKeyReleasedPreEvent, ScreenMouseButtonPressedPreEvent, ScreenMouseButtonReleasedPreEvent,
     ScreenMouseDraggedPreEvent, ScreenMouseScrolledPreEvent, GuiLayerPreEvent, RenderHandEvent,
     MenuBackgroundEvent, ScreenRenderPostEvent, Text, TintSource, WorldLifecycleEvent, WorldPhase, WorldPrimitivesEvent,
 };
@@ -47,7 +47,7 @@ use parking_lot::Mutex;
 pub const MOD_ID: &str = "meridian";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The bridge shape this adapter was written for.
-const BRIDGE_VERSION: u32 = 8;
+const BRIDGE_VERSION: u32 = 9;
 
 /// The singleplayer world's folder name, set by the integrated server's
 /// thread (the window's client only knows the world's display name).
@@ -191,6 +191,8 @@ struct State {
     hovered_marker: Option<HoveredMarker>,
     /// Whether the game's biome looks were handed to Seed Atlas.
     looks_ready: bool,
+    /// The faces key (Tab by default) is held.
+    faces_held: bool,
     /// The marker the open map menu is for.
     menu_marker: Option<HoveredMarker>,
     /// The other player the map menu was opened on.
@@ -657,6 +659,7 @@ impl Meridian {
                 seed_key: None,
                 hovered_marker: None,
                 looks_ready: false,
+                faces_held: false,
                 menu_marker: None,
                 menu_player: None,
                 minimap_place: None,
@@ -807,6 +810,9 @@ impl Meridian {
             return None;
         }
         self.with_state(host, |s| {
+            if hits.contains(&"radar.faces") {
+                s.faces_held = pressed;
+            }
             let mut changed = false;
             for id in &hits {
                 changed |= s
@@ -1213,12 +1219,24 @@ impl Hooks for Meridian {
             return Flow::Continue;
         }
         let key = event.key.to_owned();
+        if self.faces_key(host, &key, true) {
+            return Flow::Cancel;
+        }
         if self.map_open(host) {
             self.map_key(host, &key);
             return Flow::Cancel;
         }
         self.with_screen(host, |screen, env| ((), screen.key(&key, env)));
         Flow::Cancel
+    }
+
+    fn screen_key_released_pre(&self, host: &dyn Host, event: &mut ScreenKeyReleasedPreEvent<'_>) -> Flow {
+        // Released over any screen (the key may have been pressed while
+        // playing): the faces go; only our map takes the key.
+        if self.faces_key(host, event.key, false) && host.mod_screen() == Some(MOD_ID) {
+            return Flow::Cancel;
+        }
+        Flow::Continue
     }
 
     fn screen_mouse_scrolled_pre(&self, host: &dyn Host, event: &mut ScreenMouseScrolledPreEvent<'_>) -> Flow {
@@ -1761,7 +1779,8 @@ fn minimap_ops(
     bridge::want_entities(radar_on);
     if radar_on {
         let entities = radar_entities();
-        ops.extend(radar::dots(&layout, player.position, player.yaw, &entities, radar));
+        let radar = radar_now(radar, s.faces_held);
+        ops.extend(radar::dots(&layout, player.position, player.yaw, &entities, &radar));
     }
     let wp = &s.config.current().waypoints;
     if wp.on_minimap
@@ -2066,10 +2085,20 @@ fn radar_entities() -> Vec<radar::Entity> {
             },
             pos: e.pos,
             invisible: e.invisible,
+            // Faces only where the texture is there (another resource pack
+            // may not have it): a dot otherwise.
+            face: radar::face_for(&e.kind, e.skin.as_deref()).filter(|f| texture_size(&f.texture).is_some()),
             kind: e.kind,
             name: e.name,
         })
         .collect()
+}
+
+/// The radar settings as drawn now: faces also while the faces key is held.
+fn radar_now(settings: &meridian_core::config::RadarSettings, held: bool) -> meridian_core::config::RadarSettings {
+    let mut r = settings.clone();
+    r.faces = r.faces || (r.faces_while_held && held);
+    r
 }
 
 /// A texture's size in texels, read once from its PNG header in the game's
@@ -2113,10 +2142,26 @@ const MAP_REQUEST_RADIUS_FAR: i32 = 2;
 /// Below this many GUI pixels per region the map draws overviews outside
 /// the middle.
 const MAP_OVERVIEW_BELOW: f32 = 96.0;
+/// How much larger than their base size structure icons grow up close.
+const MARKER_MAX_GROWTH: f32 = 2.0;
 /// Regions drawn either way of the centre at most.
 const MAP_DRAW_RADIUS: i32 = 48;
 
 impl Meridian {
+    /// The faces key pressed or released on our screens (the world map):
+    /// true when `key` is it. Text fields still get it typed.
+    fn faces_key(&self, host: &dyn Host, key: &str, pressed: bool) -> bool {
+        let bound = host.mod_key(MOD_ID, "radar.faces", "key.keyboard.tab");
+        if key != bound || key == meridian_core::keybinds::UNBOUND {
+            return false;
+        }
+        self.with_state(host, |s| {
+            s.faces_held = pressed;
+            // Over the map only; other screens (a text field) use the key.
+            s.map_open
+        })
+    }
+
     fn map_open(&self, host: &dyn Host) -> bool {
         self.with_state(host, |s| s.map_open)
     }
@@ -2365,11 +2410,12 @@ impl Meridian {
                 if sa_settings.structures {
                     load_icons();
                     // `MarkerSize.iconScale`: two blocks wide with the map,
-                    // never below the sprite size, at most a quarter of the view.
+                    // never below the sprite size and at most twice it, so
+                    // icons neither vanish far out nor swell up close.
                     let setting = sa_settings.marker_size_factor().clamp(0.25, 4.0);
                     let floor = 20.0 * u * 0.45 * setting;
                     let with_map = 2.0 * setting * s.map.scale(u) as f32;
-                    let ceiling = floor.max(gui[0].min(gui[1]) * 0.25);
+                    let ceiling = floor * MARKER_MAX_GROWTH;
                     let units = floor.max(with_map).clamp(floor, ceiling);
                     let px = units / icons::DISPLAY_SIZE;
                     let completed_alpha = sa_settings.completed_opacity_pct() as f32 / 100.0;
@@ -2475,6 +2521,7 @@ impl Meridian {
                 hovered_biome,
                 waypoints: &waypoints,
                 entities: &entities,
+                faces: radar_now(&settings.radar, s.faces_held).faces,
                 show_coordinates: wm.show_coordinates,
                 show_zoom: wm.show_zoom,
                 show_biome: wm.show_hovered_biome,

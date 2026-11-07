@@ -988,6 +988,7 @@ pub fn options() -> Vec<Opt> {
         toggle!("Hide Invisible Entities", Radar, radar.hide_invisible),
         toggle!("Smooth Entity Dots", Radar, radar.smooth),
         toggle!("Mob Faces", Radar, radar.faces),
+        toggle!("Faces While Tab Held", Radar, radar.faces_while_held),
         Opt {
             label: "Entity Names",
             group: Radar,

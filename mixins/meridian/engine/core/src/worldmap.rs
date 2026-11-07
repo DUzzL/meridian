@@ -30,6 +30,8 @@ const OPENING_FROM: f64 = 0.5;
 const UNITS_PER_BLOCK_PER_ZOOM: f64 = 0.633;
 /// Zoom factor per scroll notch.
 const ZOOM_STEP: f64 = 1.2;
+/// Half the side of an entity's face on the map, in units.
+const ENTITY_FACE_HALF: f32 = 3.0;
 /// Most footstep points kept.
 const FOOTSTEPS: usize = 2048;
 
@@ -124,6 +126,8 @@ pub struct Overlay<'a> {
     pub hovered_biome: Option<String>,
     pub waypoints: &'a [&'a Waypoint],
     pub entities: &'a [radar::Entity],
+    /// Entities as their faces (where known) instead of dots.
+    pub faces: bool,
     pub show_coordinates: bool,
     pub show_zoom: bool,
     pub show_biome: bool,
@@ -416,9 +420,26 @@ impl WorldMap {
                 });
             }
         }
-        // Entities: small dots with a dark rim.
+        // Entities: small dots with a dark rim, or their faces. Both keep
+        // their size in GUI units whatever the zoom.
         for e in o.entities {
             let [x, y] = self.to_screen([e.pos[0], e.pos[2]], gui, u);
+            if o.faces
+                && let Some(face) = &e.face
+            {
+                let (half, rim) = (ENTITY_FACE_HALF * u, 0.6 * u);
+                ops.push(DrawOp::Fill {
+                    rect: [x - half - rim, y - half - rim, 2.0 * (half + rim), 2.0 * (half + rim)],
+                    argb: 0xFF00_0000,
+                });
+                ops.push(DrawOp::Blit {
+                    texture: face.texture.clone(),
+                    rect: [x - half, y - half, 2.0 * half, 2.0 * half],
+                    uv: face.uv,
+                    argb: 0xFFFF_FFFF,
+                });
+                continue;
+            }
             let r = 1.2 * u;
             let diamond = |r: f32| [[x, y - r], [x + r, y], [x, y + r], [x - r, y]];
             ops.push(DrawOp::Quad {

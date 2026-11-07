@@ -445,3 +445,21 @@ Auf Wunsch, mit Vorrang für die Leistung: Weit draußen genügt ein ungefähres
   - Bei 0,3x rechnen die Worker ~4 s statt ~18 s; bei 0,018x ~3 s.
   - Hineinzoomen auf 0,7x mit vollem Detail: ~4 s.
   - Wieder herauszoomen: keine Rechenphase, die Karte ist sofort voll.
+
+## D-036: Landmarken weit draußen, nie zusammengelegte Marker, Gesichter mit Tab, Icongrößen
+
+- **Landmarken verschwinden weit draußen:**
+  - Antike Städte unter 0,0625x, wie Monumente.
+  - Waldanwesen und Strongholds unter 0,03125x.
+  - Nether- und End-Landmarken sowie der Spawn bleiben immer.
+- **Kein Zusammenlegen, nirgends:** Bisher prüfte ein Scan mit mehr Kandidaten als dem Limit nur jede k-te Zelle und dünnte die Treffer auf ein Raster aus (D-031). Nahe Marker fielen dabei weg, das wirkte wie Zusammenlegen.
+  - Jetzt gilt „alles oder nichts“ (`Atlas::scan_complete`).
+  - Der Scan prüft jede Zelle. Passt die Zahl der Zellen nicht ins Budget (2²⁰ für Arten pro Chunk oder Erzader-Zelle, 2¹⁵ für die übrigen) oder findet er mehr als 8192 Treffer, bleibt die Art bei diesem Zoom ganz weg.
+  - Damit ist D-031 (gleichmäßiges Ausdünnen) ersetzt.
+- **Gesichter mit Tab:** Solange die neue Taste `radar.faces` (Standard Tab, wie die Spielerliste) gehalten wird, zeigen Minimap und Weltkarte Gesichter statt Punkten. Abschaltbar mit „Faces While Tab Held“; „Mob Faces“ zeigt sie weiter dauerhaft.
+  - Mobs: das Gesicht aus der Spieltextur. Neu sind Piglins, Wanderhändler, Schneegolem und Wolf; die Pfade von Lohe und Hexe waren falsch und sind korrigiert.
+  - Spieler: ihr Skin, wenn das Spiel ihn aus seinen Texturen zeichnet, sonst der Standard-Skin ihrer UUID (Bridge Version 9). Heruntergeladene Skins liegen in Horizon in internen Slots, an die die HUD-Zeichnung nicht kommt.
+  - Fehlt eine Textur, etwa in einem anderen Ressourcenpaket, bleibt es beim Punkt.
+- **Icongrößen:**
+  - Struktur-Icons wachsen beim Hineinzoomen höchstens auf das Doppelte ihrer Grundgröße statt bis auf ein Viertel des Bildes, und werden nie kleiner als die Grundgröße.
+  - Entity-Punkte und -Gesichter haben auf Karte und Minimap eine feste Größe in GUI-Einheiten.

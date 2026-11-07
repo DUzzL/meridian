@@ -521,3 +521,20 @@ Neue Tests:
 - **Neue Tests:** `zoomed_out_views_need_fewer_tiles`, `coarse_tiles_are_made_from_finer_ones_in_memory`.
 
 **Build und Tests**: 197 Kern-Tests grün; Clippy sauber, Adapter-Check grün; Launcher-Build `native-66f3981-74e6e37c960d`.
+
+### Phase 6: Landmarken, kein Zusammenlegen, Gesichter mit Tab (D-036)
+
+- Antike Städte verschwinden unter 0,0625x, Waldanwesen und Strongholds unter 0,03125x.
+- Struktur-Scans zeigen eine Art ganz oder gar nicht; nichts wird ausgedünnt oder zusammengelegt.
+- Tab halten zeigt auf Minimap und Weltkarte die Gesichter von Mobs, Tieren und Spielern.
+- Struktur-Icons wachsen beim Hineinzoomen höchstens auf das Doppelte.
+- **Im Spiel geprüft:**
+  - Weltkarte und Minimap mit gedrückter Tab-Taste zeigen Gesichter, ohne Tab Punkte.
+  - Bei 0,1x Monumente, antike Städte, Strongholds; bei 0,054x keine Monumente und antiken Städte; ab 0,032x Anwesen, bei 0,016x keine Landmarken.
+- **Nicht im Spiel geprüft:**
+  - Das Loslassen von Tab: Das Steuer-Tool des Testspiels meldet losgelassene Tasten nicht an Mods, die echte Tastatur schon.
+  - Strongholds zwischen 0,03 und 0,06x: Beim Zoomen mit dem Steuer-Tool wanderte die Karte vom Ursprung weg. Der Test `strongholds_and_mansions_far_out` deckt das ab.
+  - Spielergesichter: keine Mitspieler im Test.
+- **Neue Tests:** `scans_show_every_marker_or_none`, `strongholds_and_mansions_far_out`; Radar-Tests für Spielergesichter und den Punkt bei fehlender Textur.
+
+**Build und Tests**: 198 Kern-Tests und der Paritätstest grün; Clippy sauber, Adapter-Check grün; Launcher-Build `native-66f3981-8a8c8e9d991a`.
