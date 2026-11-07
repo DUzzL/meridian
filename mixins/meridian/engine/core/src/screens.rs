@@ -90,14 +90,21 @@ pub enum Dropdown {
 
 /// The entries of the open dropdown, under its selector (`world` or
 /// `dimension` rect), over everything else.
-fn dropdown_widgets(open: Option<Dropdown>, world: [f32; 4], dimension: [f32; 4], env: &Env<'_>) -> Vec<Widget> {
+fn dropdown_widgets(
+    open: Option<Dropdown>,
+    world: [f32; 4],
+    dimension: [f32; 4],
+    env: &Env<'_>,
+) -> Vec<Widget> {
     let Some(open) = open else { return Vec::new() };
     let (rect, entries, chosen, tag) = match open {
         Dropdown::World => (world, &env.places.worlds, env.places.world, "w"),
         Dropdown::Dimension => (dimension, &env.places.dimensions, env.places.dimension, "d"),
     };
     let row = 12.0;
-    let room = ((env.gui[1] - rect[1] - rect[3] - 4.0) / row).floor().max(1.0) as usize;
+    let room = ((env.gui[1] - rect[1] - rect[3] - 4.0) / row)
+        .floor()
+        .max(1.0) as usize;
     let shown = entries.len().min(room);
     let top = rect[1] + rect[3];
     let mut ws = vec![Widget {
@@ -108,8 +115,17 @@ fn dropdown_widgets(open: Option<Dropdown>, world: [f32; 4], dimension: [f32; 4]
     }];
     for (i, label) in entries.iter().take(shown).enumerate() {
         let y = top + 1.0 + i as f32 * row;
-        ws.push(Widget::row(&format!("dd:{tag}:{i}"), [rect[0] + 1.0, y, rect[2] - 2.0, row], i == chosen));
-        ws.push(Widget::label(rect[0] + rect[2] / 2.0, y + 2.0, label.clone(), Align::Center));
+        ws.push(Widget::row(
+            &format!("dd:{tag}:{i}"),
+            [rect[0] + 1.0, y, rect[2] - 2.0, row],
+            i == chosen,
+        ));
+        ws.push(Widget::label(
+            rect[0] + rect[2] / 2.0,
+            y + 2.0,
+            label.clone(),
+            Align::Center,
+        ));
     }
     ws
 }
@@ -131,8 +147,14 @@ fn dropdown_click(open: &mut Option<Dropdown>, id: Option<&str>) -> Option<Actio
             let mut parts = entry.split(':').skip(1);
             let (tag, i) = (parts.next()?, parts.next()?.parse::<usize>().ok());
             match (tag, i) {
-                ("w", Some(i)) => Some(Action::ShowPlace { world: Some(i), dimension: None }),
-                ("d", Some(i)) => Some(Action::ShowPlace { world: None, dimension: Some(i) }),
+                ("w", Some(i)) => Some(Action::ShowPlace {
+                    world: Some(i),
+                    dimension: None,
+                }),
+                ("d", Some(i)) => Some(Action::ShowPlace {
+                    world: None,
+                    dimension: Some(i),
+                }),
                 _ => Some(Action::None),
             }
         }
@@ -933,7 +955,6 @@ pub enum Group {
     WorldMap,
 }
 
-
 /// One setting: its label, its value as shown, and how a click changes it
 /// (`back` for a right click).
 pub struct Opt {
@@ -1712,29 +1733,49 @@ mod tests {
         e.places = Places {
             worlds: vec!["Test (auto)".into(), "Other".into()],
             world: 0,
-            dimensions: vec!["overworld (auto)".into(), "overworld".into(), "the_end".into(), "the_nether".into()],
+            dimensions: vec![
+                "overworld (auto)".into(),
+                "overworld".into(),
+                "the_end".into(),
+                "the_nether".into(),
+            ],
             dimension: 0,
         };
         let mut list = Screen::List(List::default());
-        let ids = |sc: &Screen, e: &Env<'_>| sc.widgets(e).into_iter().map(|w| w.id).collect::<Vec<_>>();
+        let ids =
+            |sc: &Screen, e: &Env<'_>| sc.widgets(e).into_iter().map(|w| w.id).collect::<Vec<_>>();
         assert!(!ids(&list, &e).iter().any(|i| i.starts_with("dd:")));
         // The selector opens its list over the screen.
-        let rect = |sc: &Screen, e: &Env<'_>, id: &str| sc.widgets(e).into_iter().find(|w| w.id == id).unwrap().rect;
+        let rect = |sc: &Screen, e: &Env<'_>, id: &str| {
+            sc.widgets(e).into_iter().find(|w| w.id == id).unwrap().rect
+        };
         let r = rect(&list, &e, "dimension");
-        assert_eq!(list.click([r[0] + 5.0, r[1] + 5.0], false, &mut e), Action::None);
+        assert_eq!(
+            list.click([r[0] + 5.0, r[1] + 5.0], false, &mut e),
+            Action::None
+        );
         assert!(ids(&list, &e).contains(&"dd:d:3".to_owned()));
         // Picking an entry asks the host to show that dimension.
         let r = rect(&list, &e, "dd:d:3");
         assert_eq!(
             list.click([r[0] + 5.0, r[1] + 5.0], false, &mut e),
-            Action::ShowPlace { world: None, dimension: Some(3) }
+            Action::ShowPlace {
+                world: None,
+                dimension: Some(3)
+            }
         );
-        assert!(!ids(&list, &e).iter().any(|i| i.starts_with("dd:")), "closed after picking");
+        assert!(
+            !ids(&list, &e).iter().any(|i| i.starts_with("dd:")),
+            "closed after picking"
+        );
         // The world selector likewise; a click elsewhere only closes it.
         let r = rect(&list, &e, "world");
         list.click([r[0] + 5.0, r[1] + 5.0], false, &mut e);
         assert!(ids(&list, &e).contains(&"dd:w:1".to_owned()));
-        assert_eq!(list.click([1.0, e.gui[1] - 1.0], false, &mut e), Action::None);
+        assert_eq!(
+            list.click([1.0, e.gui[1] - 1.0], false, &mut e),
+            Action::None
+        );
         assert!(!ids(&list, &e).iter().any(|i| i.starts_with("dd:")));
         // The editor has the same dropdowns.
         let mut editor = Screen::Editor(Editor::new(e.waypoints, 1, true));
@@ -1743,7 +1784,10 @@ mod tests {
         let r = rect(&editor, &e, "dd:w:1");
         assert_eq!(
             editor.click([r[0] + 5.0, r[1] + 5.0], false, &mut e),
-            Action::ShowPlace { world: Some(1), dimension: None }
+            Action::ShowPlace {
+                world: Some(1),
+                dimension: None
+            }
         );
     }
 
