@@ -138,7 +138,10 @@ pub struct CaveSettings {
     pub auto: AutoCaveMode,
     /// Blocks scanned below the cave ceiling.
     pub depth: u32,
-    pub legible: bool,
+    /// Caves drawn readable (otherwise only torches light them). Named
+    /// apart from the unused `legible` of older files, so their `false`
+    /// doesn't darken caves now.
+    pub legible_caves: bool,
     /// Delay before switching in or out, milliseconds.
     pub toggle_delay_ms: u32,
     /// Extra zoom steps while in cave mode.
@@ -153,7 +156,7 @@ impl Default for CaveSettings {
             auto: AutoCaveMode::Roof3x3,
             depth: 30,
             // Readable by default: the map's own caves were always drawn so.
-            legible: true,
+            legible_caves: true,
             toggle_delay_ms: 1000,
             extra_zoom: 2,
         }
@@ -219,6 +222,8 @@ pub struct MinimapSettings {
     pub undiscovered_opacity: u8,
     /// Reuse the world map's tiles instead of building separate ones.
     pub share_world_map_tiles: bool,
+    /// Fair play: no entity radar and no cave maps (for servers that ask).
+    pub fair_play: bool,
     pub chunk_grid: bool,
     pub slime_chunks: bool,
     /// Mark ground whose block light is within `light_overlay_range`.
@@ -253,6 +258,7 @@ impl Default for MinimapSettings {
             hide_under_debug: true,
             undiscovered_opacity: 50,
             share_world_map_tiles: true,
+            fair_play: false,
             chunk_grid: false,
             slime_chunks: false,
             light_overlay: false,
@@ -374,6 +380,8 @@ pub struct RadarSettings {
     /// Mobs as their faces (from the game's textures) instead of dots.
     pub faces: bool,
     pub names: NameMode,
+    /// Entity ids never shown (`minecraft:bat`), whatever their category.
+    pub excluded: std::collections::BTreeSet<String>,
     pub enabled: bool,
     /// Shows what the filters hide and hides what they show (the reverse key).
     pub reversed: bool,
@@ -399,6 +407,7 @@ impl Default for RadarSettings {
         Self {
             faces: false,
             names: NameMode::Players,
+            excluded: std::collections::BTreeSet::new(),
             enabled: true,
             reversed: false,
             hide_invisible: true,
@@ -815,6 +824,13 @@ mod tests {
         assert!(file.delete_profile("b"));
         assert_eq!(file.current_profile, DEFAULT_PROFILE);
         assert!(!file.select_profile("b"));
+    }
+
+    #[test]
+    fn old_legible_value_is_ignored() {
+        let old = "[profiles.default.minimap.cave]\nlegible = false\n";
+        let f: ConfigFile = toml::from_str(old).unwrap();
+        assert!(f.profiles["default"].minimap.cave.legible_caves);
     }
 
     #[test]

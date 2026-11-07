@@ -108,7 +108,7 @@ pub fn face(kind: &str) -> Option<Face> {
 
 /// Whether the radar shows an entity, before position.
 pub fn shown(e: &Entity, s: &RadarSettings) -> bool {
-    if s.hide_invisible && e.invisible {
+    if (s.hide_invisible && e.invisible) || s.excluded.contains(&e.kind) {
         return false;
     }
     let wanted = match e.class {
@@ -339,6 +339,17 @@ mod tests {
             ..s
         };
         assert!(dots(&layout(), [0.0; 3], 0.0, &ents, &disabled).is_empty());
+    }
+
+    #[test]
+    fn excluded_kinds_never_show() {
+        let mut s = RadarSettings::default();
+        let z = e(1, Class::Hostile, [0.0; 3]);
+        assert!(shown(&z, &s));
+        s.excluded.insert("minecraft:zombie".into());
+        assert!(!shown(&z, &s));
+        s.reversed = true;
+        assert!(!shown(&z, &s), "not even reversed");
     }
 
     #[test]

@@ -137,11 +137,24 @@ struct Shared {
 pub struct Hide {
     pub flowers: bool,
     pub redstone: bool,
+    pub stained_glass: bool,
+    /// Short blocks (carpets, snow layers, plates) count one block lower,
+    /// so they don't shade as a step.
+    pub lower_short: bool,
 }
 
 impl Hide {
     fn any(self) -> bool {
-        self.flowers || self.redstone
+        self.flowers || self.redstone || self.stained_glass
+    }
+
+    /// Whether a block is less than half a block tall (by its id).
+    pub fn short(name: &str) -> bool {
+        let name = name.strip_prefix("minecraft:").unwrap_or(name);
+        name.ends_with("_carpet")
+            || name.ends_with("_pressure_plate")
+            || name.ends_with("rail")
+            || matches!(name, "snow" | "lily_pad" | "repeater" | "comparator" | "daylight_detector" | "redstone_wire" | "pink_petals" | "leaf_litter")
     }
 
     /// Whether the map looks through this block (by its id).
@@ -157,7 +170,8 @@ impl Hide {
             "redstone_wire", "repeater", "comparator", "redstone_torch", "redstone_wall_torch",
             "lever", "tripwire", "tripwire_hook",
         ];
-        (self.flowers && (name.ends_with("_tulip") || FLOWERS.contains(&name)))
+        (self.stained_glass && name.contains("stained_glass"))
+            || (self.flowers && (name.ends_with("_tulip") || FLOWERS.contains(&name)))
             || (self.redstone && (REDSTONE.contains(&name) || name.ends_with("_pressure_plate") || name.ends_with("_button")))
     }
 }
@@ -427,6 +441,7 @@ fn read_chunk(
         .find(|&i| chunk.sections.get(i).is_some_and(|s| !s.is_uniform(air)))
         .map_or(bottom, |i| bottom + i as i32 * 16 + 15);
     let hidden: std::cell::RefCell<HashMap<u32, bool>> = Default::default();
+    let short: std::cell::RefCell<HashMap<u32, bool>> = Default::default();
     let shows = |state: u32| {
         let f = facts.get(BlockStateId(state));
         let visible = f.map_color != 0 || f.fluid != Fluid::None;
@@ -475,9 +490,15 @@ fn read_chunk(
             }
             let state = chunk.get(x, y, z);
             let light_y = fluid.map_or(y, |(_, d)| y + d as i32) + 1;
+            let lowered = hide.lower_short
+                && fluid.is_none()
+                && *short
+                    .borrow_mut()
+                    .entry(state)
+                    .or_insert_with(|| Hide::short(&facts.get(BlockStateId(state)).name.to_string()));
             columns.push(Column {
                 block: intern_block(state),
-                height: y as i16,
+                height: y as i16 - i16::from(lowered),
                 fluid,
                 biome: intern_biome(chunk.biome(x, y, z)),
                 light: chunk.light(x, light_y, z),

@@ -33,7 +33,9 @@ On the world map: drag to pan, scroll to zoom, arrow keys or WASD move, Space ce
 
 Waypoints: `/meridian waypoint export` writes all of a world's waypoints to a JSON file in `exports/`; `/meridian waypoint import <file or folder>` reads such a file, or the plain-text waypoint files other map mods keep (a world folder with `dim%0`, `dim%-1`, … inside).
 
-On servers that show several worlds behind one address, Meridian keeps one map per world spawn; `/meridian map list | use <name> | new <name>` picks a map by hand ("Multiplayer Maps" in the world map settings).
+On servers that show several worlds behind one address, Meridian keeps one map per world spawn; `/meridian map list | use <name> | new <name> | rename <old> <new>` picks and names maps by hand ("Multiplayer Maps" in the world map settings).
+
+Radar: `/meridian radar hide <entity id>` (and `show`, `hidden`) leaves single kinds out; "Fair Play" in the miscellaneous settings switches the radar and cave maps off.
 
 Settings profiles are switched, added, renamed and deleted on the main settings page; "Change Position" lets you drag the minimap where you want it.
 

@@ -248,6 +248,8 @@ impl MapHost for ViewerHost<'_> {
 enum Pending {
     CloseScreen,
     Chat(String),
+    /// A line for the action bar.
+    Notice(String),
 }
 
 /// What a minimap image depends on: its origin and size, and the regions'
@@ -446,6 +448,7 @@ impl State {
         let name = self.map_for(data_dir, &context.source, bridge::world_spawn());
         if self.engine.map() != name {
             log::info!("meridian: showing map {name}");
+            self.pending.push(Pending::Notice(format!("Meridian: map {name}")));
             self.engine.set_map(&name);
             self.viewer = None;
             self.open_book(data_dir, &context);
@@ -502,8 +505,68 @@ impl State {
                 self.save_config();
                 format!("Showing map {name}{note}")
             }
-            _ => "/meridian map [list | use <name> | new <name>]".to_owned(),
+            Some("rename") => {
+                let Some((old, new)) = name.split_once(' ').map(|(a, b)| (a.trim().to_owned(), b.trim().to_owned())) else {
+                    return "/meridian map rename <old> <new>".to_owned();
+                };
+                if old == DEFAULT_MAP || !maps.maps.contains_key(&old) || maps.maps.contains_key(&new) || new.is_empty() || new.contains(' ') {
+                    return format!("Cannot rename {old} to {new}");
+                }
+                let shown = self.engine.map() == old;
+                if shown {
+                    return "Switch to another map first (/meridian map use <name>)".to_owned();
+                }
+                // The files move with the name: maps live in one folder each.
+                let Some(context) = self.engine.context() else { return "No world open".to_owned() };
+                let Some(data_dir) = self.export_dir.parent() else { return "No data folder".to_owned() };
+                let dir = meridian_core::persist::server_dir(data_dir, &context.source);
+                let from = dir.join(meridian_core::persist::escape_component(&old));
+                let to = dir.join(meridian_core::persist::escape_component(&new));
+                if from.exists() && let Err(e) = std::fs::rename(&from, &to) {
+                    return format!("Renaming the map's folder failed: {e}");
+                }
+                let entry = maps.maps.remove(&old).unwrap_or_default();
+                maps.maps.insert(new.clone(), entry);
+                if maps.current == old {
+                    maps.current = new.clone();
+                }
+                if let Err(e) = maps.save() {
+                    log::warn!("meridian: saving the server's map list failed: {e}");
+                }
+                format!("Renamed map {old} to {new}")
+            }
+            _ => "/meridian map [list | use <name> | new <name> | rename <old> <new>]".to_owned(),
         }
+    }
+
+    /// `/meridian radar hide|show <entity id>`, `/meridian radar hidden`:
+    /// entity kinds the radar never shows.
+    fn radar_command(&mut self, args: &[&str]) -> String {
+        let id = args.get(1).map(|a| if a.contains(':') { (*a).to_owned() } else { format!("minecraft:{a}") });
+        let excluded = &mut self.config.current_mut().radar.excluded;
+        let reply = match (args.first().copied(), id) {
+            (Some("hide"), Some(id)) => {
+                excluded.insert(id.clone());
+                format!("Radar hides {id}")
+            }
+            (Some("show"), Some(id)) => {
+                if !excluded.remove(&id) {
+                    return format!("{id} was not hidden");
+                }
+                format!("Radar shows {id} again")
+            }
+            (Some("hidden") | None, _) => {
+                return if excluded.is_empty() {
+                    "The radar hides no entity kinds".to_owned()
+                } else {
+                    format!("Hidden: {}", excluded.iter().cloned().collect::<Vec<_>>().join(", "))
+                };
+            }
+            _ => return "/meridian radar hide|show <entity id>, /meridian radar hidden".to_owned(),
+        };
+        self.engine.set_settings(self.config.current().clone());
+        self.save_config();
+        reply
     }
 
     fn close_book(&mut self) {
@@ -816,6 +879,9 @@ impl Meridian {
             };
             if args.get(1) == Some(&"map") {
                 return (s.map_command(&args[2..]), None);
+            }
+            if args.get(1) == Some(&"radar") {
+                return (s.radar_command(&args[2..]), None);
             }
             // /meridian waypoint <action> [name...]
             if args.get(1) != Some(&"waypoint") {
@@ -1358,6 +1424,7 @@ impl Hooks for Meridian {
                         gpu_map::set_frame(None);
                     }
                 }
+                Pending::Notice(line) => host.client_action_bar(Text::literal(line), false),
                 Pending::Chat(line) => {
                     if let Err(e) = host.send_chat(&line) {
                         host.client_action_bar(Text::literal(format!("Meridian: {e}")), false);
@@ -1399,10 +1466,18 @@ impl Hooks for Meridian {
                     .request_area(here.offset(-1, -1), here.offset(1, 1));
             }
             // Cave mode: the roof check runs in the bridge, the decision here.
-            let cave = s.config.current().minimap.cave.clone();
+            let mut cave = s.config.current().minimap.cave.clone();
+            if s.config.current().minimap.fair_play {
+                cave.allowed = false;
+            }
             bridge::set_roof_probe(meridian_core::cave::roof_radius(cave.auto));
             let terrain = &s.config.current().world_map.terrain;
-            bridge::set_hidden(bridge::Hide { flowers: !terrain.show_flowers, redstone: !terrain.show_redstone });
+            bridge::set_hidden(bridge::Hide {
+                flowers: !terrain.show_flowers,
+                redstone: !terrain.show_redstone,
+                stained_glass: !terrain.stained_glass,
+                lower_short: terrain.adjust_short_blocks,
+            });
             if let Some(p) = &player {
                 let dim = s.dimension.as_deref().unwrap_or("");
                 let allowed = cave.allowed_dimensions.is_empty() || cave.allowed_dimensions.iter().any(|d| d == dim);
@@ -1609,8 +1684,9 @@ fn minimap_ops(
         }));
     }
     let radar = &s.config.current().radar;
-    bridge::want_entities(radar.enabled);
-    if radar.enabled {
+    let radar_on = radar.enabled && !s.config.current().minimap.fair_play;
+    bridge::want_entities(radar_on);
+    if radar_on {
         let entities = radar_entities();
         ops.extend(radar::dots(&layout, player.position, player.yaw, &entities, radar));
     }
@@ -2226,7 +2302,7 @@ impl Meridian {
             let hovered_biome = sampler.biome(hx, hz);
             let cave_layer = engine.layer();
             let settings = s.config.current();
-            let radar_on = settings.radar.enabled;
+            let radar_on = settings.radar.enabled && !settings.minimap.fair_play;
             bridge::want_entities(radar_on);
             let entities: Vec<radar::Entity> = if radar_on {
                 radar_entities().into_iter().filter(|e| radar::shown(e, &settings.radar)).collect()
@@ -2409,7 +2485,7 @@ impl State {
         let engine = self.viewer.as_ref().map_or(&self.engine, |(_, e)| e);
         let Some(regions) = engine.regions_dir() else { return };
         let shading = meridian_core::color::Shading::new(&self.config.current().world_map.terrain, None)
-            .for_cave(engine.layer().is_some(), self.config.current().minimap.cave.legible);
+            .for_cave(engine.layer().is_some(), self.config.current().minimap.cave.legible_caves);
         let name = {
             let (world, dim) = context_labels(self);
             let dim = self.viewer.as_ref().map_or(dim, |(d, _)| d.clone());

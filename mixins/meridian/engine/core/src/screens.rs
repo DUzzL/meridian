@@ -1030,6 +1030,7 @@ pub fn options() -> Vec<Opt> {
                 )
             },
         },
+        toggle!("Fair Play (No Radar, No Caves)", Misc, minimap.fair_play),
         toggle!("Cave Mode", Misc, minimap.cave.allowed),
         Opt {
             label: "Auto Cave Mode",
@@ -1058,7 +1059,7 @@ pub fn options() -> Vec<Opt> {
                 )
             },
         },
-        toggle!("Legible Cave Maps", Misc, minimap.cave.legible),
+        toggle!("Legible Cave Maps", Misc, minimap.cave.legible_caves),
         Opt {
             label: "Cave Mode Extra Zoom",
             group: Misc,
@@ -1130,6 +1131,26 @@ pub fn options() -> Vec<Opt> {
                 let on = !s.world_map.terrain.show_redstone;
                 s.world_map.terrain.show_redstone = on;
                 s.minimap.terrain.show_redstone = on;
+            },
+        },
+        Opt {
+            label: "Display Stained Glass",
+            group: BlockMap,
+            value: |s| on_off(s.world_map.terrain.stained_glass),
+            step: |s, _| {
+                let on = !s.world_map.terrain.stained_glass;
+                s.world_map.terrain.stained_glass = on;
+                s.minimap.terrain.stained_glass = on;
+            },
+        },
+        Opt {
+            label: "Adjust Height For Short Blocks",
+            group: BlockMap,
+            value: |s| on_off(s.world_map.terrain.adjust_short_blocks),
+            step: |s, _| {
+                let on = !s.world_map.terrain.adjust_short_blocks;
+                s.world_map.terrain.adjust_short_blocks = on;
+                s.minimap.terrain.adjust_short_blocks = on;
             },
         },
         toggle!("Chunk Grid", Overlay, minimap.chunk_grid),

@@ -381,13 +381,6 @@ Dabei behoben:
 
 Nicht eigens geprüft: Spieler als Punkt, Teleport zu Spielern (braucht einen zweiten Spieler), Boote und Loren im Radar, Blumen und Redstone ausblenden.
 
-**Offen**
-
-- Gefärbtes Glas, Höhenanpassung kurzer Blöcke.
-- Bestätigungsdialog beim Kartenwechsel (CTX-03), Daten zwischen Karten verschieben (CTX-04/05).
-- Radar: eigene Kategorien, Spielerköpfe mit ihrem Skin.
-- Server-Regeln (SRV-*), Claims (OV-06).
-
 ## Phase 6: Feinschliff (Zwischenstand 2)
 
 - **Höhlenmodus:** Die Einstellungen stehen jetzt in „Miscellaneous Settings“:
@@ -422,3 +415,32 @@ Nicht eigens geprüft: Spieler als Punkt, Teleport zu Spielern (braucht einen zw
 Nicht im Spiel geprüft: Mehrspieler-Karten (dafür braucht es einen Server; Unit-Tests decken die Auswahl ab), die Höhlenoptionen.
 
 **Build und Tests**: 182 Kern-Tests und der Paritätstest grün; Clippy sauber, Adapter-Check grün; Launcher-Build `native-66f3981-4b682b06b3b7`.
+
+## Phase 6: Feinschliff (Zwischenstand 3)
+
+- **Blockkarte:** zwei neue Schalter, beide wirken auf neu erfasste Chunks:
+  - „Display Stained Glass“: Ist er aus, sieht die Karte durch gefärbtes Glas hindurch.
+  - „Adjust Height For Short Blocks“: Teppiche, Schneeschichten, Druckplatten, Schienen und Seerosen zählen einen Block tiefer und werfen keine Stufe.
+- **Mehrspieler-Karten:**
+  - Ein Kartenwechsel wird in der Aktionsleiste gemeldet.
+  - `/meridian map rename <alt> <neu>` benennt eine Karte samt Ordner um. Die Standardkarte und die gerade gezeigte Karte sind davon ausgenommen. Seeds unter dem alten Namen müssen danach neu gesetzt werden.
+- **Fair Play** (SRV-02): ein Schalter in „Miscellaneous Settings“, der Radar und Höhlenkarten abschaltet.
+- **Radar:** `/meridian radar hide|show <Entity-ID>` und `/meridian radar hidden` blenden einzelne Entity-Arten aus (RAD-07, vereinfacht).
+- **Fehler behoben:** Alte Einstellungsdateien enthielten das bisher wirkungslose `legible = false`. Mit dem neuen Schalter wären Höhlen dort plötzlich dunkel geworden. Das Feld heißt jetzt `legible_caves` (Standard an), der alte Wert wird ignoriert.
+
+**Im Spiel geprüft:**
+
+- `/meridian radar hide zombie` und `… creeper`: Beide verschwinden aus dem Radar, alles andere bleibt; „hidden“ listet sie.
+- Fair Play blendet das Radar aus.
+- Die Seite „Miscellaneous Settings“ zeigt die neuen Höhlen-Optionen.
+
+Nicht im Spiel geprüft: gefärbtes Glas und kurze Blöcke (gelten nur für neu erfasste Chunks), Umbenennen von Karten (braucht einen Server).
+
+**Build und Tests**: 184 Kern-Tests und der Paritätstest grün; Clippy sauber, Adapter-Check grün; Launcher-Build `native-66f3981-838e78aa4876`.
+
+**Weiter offen:**
+
+- Bestätigungsdialog beim Kartenwechsel mit Schnellbestätigung (CTX-03).
+- Spielerköpfe mit ihrem Skin.
+- Vom Server erzwungene Regeln über Signale (SRV-01, SRV-03): Dafür braucht es eine dokumentierte Quelle für die Signale.
+- Claims (OV-06): Dafür gibt es in Horizon noch keinen Anbieter.
