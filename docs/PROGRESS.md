@@ -538,3 +538,15 @@ Neue Tests:
 - **Neue Tests:** `scans_show_every_marker_or_none`, `strongholds_and_mansions_far_out`; Radar-Tests für Spielergesichter und den Punkt bei fehlender Textur.
 
 **Build und Tests**: 198 Kern-Tests und der Paritätstest grün; Clippy sauber, Adapter-Check grün; Launcher-Build `native-66f3981-8a8c8e9d991a`.
+
+### Phase 6: Neue Einstellungen, Werkzeugleiste, Mob-Gesichter (D-037)
+
+- Ein Einstellungs-Screen mit Kategorien links, beschriebenen Optionen rechts und Suche ersetzt die alten Raster- und Seed-Atlas-Screens.
+- Die Weltkarte hat eine Werkzeugleiste am rechten Rand statt verstreuter Knöpfe.
+- 58 weitere Mob-Gesichter: alle Lebewesen außer Magmawürfel und Enderdrache; Gesichter in nativen Texturkoordinaten.
+- Radar wie die Standard-Kategorien der Referenz: gezähmte Tiere über wilden, Rüstungsständer als sonstige Entities.
+- **Im Spiel geprüft:** Werkzeugleiste auf der Karte; Einstellungen per Y-Taste bei kleinem GUI (etwa 440×250 Pixel), alle Kategorien und Zeilen passen.
+- **Nicht im Spiel geprüft:** Klicks in den neuen Screens und Tooltips der Leiste. Das Steuer-Tool setzt den Mauszeiger dort nicht zuverlässig; die Klicklogik decken Unit-Tests ab.
+- **Neue Tests:** `every_catalogue_option_has_a_row`, `categories_rows_and_clicks`, `search_scroll_and_slider`, `profiles`, `faces_lie_inside_their_textures`, `tamed_animals_over_wild_ones`, Werkzeugleiste in `zoom_buttons`.
+
+**Build und Tests**: 195 Kern-Tests grün; Clippy sauber, Adapter-Check grün; Launcher-Build `native-66f3981-2984424c33ef`.

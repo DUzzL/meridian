@@ -91,12 +91,14 @@ pub enum DrawOp {
         argb: u32,
     },
     /// Part of one of the game's textures (`entity/zombie/zombie`, the path
-    /// under `textures/`): `uv` = u, v, width, height in texels of a
-    /// 64-texel-wide texture, stretched into `rect`, tinted by `argb`.
+    /// under `textures/`): `uv` = u, v, width, height in texels of the
+    /// texture at `base` texels wide, stretched into `rect`, tinted by `argb`.
     Blit {
         texture: String,
         rect: [f32; 4],
         uv: [u16; 4],
+        /// The texture width `uv` is given in (a larger pack scales it).
+        base: u16,
         argb: u32,
     },
 }

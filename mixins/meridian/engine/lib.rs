@@ -47,7 +47,7 @@ use parking_lot::Mutex;
 pub const MOD_ID: &str = "meridian";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The bridge shape this adapter was written for.
-const BRIDGE_VERSION: u32 = 9;
+const BRIDGE_VERSION: u32 = 10;
 
 /// The singleplayer world's folder name, set by the integrated server's
 /// thread (the window's client only knows the world's display name).
@@ -740,11 +740,12 @@ fn paint(host: &dyn Host, batch: &mut HudBatch, ops: &[DrawOp]) {
                     host.text(batch, &line, [x.round(), (y + row).round()], argb & 0x00FF_FFFF, false);
                 }
             }
-            DrawOp::Blit { texture, rect, uv, argb } => {
+            DrawOp::Blit { texture, rect, uv, base, argb } => {
                 // A missing texture (another resource pack) draws nothing.
                 let Some(tex) = texture_size(texture) else { continue };
-                // `uv` is in texels of a 64-wide texture; higher resolutions scale it.
-                let k = (tex[0] / 64).max(1);
+                // `uv` is in texels of the vanilla texture, `base` wide; a
+                // higher-resolution pack scales it.
+                let k = (tex[0] / i32::from((*base).max(1))).max(1);
                 let [u, v, w, h] = uv.map(|c| c as i32 * k);
                 const SIDE: i32 = 16;
                 host.gui_paint(
@@ -1085,25 +1086,6 @@ impl Hooks for Meridian {
         let at = host.cursor();
         let right = event.button == 1;
         if self.map_open(host) {
-            let (layer_button, settings_button, map_settings_button) = seed_atlas_buttons(Self::map_view(host).gui);
-            let on = self.with_state(host, |s| s.config.current().seed_atlas.enabled);
-            if on && !right && inside(layer_button, at) {
-                self.with_state(host, |s| {
-                    let sa = &mut s.config.current_mut().seed_atlas;
-                    sa.biome_layer = !sa.biome_layer;
-                    s.engine.set_settings(s.config.current().clone());
-                    s.save_config();
-                });
-                return Flow::Cancel;
-            }
-            if on && !right && inside(settings_button, at) {
-                self.with_state(host, |s| s.open_from_map(Screen::SeedAtlasSettings(meridian_core::screens_sa::SeedAtlasSettingsScreen::new())));
-                return Flow::Cancel;
-            }
-            if on && !right && inside(map_settings_button, at) {
-                self.with_state(host, |s| s.open_from_map(Screen::Settings(SettingsScreen::world_map())));
-                return Flow::Cancel;
-            }
             self.map_input(host, |s, view, map_data| {
                 if right && let Some(m) = s.hovered_marker.clone() {
                     // A structure: its own menu, as the Fabric version's
@@ -1344,7 +1326,7 @@ impl Hooks for Meridian {
             if open && host.mod_screen_open(MOD_ID) {
                 self.with_state(&*host, |s| {
                     s.map_open = false;
-                    s.screen = Some(Screen::SeedAtlasSettings(meridian_core::screens_sa::SeedAtlasSettingsScreen::new()));
+                    s.screen = Some(Screen::Settings(SettingsScreen::at(meridian_core::screens::Category::SeedAtlas)));
                 });
             }
             return Flow::Cancel;
@@ -2005,7 +1987,7 @@ impl Meridian {
                     {
                         s.completed.confirm_reset(&prompt);
                     }
-                    s.screen = Some(Screen::SeedAtlasMarkers(Default::default()));
+                    s.screen = Some(Screen::Settings(SettingsScreen::at(meridian_core::screens::Category::Structures)));
                 }
             }
             result
@@ -2090,6 +2072,7 @@ fn radar_entities() -> Vec<radar::Entity> {
             face: radar::face_for(&e.kind, e.skin.as_deref()).filter(|f| texture_size(&f.texture).is_some()),
             kind: e.kind,
             name: e.name,
+            tamed: e.tamed,
         })
         .collect()
 }
@@ -2511,6 +2494,7 @@ impl Meridian {
             };
             let entities = if shown == here { entities } else { Vec::new() };
             let wm = &settings.world_map;
+            s.map.seed_atlas = sa_settings.enabled;
             let mut ops = s.map.overlay(&Overlay {
                 gui,
                 unit: u,
@@ -2522,6 +2506,7 @@ impl Meridian {
                 waypoints: &waypoints,
                 entities: &entities,
                 faces: radar_now(&settings.radar, s.faces_held).faces,
+                seed_layer: sa_settings.biome_layer,
                 show_coordinates: wm.show_coordinates,
                 show_zoom: wm.show_zoom,
                 show_biome: wm.show_hovered_biome,
@@ -2530,37 +2515,15 @@ impl Meridian {
                 cave_layer,
                 other_dimension: (shown != here).then(|| shown.rsplit(':').next().unwrap_or(&shown).to_owned()),
             });
-            // Seed Atlas: the switch and settings buttons, and tooltips.
+            // Seed Atlas: the hovered structure, else the biome under the cursor.
             if sa_settings.enabled {
-                let (layer_button, settings_button, map_settings_button) = seed_atlas_buttons(gui);
-                for (rect, label, color, tip) in [
-                    (
-                        layer_button,
-                        "SA",
-                        if sa_settings.biome_layer { 0xFF55_FF55 } else { 0xFFAA_AAAA },
-                        format!("Seed map layer: {}", if sa_settings.biome_layer { "On" } else { "Off" }),
-                    ),
-                    (map_settings_button, "M", 0xFFFF_FFFF, "Map Settings".to_owned()),
-                    (settings_button, "SA", 0xFFFF_FFFF, "Seed Atlas Settings".to_owned()),
-                ] {
-                    let hover = inside(rect, mouse);
-                    let sprite = if hover { "gui/sprites/widget/button_highlighted" } else { "gui/sprites/widget/button" };
-                    ops.push(DrawOp::NineSlice { sprite, rect, argb: 0xFFFF_FFFF });
-                    ops.push(DrawOp::Text { x: rect[0] + rect[2] / 2.0, y: rect[1] + 6.0, text: label.into(), argb: color, align: Align::Center, scale: 1.0 });
-                    if hover {
-                        tooltip(&mut ops, mouse, gui, &[tip]);
-                    }
-                }
                 if let Some(h) = &marker_hover
                     && s.map.menu.is_none()
                 {
                     tooltip(&mut ops, mouse, gui, &h.lines);
                 } else if sa_settings.biome_layer
                     && let Some(dim) = sa_dim
-                    && !inside(layer_button, mouse)
-                    && !inside(settings_button, mouse)
-                    && !inside(map_settings_button, mouse)
-                    && meridian_core::worldmap::button_at(mouse, gui, u).is_none()
+                    && meridian_core::worldmap::button_at(mouse, gui, s.map.seed_atlas).is_none()
                     && s.map.menu.is_none()
                 {
                     let y = sa::sample_y(&sa_settings, dim);
@@ -2581,6 +2544,22 @@ impl Meridian {
 impl State {
     /// Carries out what the map asked for.
     fn map_action(&mut self, action: MapAction) {
+        if let MapAction::Button(b) = action {
+            use meridian_core::worldmap::Button;
+            match b {
+                Button::SeedLayer => {
+                    let sa = &mut self.config.current_mut().seed_atlas;
+                    sa.biome_layer = !sa.biome_layer;
+                    self.engine.set_settings(self.config.current().clone());
+                    self.save_config();
+                }
+                Button::SeedSettings => self.open_from_map(Screen::Settings(SettingsScreen::at(meridian_core::screens::Category::SeedAtlas))),
+                Button::Settings => self.open_from_map(Screen::Settings(SettingsScreen::world_map())),
+                Button::Waypoints => self.open_from_map(Screen::List(Default::default())),
+                _ => {}
+            }
+            return;
+        }
         let MapAction::Menu(item) = action else { return };
         if item == MenuItem::ExportPng {
             self.export_png();
@@ -2958,12 +2937,6 @@ fn structure_key(
     }
 }
 
-/// The Seed Atlas buttons on the map, where the Fabric version 2.0 puts
-/// them: the layer switch at the bottom left; the map settings ("M") and
-/// the Seed Atlas settings ("SA") compact in the top left corner.
-fn seed_atlas_buttons(gui: [f32; 2]) -> ([f32; 4], [f32; 4], [f32; 4]) {
-    ([0.0, (gui[1] - 20.0).max(0.0), 20.0, 20.0], [22.0, 0.0, 20.0, 20.0], [0.0, 0.0, 20.0, 20.0])
-}
 
 fn inside(r: [f32; 4], p: [f32; 2]) -> bool {
     p[0] >= r[0] && p[0] < r[0] + r[2] && p[1] >= r[1] && p[1] < r[1] + r[3]

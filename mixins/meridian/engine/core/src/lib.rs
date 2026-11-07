@@ -32,7 +32,7 @@ pub mod persist;
 pub mod radar;
 pub mod region;
 pub mod screens;
-pub mod screens_sa;
+pub mod settings_screen;
 pub mod screens_seedatlas;
 pub mod seedatlas;
 pub mod seedatlas_commands;

@@ -110,6 +110,8 @@ pub enum MapAction {
     None,
     Close,
     Menu(MenuItem),
+    /// A toolbar button the host carries out (settings, layers, lists).
+    Button(Button),
 }
 
 /// What the overlay draws from the game this frame.
@@ -128,6 +130,8 @@ pub struct Overlay<'a> {
     pub entities: &'a [radar::Entity],
     /// Entities as their faces (where known) instead of dots.
     pub faces: bool,
+    /// The Seed Atlas layer is shown (the toolbar's layer button).
+    pub seed_layer: bool,
     pub show_coordinates: bool,
     pub show_zoom: bool,
     pub show_biome: bool,
@@ -153,6 +157,10 @@ pub struct WorldMap {
     pub limits: (f64, f64),
     /// The opening animation: its target zoom and seconds run so far.
     pub opening: Option<(f64, f32)>,
+    /// The toolbar has the Seed Atlas buttons (Seed Atlas is on).
+    pub seed_atlas: bool,
+    /// The player's last position (x, z), for the centre button.
+    pub player_at: Option<[f64; 2]>,
 }
 
 impl WorldMap {
@@ -166,6 +174,8 @@ impl WorldMap {
             footsteps: Vec::new(),
             limits: (MIN_ZOOM, MAX_ZOOM),
             opening: None,
+            seed_atlas: false,
+            player_at: Some([player[0], player[2]]),
         }
     }
 
@@ -284,6 +294,7 @@ impl WorldMap {
 
     /// Notes where the player walked (every other block).
     pub fn step(&mut self, player: [f64; 3]) {
+        self.player_at = Some([player[0], player[2]]);
         let p = [player[0].floor() as i32, player[2].floor() as i32];
         let moved = self
             .footsteps
@@ -394,10 +405,16 @@ impl WorldMap {
                 Some(item) => MapAction::Menu(item.clone()),
             };
         }
-        match button_at(p, gui, unit) {
+        match button_at(p, gui, self.seed_atlas) {
             Some(Button::ZoomIn) => self.scroll(1.0, [gui[0] / 2.0, gui[1] / 2.0], gui, unit),
             Some(Button::ZoomOut) => self.scroll(-1.0, [gui[0] / 2.0, gui[1] / 2.0], gui, unit),
+            Some(Button::Center) => {
+                if let Some(p) = self.player_at {
+                    self.center = p;
+                }
+            }
             Some(Button::Help) | None => {}
+            Some(b) => return MapAction::Button(b),
         }
         MapAction::None
     }
@@ -436,6 +453,7 @@ impl WorldMap {
                     texture: face.texture.clone(),
                     rect: [x - half, y - half, 2.0 * half, 2.0 * half],
                     uv: face.uv,
+                    base: face.base,
                     argb: 0xFFFF_FFFF,
                 });
                 continue;
@@ -541,64 +559,48 @@ impl WorldMap {
             });
         }
         ops.extend(compass(gui, u));
-        // Side buttons.
-        for b in [Button::ZoomIn, Button::ZoomOut, Button::Help] {
-            let [x, y, w, h] = button_rect(b, gui, u);
-            let hover =
-                o.mouse[0] >= x && o.mouse[0] < x + w && o.mouse[1] >= y && o.mouse[1] < y + h;
-            let color = if hover { 0xFFFF_FFA0 } else { 0xFFFF_FFFF };
-            let (cx, cy, t) = (x + w / 2.0, y + h / 2.0, 1.5 * u);
-            if b == Button::Help {
-                ops.push(DrawOp::Text {
-                    x: cx + 0.5 * u,
-                    y: cy - 3.5 * TEXT_SCALE * u,
-                    text: "?".into(),
-                    argb: color,
-                    align: Align::Center,
-                    scale: TEXT_SCALE * u,
-                });
-                continue;
-            }
-            ops.push(DrawOp::Fill {
-                rect: [cx - w * 0.4, cy - t / 2.0, w * 0.8, t],
-                argb: color,
+        // The toolbar on the right edge, its tooltips to the left.
+        let buttons = toolbar(self.seed_atlas);
+        let hovered = if self.menu.is_none() { button_at(o.mouse, gui, self.seed_atlas) } else { None };
+        for (i, b) in buttons.iter().enumerate() {
+            let rect = toolbar_rect(i, buttons.len(), gui);
+            let hover = hovered == Some(*b);
+            ops.push(DrawOp::NineSlice {
+                sprite: if hover { "gui/sprites/widget/button_highlighted" } else { "gui/sprites/widget/button" },
+                rect,
+                argb: 0xFFFF_FFFF,
             });
-            if b == Button::ZoomIn {
-                ops.push(DrawOp::Fill {
-                    rect: [cx - t / 2.0, cy - h * 0.4, t, h * 0.8],
-                    argb: color,
-                });
+            let (cx, cy) = (rect[0] + rect[2] / 2.0, rect[1] + rect[3] / 2.0);
+            match b.icon() {
+                Icon::Text(t) => ops.push(DrawOp::Text {
+                    x: cx + 0.5,
+                    y: cy - 4.0,
+                    text: t.into(),
+                    argb: if hover { 0xFFFF_FFA0 } else { 0xFFFF_FFFF },
+                    align: Align::Center,
+                    scale: 1.0,
+                }),
+                Icon::Item(texture) => {
+                    let off = *b == Button::SeedLayer && !o.seed_layer;
+                    ops.push(DrawOp::Blit {
+                        texture: texture.into(),
+                        rect: [cx - 8.0, cy - 8.0, 16.0, 16.0],
+                        uv: [0, 0, 16, 16],
+                        base: 16,
+                        argb: if off { 0xFF60_6060 } else { 0xFFFF_FFFF },
+                    });
+                }
             }
         }
-        // The controls, while the help button is hovered.
-        if self.menu.is_none() && button_at(o.mouse, gui, u) == Some(Button::Help) {
-            let ts = 1.0f32.max(1.2 * u);
-            let row = 10.0 * ts;
-            let width = CONTROLS
-                .iter()
-                .map(|l| l.chars().count())
-                .max()
-                .unwrap_or(0) as f32
-                * 6.0
-                * ts;
-            let h = CONTROLS.len() as f32 * row + 4.0 * ts;
-            let [bx, by, _, _] = button_rect(Button::Help, gui, u);
-            let x = (bx - width - 10.0 * ts).max(2.0);
-            let y = by.min(gui[1] - h - 2.0).max(2.0);
-            ops.push(DrawOp::Fill {
-                rect: [x - 3.0 * ts, y - 2.0 * ts, width + 6.0 * ts, h],
-                argb: 0xE010_0010,
-            });
-            for (i, line) in CONTROLS.iter().enumerate() {
-                ops.push(DrawOp::Text {
-                    x,
-                    y: y + i as f32 * row,
-                    text: (*line).to_owned(),
-                    argb: if i == 0 { 0xFFFF_FF55 } else { 0xFFFF_FFFF },
-                    align: Align::Left,
-                    scale: ts,
-                });
-            }
+        if let Some(b) = hovered {
+            let i = buttons.iter().position(|x| *x == b).unwrap_or(0);
+            let rect = toolbar_rect(i, buttons.len(), gui);
+            let lines: Vec<String> = if b == Button::Help {
+                CONTROLS.iter().map(|l| (*l).to_owned()).collect()
+            } else {
+                vec![b.tooltip(o.seed_layer).to_owned()]
+            };
+            ops.extend(side_tooltip(&lines, rect, gui, b == Button::Help));
         }
         // The right-click menu last, over everything.
         if let Some(menu) = &self.menu {
@@ -792,36 +794,106 @@ pub const CONTROLS: &[&str] = &[
     "Switch map dimension key: Overworld, Nether, End",
 ];
 
+/// The toolbar's buttons, top to bottom.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Button {
     ZoomIn,
     ZoomOut,
+    Center,
+    SeedLayer,
+    SeedSettings,
+    Waypoints,
+    Settings,
     Help,
 }
 
-fn button_rect(b: Button, gui: [f32; 2], u: f32) -> [f32; 4] {
-    let fraction = match b {
-        Button::ZoomIn => 0.31,
-        Button::ZoomOut => 0.39,
-        Button::Help => 0.47,
-    };
-    let s = 14.0 * u;
-    [
-        gui[0] - 25.0 * u - s / 2.0,
-        gui[1] * fraction - s / 2.0,
-        s,
-        s,
-    ]
+/// What a toolbar button shows.
+enum Icon {
+    Text(&'static str),
+    /// An item texture (16x16) of the game.
+    Item(&'static str),
 }
 
-/// The side button under `p`.
-pub fn button_at(p: [f32; 2], gui: [f32; 2], u: f32) -> Option<Button> {
-    [Button::ZoomIn, Button::ZoomOut, Button::Help]
-        .into_iter()
-        .find(|b| {
-            let [x, y, w, h] = button_rect(*b, gui, u);
-            p[0] >= x && p[0] < x + w && p[1] >= y && p[1] < y + h
-        })
+impl Button {
+    fn icon(self) -> Icon {
+        match self {
+            Button::ZoomIn => Icon::Text("+"),
+            Button::ZoomOut => Icon::Text("-"),
+            Button::Center => Icon::Item("item/compass_00"),
+            Button::SeedLayer => Icon::Item("item/filled_map"),
+            Button::SeedSettings => Icon::Item("item/ender_eye"),
+            Button::Waypoints => Icon::Item("item/name_tag"),
+            Button::Settings => Icon::Item("item/writable_book"),
+            Button::Help => Icon::Text("?"),
+        }
+    }
+
+    fn tooltip(self, seed_layer: bool) -> &'static str {
+        match self {
+            Button::ZoomIn => "Zoom in",
+            Button::ZoomOut => "Zoom out",
+            Button::Center => "Centre on the player (Space)",
+            Button::SeedLayer if seed_layer => "Seed map layer: On",
+            Button::SeedLayer => "Seed map layer: Off",
+            Button::SeedSettings => "Seed Atlas settings",
+            Button::Waypoints => "Waypoints",
+            Button::Settings => "Map settings",
+            Button::Help => "Controls",
+        }
+    }
+}
+
+/// The toolbar, top to bottom (the Seed Atlas buttons while it is on).
+pub fn toolbar(seed_atlas: bool) -> Vec<Button> {
+    let mut b = vec![Button::ZoomIn, Button::ZoomOut, Button::Center];
+    if seed_atlas {
+        b.extend([Button::SeedLayer, Button::SeedSettings]);
+    }
+    b.extend([Button::Waypoints, Button::Settings, Button::Help]);
+    b
+}
+
+/// Side of a toolbar button and the gap between two, GUI pixels.
+const TOOL: f32 = 20.0;
+const TOOL_GAP: f32 = 2.0;
+
+/// Button `i` of `n`: a column at the right edge, centred vertically.
+fn toolbar_rect(i: usize, n: usize, gui: [f32; 2]) -> [f32; 4] {
+    let height = n as f32 * (TOOL + TOOL_GAP) - TOOL_GAP;
+    let top = ((gui[1] - height) / 2.0).max(TOOL + 4.0).floor();
+    [gui[0] - TOOL - 4.0, top + i as f32 * (TOOL + TOOL_GAP), TOOL, TOOL]
+}
+
+/// The toolbar button under `p`.
+pub fn button_at(p: [f32; 2], gui: [f32; 2], seed_atlas: bool) -> Option<Button> {
+    let buttons = toolbar(seed_atlas);
+    buttons.iter().enumerate().find_map(|(i, b)| {
+        let [x, y, w, h] = toolbar_rect(i, buttons.len(), gui);
+        (p[0] >= x && p[0] < x + w && p[1] >= y && p[1] < y + h).then_some(*b)
+    })
+}
+
+/// A tooltip left of a toolbar button, kept on screen.
+fn side_tooltip(lines: &[String], button: [f32; 4], gui: [f32; 2], first_is_title: bool) -> Vec<DrawOp> {
+    let width = lines.iter().map(|l| crate::ui::text_width(l)).fold(0.0, f32::max);
+    let h = lines.len() as f32 * 10.0 + 6.0;
+    let x = (button[0] - width - 10.0).max(2.0);
+    let y = (button[1] + (button[3] - h) / 2.0).clamp(2.0, (gui[1] - h - 2.0).max(2.0));
+    let mut ops = vec![DrawOp::Fill {
+        rect: [x - 4.0, y, width + 8.0, h],
+        argb: 0xF010_0010,
+    }];
+    for (i, line) in lines.iter().enumerate() {
+        ops.push(DrawOp::Text {
+            x,
+            y: y + 3.0 + i as f32 * 10.0,
+            text: line.clone(),
+            argb: if first_is_title && i == 0 { 0xFFFF_FF55 } else { 0xFFFF_FFFF },
+            align: Align::Left,
+            scale: 1.0,
+        });
+    }
+    ops
 }
 
 #[cfg(test)]
@@ -938,11 +1010,36 @@ mod tests {
     #[test]
     fn zoom_buttons() {
         let mut m = WorldMap::new([0.0; 3]);
-        let [x, y, w, h] = button_rect(Button::ZoomIn, GUI, 1.0);
-        let p = [x + w / 2.0, y + h / 2.0];
+        let at = |b: Button, sa: bool| {
+            let all = toolbar(sa);
+            let i = all.iter().position(|x| *x == b).unwrap();
+            let [x, y, w, h] = toolbar_rect(i, all.len(), GUI);
+            [x + w / 2.0, y + h / 2.0]
+        };
+        let p = at(Button::ZoomIn, false);
         m.press(p);
         m.release(p, GUI, 1.0);
         assert!(m.zoom > DEFAULT_ZOOM);
+        // The centre button goes back to the player.
+        m.center = [500.0, 500.0];
+        m.step([10.0, 64.0, 20.0]);
+        let p = at(Button::Center, false);
+        m.press(p);
+        assert_eq!(m.release(p, GUI, 1.0), MapAction::None);
+        assert_eq!(m.center, [10.0, 20.0]);
+        // Seed Atlas buttons only while it is on; the host carries them out.
+        assert_eq!(button_at(at(Button::Settings, false), GUI, false), Some(Button::Settings));
+        assert!(!toolbar(false).contains(&Button::SeedLayer));
+        m.seed_atlas = true;
+        let p = at(Button::SeedLayer, true);
+        m.press(p);
+        assert_eq!(m.release(p, GUI, 1.0), MapAction::Button(Button::SeedLayer));
+        // The column stays on screen and clear of the top line.
+        let all = toolbar(true);
+        for i in 0..all.len() {
+            let r = toolbar_rect(i, all.len(), GUI);
+            assert!(r[0] + r[2] <= GUI[0] && r[1] >= 20.0 && r[1] + r[3] <= GUI[1]);
+        }
     }
 
     #[test]

@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 /// Bumped when the shapes below change, so a trait mod can refuse a bridge
 /// it doesn't understand.
-pub const VERSION: u32 = 9;
+pub const VERSION: u32 = 10;
 /// Main-thread time per frame for chunk reads.
 const READ_BUDGET: Duration = Duration::from_micros(1500);
 
@@ -93,6 +93,8 @@ pub struct EntitySnap {
     /// A player's skin texture under `textures/` (their own when the game
     /// drew it from its textures, else the default skin of their id).
     pub skin: Option<String>,
+    /// A tamed animal (wolf, cat, horse, parrot...).
+    pub tamed: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -535,17 +537,21 @@ fn snapshot_entities(game: &super::Game<'_>) -> Vec<EntitySnap> {
     let lerp = |a: f64, b: f64| a + (b - a) * t;
     let mut out = Vec::new();
     for m in game.mobs.iter() {
-        if m.removed || !m.alive() || m.kind.id.ends_with("armor_stand") {
+        if m.removed || !m.alive() {
             continue;
         }
         let uuid = game.remote_player_uuid(m.id);
         let player = uuid.is_some();
+        // Armor stands are no living things to the radar: "other" entities.
+        let stand = m.kind.id.ends_with("armor_stand");
         let skin = uuid.map(|uuid| match &m.skin {
             Some(skin) if skin.starts_with("entity/") => skin.clone(),
             _ => horizon_client::tab_list::default_skin(uuid).to_owned(),
         });
         let class = if player {
             EntityClass::Player
+        } else if stand {
+            EntityClass::Other
         } else if m.hostile() {
             EntityClass::Hostile
         } else {
@@ -568,6 +574,7 @@ fn snapshot_entities(game: &super::Game<'_>) -> Vec<EntitySnap> {
             invisible: m.invisible || m.has_effect("minecraft:invisibility"),
             name,
             skin,
+            tamed: m.extra.tame,
         });
     }
     for item in game.dropped.iter() {
@@ -583,6 +590,7 @@ fn snapshot_entities(game: &super::Game<'_>) -> Vec<EntitySnap> {
             invisible: false,
             name: None,
             skin: None,
+            tamed: false,
         });
     }
     // Vehicles: the radar's "other" entities.
@@ -600,6 +608,7 @@ fn snapshot_entities(game: &super::Game<'_>) -> Vec<EntitySnap> {
             invisible: false,
             name: None,
             skin: None,
+            tamed: false,
         });
     }
     out

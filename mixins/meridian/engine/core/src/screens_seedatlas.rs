@@ -81,9 +81,7 @@ fn on_off(on: bool) -> &'static str {
 }
 
 fn parent() -> Action {
-    Action::Open(Screen::SeedAtlasSettings(
-        crate::screens_sa::SeedAtlasSettingsScreen::new(),
-    ))
+    Action::Open(Screen::Settings(crate::settings_screen::SettingsScreen::at(crate::settings_screen::Category::SeedAtlas)))
 }
 
 /// The biomes of the world's version (nothing without a seed), by name.
@@ -848,7 +846,7 @@ impl ConfirmResetScreen {
     pub(crate) fn click(&mut self, id: Option<&str>) -> Action {
         match id {
             Some("yes") => Action::ResetCompleted(self.kind.clone()),
-            Some("no") => Action::Open(Screen::SeedAtlasMarkers(Default::default())),
+            Some("no") => Action::Open(Screen::Settings(crate::settings_screen::SettingsScreen::at(crate::settings_screen::Category::Structures))),
             _ => Action::None,
         }
     }
@@ -1035,9 +1033,7 @@ mod tests {
         assert!(!ws.iter().any(|w| w.id == "search"));
         assert_eq!(
             click(&mut screen, "done", &mut e),
-            Action::Open(Screen::SeedAtlasSettings(
-                crate::screens_sa::SeedAtlasSettingsScreen::new()
-            ))
+            Action::Open(Screen::Settings(crate::settings_screen::SettingsScreen::at(crate::settings_screen::Category::SeedAtlas)))
         );
     }
 
@@ -1105,9 +1101,7 @@ mod tests {
         assert!(!e.settings.seed_atlas.biome_highlight);
         assert_eq!(
             click(&mut screen, "done", &mut e),
-            Action::Open(Screen::SeedAtlasSettings(
-                crate::screens_sa::SeedAtlasSettingsScreen::new()
-            ))
+            Action::Open(Screen::Settings(crate::settings_screen::SettingsScreen::at(crate::settings_screen::Category::SeedAtlas)))
         );
     }
 
@@ -1169,9 +1163,7 @@ mod tests {
         assert_eq!(again.page, 2);
         assert_eq!(
             click(&mut screen, "done", &mut e),
-            Action::Open(Screen::SeedAtlasSettings(
-                crate::screens_sa::SeedAtlasSettingsScreen::new()
-            ))
+            Action::Open(Screen::Settings(crate::settings_screen::SettingsScreen::at(crate::settings_screen::Category::SeedAtlas)))
         );
     }
 
@@ -1204,7 +1196,7 @@ mod tests {
         }));
         assert_eq!(
             click(&mut screen, "no", &mut e),
-            Action::Open(Screen::SeedAtlasMarkers(Default::default()))
+            Action::Open(Screen::Settings(crate::settings_screen::SettingsScreen::at(crate::settings_screen::Category::Structures)))
         );
         assert_eq!(
             click(&mut screen, "yes", &mut e),
@@ -1212,60 +1204,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn settings_group_opens_the_seed_atlas_screens() {
-        let (mut w, mut s) = (DimensionWaypoints::default(), Settings::default());
-        let mut e = env(&mut w, &mut s);
-        let mut screen =
-            Screen::SeedAtlasSettings(crate::screens_sa::SeedAtlasSettingsScreen::new());
-        let ws = screen.widgets(&e);
-        within_gui(&ws, e.gui);
-        let text = |id: &str| ws.iter().find(|w| w.id == id).unwrap().text.clone();
-        assert_eq!(text("sa:biome"), "Nearest biome...");
-        assert_eq!(text("sa:structure"), "Nearest structure...");
-        assert_eq!(text("sa:highlight"), "Biome highlights...");
-        assert_eq!(text("sa:world"), "World: 26.3, Normal");
-        let Action::Open(Screen::Nearest(n)) = click(&mut screen, "sa:biome", &mut e) else {
-            panic!()
-        };
-        assert!(n.is_biome());
-        let Action::Open(Screen::Nearest(n)) = click(&mut screen, "sa:structure", &mut e) else {
-            panic!()
-        };
-        assert!(!n.is_biome());
-        assert!(matches!(
-            click(&mut screen, "sa:highlight", &mut e),
-            Action::Open(Screen::BiomeHighlight(_))
-        ));
-        assert!(matches!(
-            click(&mut screen, "sa:world", &mut e),
-            Action::Open(Screen::WorldGeneration(_))
-        ));
-        // Every completed structure is reset from the marker settings.
-        let mut markers = Screen::SeedAtlasMarkers(Default::default());
-        let Action::Open(Screen::ConfirmReset(c)) = click(&mut markers, "mk:reset", &mut e) else {
-            panic!()
-        };
-        assert!(c.message.starts_with("All 3 completed"));
-        e.seed_atlas.completed_count = Some(0);
-        assert!(
-            markers
-                .widgets(&e)
-                .iter()
-                .any(|w| w.id == "mk:reset" && w.kind == ui::Kind::Button { enabled: false })
-        );
-        // The world button shows the chosen version and type.
-        e.settings.seed_atlas.large_biomes = true;
-        e.settings.seed_atlas.context_key = "sp-w".into();
-        e.settings
-            .seed_atlas
-            .game_versions
-            .insert("sp-w".into(), "1.20.4".into());
-        assert!(
-            screen
-                .widgets(&e)
-                .iter()
-                .any(|w| w.text == "World: 1.20 \u{2013} 1.20.6, Large Biomes")
-        );
-    }
 }

@@ -463,3 +463,25 @@ Auf Wunsch, mit Vorrang für die Leistung: Weit draußen genügt ein ungefähres
 - **Icongrößen:**
   - Struktur-Icons wachsen beim Hineinzoomen höchstens auf das Doppelte ihrer Grundgröße statt bis auf ein Viertel des Bildes, und werden nie kleiner als die Grundgröße.
   - Entity-Punkte und -Gesichter haben auf Karte und Minimap eine feste Größe in GUI-Einheiten.
+
+## D-037: Neue Einstellungen, Werkzeugleiste der Karte, alle Mob-Gesichter, Radar nach den Standard-Kategorien
+
+- **Einstellungen neu gestaltet** (ersetzt die Xaero-artigen Rasterseiten und die Seed-Atlas-Screens nach der Fabric-Version aus D-032):
+  - Ein Screen (`settings_screen.rs`): links elf Kategorien (Allgemein, Minimap, Information, Entity-Radar, Wegpunkte, Gelände, Overlays, Weltkarte, Seed Atlas, Strukturen, Leistung), rechts eine scrollbare Liste.
+  - Jede Zeile hat Name, eine Zeile Beschreibung (gekürzt; ganz als Tooltip) und ihr Steuerelement am Ende: Schalter, Wertknopf (Rechtsklick zurück), Schieberegler oder Knopf für einen Unterscreen.
+  - Die Suche oben in der Liste durchsucht alle Kategorien nach Namen und Beschreibung.
+  - Die Strukturarten stehen mit Icon, Anzahl erledigter und Zurücksetzen-Knopf in „Strukturen“; Profile in „Allgemein“.
+  - Die Werte kommen weiter aus dem Optionskatalog (`screens::options`). Ein Test stellt sicher, dass jede Option eine Zeile hat.
+- **Werkzeugleiste der Weltkarte:** Eine Spalte am rechten Rand, senkrecht zentriert, mit Tooltips links daneben. Sie ersetzt die Knöpfe M/SA oben links, SA unten links und +/−/? rechts.
+  - Knöpfe: Zoom +/−, Zentrieren (Kompass), Seed-Ebene ein/aus (Karte, grau wenn aus), Seed-Atlas-Einstellungen (Enderauge), Wegpunkte (Namensschild), Einstellungen (Buch), Steuerung (?).
+  - Die Seed-Atlas-Knöpfe erscheinen nur bei eingeschaltetem Seed Atlas. Icons sind die Item-Texturen des Spiels.
+- **Mob-Gesichter:** Ein Subagent hat alle 89 Lebewesen von 26.3 gegen das Modell-Export des Spiels geprüft.
+  - Neu sind 58 Arten (u. a. Biene, Pferd, Katze, Fuchs, Eisengolem, Wächter, Warden), dazu die Schaufensterpuppe mit dem Spielermodell. Damit haben alle Lebewesen außer Magmawürfel und Enderdrache ein Gesicht.
+  - Gesichter stehen jetzt in den nativen Texturkoordinaten mit der Breite der Vanilla-Textur (`Face::base`), sodass auch 128 und 192 Pixel breite Texturen und hochaufgelöste Pakete stimmen.
+  - Ohne Gesicht bleiben der Magmawürfel (kein einzelnes Rechteck) und der Enderdrache (er erreicht das Radar nicht).
+  - Babys zeigen das Gesicht der Erwachsenen.
+- **Radar nach den Standard-Kategorien der Referenz** (O2 `default_radar_categories_client.json`):
+  - Schon gleich: Farben (Lebewesen gelb 14, Spieler weiß 15, Items rot 12, Sonstige dunkellila 5), Reihenfolge (Sonstige 0, Items 1, friedlich 2, feindlich 3, Spieler 6), Punktgröße 2, Höhenlimit 20 bzw. 2050 für Spieler, Höhen-Ausblendung ab 0 Blöcken, höchstens 1000 Entities, Icons standardmäßig nur mit der Spielerliste-Taste.
+  - Neu: Gezähmte friedliche Tiere zeichnen über wilden (Reihenfolge 4), gezähmte feindliche mit 5.
+  - Neu: Rüstungsständer zählen wie in der Referenz nicht zu den Lebewesen, sondern zu den sonstigen Entities (dunkellila) statt ganz zu fehlen. Bridge Version 10.
+  - Offen: Die Datei nennt Zahlencodes für die Namensanzeige (`names` 0). Ihre Bedeutung lässt sich aus erlaubten Quellen nicht bestimmen, Meridian bleibt bei „Spielernamen“.

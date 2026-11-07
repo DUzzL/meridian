@@ -133,9 +133,6 @@ pub enum Screen {
     WorldGeneration(WorldGenerationScreen),
     ConfirmReset(ConfirmResetScreen),
     Position(PositionScreen),
-    SeedAtlasSettings(crate::screens_sa::SeedAtlasSettingsScreen),
-    SeedAtlasMarkers(crate::screens_sa::MarkerSettingsScreen),
-    SeedAtlasPerformance(crate::screens_sa::PerformanceSettingsScreen),
 }
 
 impl Screen {
@@ -149,9 +146,6 @@ impl Screen {
             Screen::WorldGeneration(s) => s.widgets(env),
             Screen::ConfirmReset(s) => s.widgets(env),
             Screen::Position(s) => s.widgets(env),
-            Screen::SeedAtlasSettings(s) => s.widgets(env),
-            Screen::SeedAtlasMarkers(s) => s.widgets(env),
-            Screen::SeedAtlasPerformance(s) => s.widgets(env),
         }
     }
 
@@ -165,8 +159,7 @@ impl Screen {
             .id
             .clone();
         match self {
-            Screen::SeedAtlasSettings(s) => s.tooltip(&id, env),
-            Screen::SeedAtlasMarkers(s) => s.tooltip(&id, env),
+            Screen::Settings(s) => s.tooltip(&id, env),
             _ => None,
         }
     }
@@ -179,14 +172,11 @@ impl Screen {
             Screen::Position(s) => s.click(id.as_deref(), at, env),
             Screen::Editor(s) => s.click(id.as_deref(), right, env),
             Screen::List(s) => s.click(id.as_deref(), right, env),
-            Screen::Settings(s) => s.click(id.as_deref(), right, env),
+            Screen::Settings(s) => s.click(id.as_deref(), at, right, env),
             Screen::Nearest(s) => s.click(id.as_deref(), env),
             Screen::BiomeHighlight(s) => s.click(id.as_deref(), env),
             Screen::WorldGeneration(s) => s.click(id.as_deref(), env),
             Screen::ConfirmReset(s) => s.click(id.as_deref()),
-            Screen::SeedAtlasSettings(s) => s.click(id.as_deref(), at, env),
-            Screen::SeedAtlasMarkers(s) => s.click(id.as_deref(), at, env),
-            Screen::SeedAtlasPerformance(s) => s.click(id.as_deref(), env),
         }
     }
 
@@ -197,7 +187,6 @@ impl Screen {
             Screen::Settings(s) => s.typed(c),
             Screen::Nearest(s) => s.typed(c),
             Screen::BiomeHighlight(s) => s.typed(c),
-            Screen::SeedAtlasSettings(s) => s.typed(c),
             _ => {}
         }
         let _ = env;
@@ -207,8 +196,7 @@ impl Screen {
     pub fn drag(&mut self, at: [f32; 2], env: &mut Env<'_>) {
         match self {
             Screen::Position(s) => s.drag(at, env),
-            Screen::SeedAtlasSettings(s) => s.drag(at, env),
-            Screen::SeedAtlasMarkers(s) => s.drag(at, env),
+            Screen::Settings(s) => s.drag(at, env),
             _ => {}
         }
     }
@@ -217,8 +205,7 @@ impl Screen {
     pub fn release(&mut self) {
         match self {
             Screen::Position(s) => s.grab = None,
-            Screen::SeedAtlasSettings(s) => s.dragging = false,
-            Screen::SeedAtlasMarkers(s) => s.release(),
+            Screen::Settings(s) => s.release(),
             _ => {}
         }
     }
@@ -231,17 +218,13 @@ impl Screen {
             Screen::Settings(s) => s.key(key, env),
             Screen::Nearest(s) => s.key(key),
             Screen::BiomeHighlight(s) => s.key(key),
-            Screen::SeedAtlasSettings(s) => s.key(key, env),
             _ => Action::None,
         }
     }
 
     pub fn scroll(&mut self, lines: f32, env: &Env<'_>) {
         match self {
-            Screen::SeedAtlasMarkers(s) => s.scroll(
-                lines,
-                crate::screens_sa::MarkerSettingsScreen::max_scroll_for(env),
-            ),
+            Screen::Settings(s) => s.scroll(lines, env),
             Screen::List(s) => s.scroll = (s.scroll as f32 - lines).max(0.0) as usize,
             Screen::Nearest(s) => s.scroll(lines),
             Screen::BiomeHighlight(s) => s.scroll(lines),
@@ -792,7 +775,7 @@ impl List {
                 }
             }
             Some("options") => {
-                return Action::Open(Screen::Settings(SettingsScreen::group(Group::Waypoints)));
+                return Action::Open(Screen::Settings(SettingsScreen::at(Category::Waypoints)));
             }
             Some("done") => return Action::Close,
             _ => {}
@@ -841,21 +824,6 @@ pub enum Group {
     WorldMap,
 }
 
-impl Group {
-    fn title(self) -> &'static str {
-        match self {
-            Group::View => "View Settings",
-            Group::Radar => "Entity Radar Settings",
-            Group::Information => "Information Settings",
-            Group::Misc => "Miscellaneous Settings",
-            Group::BlockMap => "Block Map Settings",
-            Group::Overlay => "Overlay Settings",
-            Group::Waypoints => "Waypoint Settings",
-            Group::SeedAtlas => "Seed Atlas Settings",
-            Group::WorldMap => "World Map Settings",
-        }
-    }
-}
 
 /// One setting: its label, its value as shown, and how a click changes it
 /// (`back` for a right click).
@@ -1293,357 +1261,10 @@ fn world_map_options() -> Vec<Opt> {
     ]
 }
 
-#[derive(Debug, PartialEq)]
-pub enum SettingsPage {
-    Main { page: u8 },
-    Group { group: Group, page: u8 },
-    Search,
-}
-
-#[derive(Debug, PartialEq)]
-pub struct SettingsScreen {
-    pub page: SettingsPage,
-    pub search: String,
-    pub search_focused: bool,
-    /// Opened straight on a group (the world map key, the map's buttons):
-    /// Back closes instead of returning to the main page.
-    pub direct: bool,
-    /// The profile name being typed (renaming the current profile).
-    pub profile_name: Option<String>,
-}
-
-impl Default for SettingsScreen {
-    fn default() -> Self {
-        Self {
-            page: SettingsPage::Main { page: 0 },
-            search: String::new(),
-            search_focused: false,
-            direct: false,
-            profile_name: None,
-        }
-    }
-}
-
-const GRID_ROWS: usize = 6;
-
-impl SettingsScreen {
-    pub fn group(group: Group) -> Self {
-        Self {
-            page: SettingsPage::Group { group, page: 0 },
-            ..Self::default()
-        }
-    }
-
-    /// The world map settings, as the world map settings key opens them.
-    pub fn world_map() -> Self {
-        Self {
-            direct: true,
-            ..Self::group(Group::WorldMap)
-        }
-    }
-
-    /// The buttons that open screens, before a group's options (none now:
-    /// Seed Atlas has its own screens).
-    fn openers(&self, _env: &Env<'_>) -> Vec<(&'static str, String, bool)> {
-        Vec::new()
-    }
-
-    /// The two-column grid's button rectangles, row by row.
-    fn grid(env: &Env<'_>, i: usize) -> [f32; 4] {
-        let [cx, c] = env.center();
-        let col = (i % 2) as f32;
-        let row = (i / 2) as f32;
-        [
-            cx - 205.0 + col * 210.0,
-            c - 58.0 + row * 24.0,
-            200.0,
-            ui::BUTTON_H,
-        ]
-    }
-
-    fn page_options(&self) -> Vec<Opt> {
-        let all = options();
-        match &self.page {
-            SettingsPage::Group { group, .. } => {
-                all.into_iter().filter(|o| o.group == *group).collect()
-            }
-            SettingsPage::Search => {
-                let q = self.search.to_lowercase();
-                all.into_iter()
-                    .filter(|o| o.label.to_lowercase().contains(&q))
-                    .collect()
-            }
-            SettingsPage::Main { .. } => Vec::new(),
-        }
-    }
-
-    fn widgets(&self, env: &Env<'_>) -> Vec<Widget> {
-        let [cx, c] = env.center();
-        let mut ws = Vec::new();
-        let (title, pages, page) = match &self.page {
-            SettingsPage::Main { page } => ("Minimap Settings".to_owned(), 2u8, *page),
-            SettingsPage::Group { group, page } => {
-                let items = self.openers(env).len() + self.page_options().len();
-                let n = items.div_ceil(GRID_ROWS * 2).max(1) as u8;
-                (group.title().to_owned(), n, *page)
-            }
-            SettingsPage::Search => ("Search".to_owned(), 1, 0),
-        };
-        let title = if pages > 1 {
-            format!("{title} ({}/{pages})", page + 1)
-        } else {
-            title
-        };
-        ws.push(Widget::label(cx, c - 97.0, title, Align::Center));
-        if let SettingsPage::Main { .. } = self.page {
-            ws.push(Widget::button(
-                "delete_profile",
-                [cx + 130.0, c - 106.0, 74.0, ui::BUTTON_H],
-                "Delete Profile",
-                env.profiles.len() > 1,
-            ));
-            ws.push(Widget::selector(
-                "profile",
-                [cx - 205.0, c - 78.0, 200.0, ui::SELECTOR_H],
-                profile_title(&env.profile),
-                0xFFFF_FFFF,
-            ));
-        }
-        ws.push(Widget::field(
-            "search",
-            [cx + 5.0, c - 83.0, 200.0, ui::BUTTON_H],
-            &self.search,
-            "Search...",
-            self.search_focused,
-        ));
-        match &self.page {
-            SettingsPage::Main { page: 0 } => {
-                let minimap = format!("Minimap: {}", on_off(env.settings.minimap.enabled));
-                let entries: [(&str, String, bool); 12] = [
-                    ("id", format!("ID: {}", env.profile), true),
-                    ("new_profile", "New Profile".into(), true),
-                    ("minimap", minimap, true),
-                    ("position", "Change Position".into(), true),
-                    ("g:view", "View Settings".into(), true),
-                    ("g:blockmap", "Block Map Settings".into(), true),
-                    ("g:radar", "Entity Radar Settings".into(), true),
-                    ("g:overlay", "Overlay Settings".into(), true),
-                    ("g:info", "Information Settings".into(), true),
-                    ("g:waypoints", "Waypoint Settings".into(), true),
-                    ("g:misc", "Miscellaneous Settings".into(), true),
-                    ("waypoints", "Waypoints".into(), true),
-                ];
-                for (i, (id, label, enabled)) in entries.into_iter().enumerate() {
-                    if id == "id"
-                        && let Some(name) = &self.profile_name
-                    {
-                        ws.push(Widget::field(
-                            "profile_name",
-                            Self::grid(env, i),
-                            name,
-                            "Profile Name",
-                            true,
-                        ));
-                        continue;
-                    }
-                    ws.push(Widget::button(id, Self::grid(env, i), label, enabled));
-                }
-            }
-            SettingsPage::Main { page: 1 } => {
-                ws.push(Widget::button(
-                    "g:seedatlas",
-                    Self::grid(env, 0),
-                    "Seed Atlas Settings",
-                    true,
-                ));
-                ws.push(Widget::button(
-                    "g:worldmap",
-                    Self::grid(env, 1),
-                    "World Map Settings",
-                    true,
-                ));
-            }
-            SettingsPage::Main { .. } => {}
-            _ => {
-                let openers = self.openers(env);
-                let opts = self.page_options();
-                let first = page as usize * GRID_ROWS * 2;
-                for slot in 0..GRID_ROWS * 2 {
-                    let n = first + slot;
-                    if let Some((id, label, enabled)) = openers.get(n) {
-                        ws.push(Widget::button(id, Self::grid(env, slot), label, *enabled));
-                    } else if let Some(o) = opts.get(n - openers.len()) {
-                        ws.push(Widget::button(
-                            &format!("opt:{}", n - openers.len()),
-                            Self::grid(env, slot),
-                            format!("{}: {}", o.label, (o.value)(env.settings)),
-                            true,
-                        ));
-                    }
-                }
-            }
-        }
-        ws.push(Widget::button(
-            "prev",
-            [cx - 205.0, c + 86.0, 74.0, ui::BUTTON_H],
-            "<< Prev",
-            page > 0,
-        ));
-        ws.push(Widget::button(
-            "back",
-            [cx - 100.0, c + 86.0, 200.0, ui::BUTTON_H],
-            "Back",
-            true,
-        ));
-        ws.push(Widget::button(
-            "next",
-            [cx + 131.0, c + 86.0, 74.0, ui::BUTTON_H],
-            "Next >>",
-            page + 1 < pages,
-        ));
-        ws
-    }
-
-    fn click(&mut self, id: Option<&str>, right: bool, env: &mut Env<'_>) -> Action {
-        self.search_focused = false;
-        if id != Some("profile_name") && self.profile_name.is_some() {
-            // Clicking elsewhere confirms the name.
-            if let Some(op) = self.confirm_name(env) {
-                return Action::Profile(op);
-            }
-        }
-        let group = |g| SettingsPage::Group { group: g, page: 0 };
-        match id {
-            Some("search") => self.search_focused = true,
-            Some("profile") if !env.profiles.is_empty() => {
-                let i = env
-                    .profiles
-                    .iter()
-                    .position(|p| *p == env.profile)
-                    .unwrap_or(0);
-                let n = env.profiles.len();
-                let next = if right { (i + n - 1) % n } else { (i + 1) % n };
-                return Action::Profile(ProfileOp::Select(env.profiles[next].clone()));
-            }
-            Some("id") => self.profile_name = Some(env.profile.clone()),
-            Some("new_profile") => {
-                let name = (2..)
-                    .map(|i| format!("profile{i}"))
-                    .find(|n| !env.profiles.contains(n))
-                    .expect("a free name");
-                return Action::Profile(ProfileOp::Create(name));
-            }
-            Some("delete_profile") if env.profiles.len() > 1 => {
-                return Action::Profile(ProfileOp::Delete(env.profile.clone()));
-            }
-            Some("position") => return Action::Open(Screen::Position(PositionScreen::default())),
-            Some("minimap") => {
-                env.settings.minimap.enabled = !env.settings.minimap.enabled;
-                env.settings_changed = true;
-            }
-            Some("g:view") => self.page = group(Group::View),
-            Some("g:blockmap") => self.page = group(Group::BlockMap),
-            Some("g:radar") => self.page = group(Group::Radar),
-            Some("g:overlay") => self.page = group(Group::Overlay),
-            Some("g:info") => self.page = group(Group::Information),
-            Some("g:waypoints") => self.page = group(Group::Waypoints),
-            Some("g:misc") => self.page = group(Group::Misc),
-            Some("g:seedatlas") => {
-                return Action::Open(Screen::SeedAtlasSettings(
-                    crate::screens_sa::SeedAtlasSettingsScreen {
-                        from_settings: true,
-                        ..Default::default()
-                    },
-                ));
-            }
-            Some("g:worldmap") => self.page = group(Group::WorldMap),
-            Some("waypoints") => return Action::Open(Screen::List(List::default())),
-            Some(o) if o.starts_with("opt:") => {
-                if let Some(opt) = o[4..]
-                    .parse::<usize>()
-                    .ok()
-                    .and_then(|i| self.page_options().into_iter().nth(i))
-                {
-                    (opt.step)(env.settings, right);
-                    env.settings_changed = true;
-                }
-            }
-            Some("prev") => self.turn(-1),
-            Some("next") => self.turn(1),
-            Some("back") => match self.page {
-                SettingsPage::Main { .. } => return Action::Close,
-                SettingsPage::Group { .. } if self.direct => return Action::Close,
-                _ => {
-                    self.page = SettingsPage::Main { page: 0 };
-                    self.search.clear();
-                }
-            },
-            _ => {}
-        }
-        Action::None
-    }
-
-    fn turn(&mut self, by: i8) {
-        match &mut self.page {
-            SettingsPage::Main { page } | SettingsPage::Group { page, .. } => {
-                *page = (*page as i8 + by).max(0) as u8;
-            }
-            SettingsPage::Search => {}
-        }
-    }
-
-    fn typed(&mut self, c: char) {
-        if let Some(name) = &mut self.profile_name {
-            ui::type_char(name, c, 24, |c| c.is_alphanumeric() || "_- ".contains(c));
-            return;
-        }
-        if self.search_focused && ui::type_char(&mut self.search, c, 24, |_| true) {
-            self.page = SettingsPage::Search;
-        }
-    }
-
-    /// Ends renaming: the op when the name changed and is free.
-    fn confirm_name(&mut self, env: &Env<'_>) -> Option<ProfileOp> {
-        let name = self.profile_name.take()?;
-        let name = name.trim();
-        (!name.is_empty() && name != env.profile && !env.profiles.iter().any(|p| p == name))
-            .then(|| ProfileOp::Rename(name.to_owned()))
-    }
-
-    fn key(&mut self, key: &str, env: &mut Env<'_>) -> Action {
-        if let Some(name) = &mut self.profile_name {
-            match key {
-                "key.keyboard.backspace" => {
-                    ui::backspace(name);
-                }
-                "key.keyboard.enter" | "key.keyboard.keypad.enter" => {
-                    if let Some(op) = self.confirm_name(env) {
-                        return Action::Profile(op);
-                    }
-                }
-                "key.keyboard.escape" => self.profile_name = None,
-                _ => {}
-            }
-            return Action::None;
-        }
-        if key == "key.keyboard.backspace" && self.search_focused {
-            ui::backspace(&mut self.search);
-            if self.search.is_empty() {
-                self.page = SettingsPage::Main { page: 0 };
-            }
-        }
-        Action::None
-    }
-}
+pub use crate::settings_screen::{Category, SettingsScreen};
 
 /// The kinds a waypoint of the list can be (re-exported for hosts).
 pub type WaypointKind = Kind;
-
-fn profile_title(name: &str) -> String {
-    let mut c = name.chars();
-    c.next()
-        .map_or_else(String::new, |f| f.to_uppercase().chain(c).collect())
-}
 
 // ------------------------------------------------------- position editor --
 
@@ -2110,50 +1731,6 @@ mod tests {
     }
 
     #[test]
-    fn settings_main_page_and_options() {
-        let (mut w, mut s) = (DimensionWaypoints::default(), Settings::default());
-        let mut e = env(&mut w, &mut s);
-        let mut screen = Screen::Settings(SettingsScreen::default());
-        let ws = screen.widgets(&e);
-        assert!(ws.iter().any(|w| w.text == "Minimap Settings (1/2)"));
-        assert_eq!(
-            ws.iter().find(|w| w.id == "g:view").unwrap().rect,
-            [11.0, 113.0, 200.0, 20.0]
-        );
-        click(&mut screen, "minimap", &mut e);
-        assert!(!e.settings.minimap.enabled);
-        click(&mut screen, "g:view", &mut e);
-        let shape = screen
-            .widgets(&e)
-            .into_iter()
-            .find(|w| w.text.starts_with("Minimap Shape"))
-            .unwrap();
-        assert_eq!(shape.text, "Minimap Shape: Square");
-        click(&mut screen, &shape.id, &mut e);
-        assert_eq!(e.settings.minimap.shape, MinimapShape::Round);
-        click(&mut screen, "back", &mut e);
-        assert_eq!(click(&mut screen, "back", &mut e), Action::Close);
-    }
-
-    #[test]
-    fn settings_search_finds_options_in_any_group() {
-        let (mut w, mut s) = (DimensionWaypoints::default(), Settings::default());
-        let mut e = env(&mut w, &mut s);
-        let mut screen = Screen::Settings(SettingsScreen::default());
-        click(&mut screen, "search", &mut e);
-        for c in "death".chars() {
-            screen.typed(c, &mut e);
-        }
-        let labels: Vec<String> = screen
-            .widgets(&e)
-            .into_iter()
-            .filter(|w| w.id.starts_with("opt:"))
-            .map(|w| w.text)
-            .collect();
-        assert_eq!(labels.len(), 3, "{labels:?}");
-    }
-
-    #[test]
     fn every_option_cycles_back_to_its_start() {
         for o in options() {
             let mut s = Settings::default();
@@ -2211,61 +1788,6 @@ mod tests {
         (world.step)(&mut s, true);
         (world.step)(&mut s, true);
         assert_eq!((world.value)(&s), "Large Biomes, Auto (26.3)");
-    }
-
-    #[test]
-    fn profiles_from_the_main_page() {
-        let (mut w, mut s) = (DimensionWaypoints::default(), Settings::default());
-        let mut e = env(&mut w, &mut s);
-        e.profiles = vec!["default".into(), "pvp".into()];
-        let screen = SettingsScreen::default();
-        let at = |screen: &SettingsScreen, e: &Env<'_>, id: &str| {
-            let r = screen
-                .widgets(e)
-                .into_iter()
-                .find(|w| w.id == id)
-                .unwrap()
-                .rect;
-            [r[0] + 2.0, r[1] + 2.0]
-        };
-        let p = at(&screen, &e, "profile");
-        let mut sc = Screen::Settings(screen);
-        assert_eq!(
-            sc.click(p, false, &mut e),
-            Action::Profile(ProfileOp::Select("pvp".into()))
-        );
-        let Screen::Settings(s2) = &sc else {
-            unreachable!()
-        };
-        let p = at(s2, &e, "new_profile");
-        assert_eq!(
-            sc.click(p, false, &mut e),
-            Action::Profile(ProfileOp::Create("profile2".into()))
-        );
-        let Screen::Settings(s2) = &sc else {
-            unreachable!()
-        };
-        let p = at(s2, &e, "delete_profile");
-        assert_eq!(
-            sc.click(p, false, &mut e),
-            Action::Profile(ProfileOp::Delete("default".into()))
-        );
-        // Renaming: click the ID, type, Enter.
-        let Screen::Settings(s2) = &sc else {
-            unreachable!()
-        };
-        let p = at(s2, &e, "id");
-        assert_eq!(sc.click(p, false, &mut e), Action::None);
-        for _ in 0..7 {
-            sc.key("key.keyboard.backspace", &mut e);
-        }
-        for c in "main".chars() {
-            sc.typed(c, &mut e);
-        }
-        assert_eq!(
-            sc.key("key.keyboard.enter", &mut e),
-            Action::Profile(ProfileOp::Rename("main".into()))
-        );
     }
 
     #[test]

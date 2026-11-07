@@ -62,6 +62,21 @@ pub struct Entity {
     pub name: Option<String>,
     /// Its face, when the radar shows faces (see [`face_for`]).
     pub face: Option<Face>,
+    /// A tamed animal: drawn over the wild ones.
+    pub tamed: bool,
+}
+
+impl Entity {
+    /// Drawing order, lower first (the reference's category render order:
+    /// other 0, items 1, friendly 2, hostile 3, tamed friendly 4, tamed
+    /// hostile 5, players 6).
+    fn order(&self) -> u8 {
+        match (self.class, self.tamed) {
+            (Class::Friendly, true) => 4,
+            (Class::Hostile, true) => 5,
+            (c, _) => c.order(),
+        }
+    }
 }
 
 /// Where a mob's face is in its texture: the front of its model's head
@@ -70,7 +85,10 @@ pub struct Entity {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Face {
     pub texture: String,
+    /// The head's front face: u, v, width, height in texels of the vanilla
+    /// texture, `base` texels wide (a higher-resolution pack scales it).
     pub uv: [u16; 4],
+    pub base: u16,
 }
 
 /// Humanoid heads: 8x8x8 at (0, 0).
@@ -83,53 +101,131 @@ pub fn face_for(kind: &str, skin: Option<&str>) -> Option<Face> {
         return Some(Face {
             texture: skin.unwrap_or("entity/player/wide/steve").to_owned(),
             uv: HEAD,
+            base: 64,
         });
     }
     face(kind)
 }
 
-/// The face of an entity kind, for kinds whose model has a plain head.
+/// Where a mob's face is in its texture: the front of its model's head
+/// cube (the body's front where there is no head), checked against the
+/// game's model export. Kinds whose face is no single rectangle (magma
+/// cube) or that never reach the radar (the dragon) have none.
 pub fn face(kind: &str) -> Option<Face> {
     let id = kind.strip_prefix("minecraft:").unwrap_or(kind);
-    let f = |texture: &str, uv| {
+    // `f`: a 64-wide texture; `w`: another width.
+    let w = |texture: &str, base: u16, uv: [u16; 4]| {
         Some(Face {
-            texture: texture.to_owned(),
+            texture: format!("entity/{texture}"),
             uv,
+            base,
         })
     };
-    // Villagers and illagers 8x10x8; piglins 10x8x8.
+    let f = |texture: &str, uv| w(texture, 64, uv);
+    // Villagers and illagers 8x10x8; piglins 10x8x8; horses 6x5.
     const LONG: [u16; 4] = [8, 8, 8, 10];
     const WIDE: [u16; 4] = [8, 8, 10, 8];
+    const HORSE: [u16; 4] = [7, 20, 6, 5];
     match id {
-        "zombie" => f("entity/zombie/zombie", HEAD),
-        "husk" => f("entity/zombie/husk", HEAD),
-        "drowned" => f("entity/zombie/drowned", HEAD),
-        "skeleton" => f("entity/skeleton/skeleton", HEAD),
-        "stray" => f("entity/skeleton/stray", HEAD),
-        "wither_skeleton" => f("entity/skeleton/wither_skeleton", HEAD),
-        "bogged" => f("entity/skeleton/bogged", HEAD),
-        "creeper" => f("entity/creeper/creeper", HEAD),
-        "enderman" => f("entity/enderman/enderman", HEAD),
-        "blaze" => f("entity/blaze/blaze", HEAD),
-        "slime" => f("entity/slime/slime", HEAD),
-        "spider" => f("entity/spider/spider", [40, 12, 8, 8]),
-        "cave_spider" => f("entity/spider/cave_spider", [40, 12, 8, 8]),
-        "pig" => f("entity/pig/pig_temperate", HEAD),
-        "cow" => f("entity/cow/cow_temperate", [6, 6, 8, 8]),
-        "sheep" => f("entity/sheep/sheep", [8, 8, 6, 6]),
-        "chicken" => f("entity/chicken/chicken_temperate", [3, 3, 4, 6]),
-        "villager" => f("entity/villager/villager", LONG),
-        "zombie_villager" => f("entity/zombie_villager/zombie_villager", LONG),
-        "witch" => f("entity/witch/witch", LONG),
-        "wandering_trader" => f("entity/wandering_trader/wandering_trader", LONG),
-        "piglin" => f("entity/piglin/piglin", WIDE),
-        "piglin_brute" => f("entity/piglin/piglin_brute", WIDE),
-        "zombified_piglin" => f("entity/piglin/zombified_piglin", WIDE),
-        "snow_golem" => f("entity/snow_golem/snow_golem", HEAD),
-        "wolf" => f("entity/wolf/wolf", [4, 4, 6, 6]),
-        "pillager" => f("entity/illager/pillager", LONG),
-        "vindicator" => f("entity/illager/vindicator", LONG),
-        "evoker" => f("entity/illager/evoker", LONG),
+        // Undead and other humanoids.
+        "zombie" | "giant" => f("zombie/zombie", HEAD),
+        "husk" => f("zombie/husk", HEAD),
+        "drowned" => f("zombie/drowned", HEAD),
+        "skeleton" => f("skeleton/skeleton", HEAD),
+        "stray" => f("skeleton/stray", HEAD),
+        "wither_skeleton" => f("skeleton/wither_skeleton", HEAD),
+        "bogged" => f("skeleton/bogged", HEAD),
+        "parched" => f("skeleton/parched", HEAD),
+        "creeper" => f("creeper/creeper", HEAD),
+        "enderman" => f("enderman/enderman", HEAD),
+        "blaze" => f("blaze/blaze", HEAD),
+        "breeze" => w("breeze/breeze", 32, HEAD),
+        "wither" => f("wither/wither", HEAD),
+        "slime" => f("slime/slime", HEAD),
+        "spider" => f("spider/spider", [40, 12, 8, 8]),
+        "cave_spider" => f("spider/cave_spider", [40, 12, 8, 8]),
+        "villager" => f("villager/villager", LONG),
+        "zombie_villager" => f("zombie_villager/zombie_villager", LONG),
+        "wandering_trader" => f("wandering_trader/wandering_trader", LONG),
+        "witch" => f("witch/witch", LONG),
+        "pillager" => f("illager/pillager", LONG),
+        "vindicator" => f("illager/vindicator", LONG),
+        "evoker" => f("illager/evoker", LONG),
+        "illusioner" => f("illager/illusioner", LONG),
+        "vex" => w("illager/vex", 32, [5, 5, 5, 5]),
+        "ravager" => w("illager/ravager", 128, [16, 16, 16, 20]),
+        "piglin" => f("piglin/piglin", WIDE),
+        "piglin_brute" => f("piglin/piglin_brute", WIDE),
+        "zombified_piglin" => f("piglin/zombified_piglin", WIDE),
+        "hoglin" => w("hoglin/hoglin", 128, [80, 20, 14, 6]),
+        "zoglin" => w("hoglin/zoglin", 128, [80, 20, 14, 6]),
+        "creaking" => f("creaking/creaking", [6, 6, 6, 10]),
+        "warden" => w("warden/warden", 128, [10, 42, 16, 16]),
+        "phantom" => f("phantom/phantom", [5, 5, 7, 3]),
+        "ghast" => w("ghast/ghast", 128, [32, 32, 32, 32]),
+        "happy_ghast" => w("ghast/happy_ghast", 128, [32, 32, 32, 32]),
+        "guardian" => f("guardian/guardian", [16, 16, 12, 12]),
+        "elder_guardian" => f("guardian/guardian_elder", [16, 16, 12, 12]),
+        // The head inside the shell.
+        "shulker" => f("shulker/shulker", [6, 58, 6, 6]),
+        "endermite" => f("endermite/endermite", [2, 2, 4, 3]),
+        "silverfish" => f("silverfish/silverfish", [2, 2, 3, 2]),
+        "sulfur_cube" => w("sulfur_cube/sulfur_cube_outer", 128, [18, 18, 18, 18]),
+        // Golems.
+        "snow_golem" => f("snow_golem/snow_golem", HEAD),
+        "iron_golem" => w("iron_golem/iron_golem", 128, [8, 8, 8, 10]),
+        "copper_golem" => f("copper_golem/copper_golem", [10, 10, 8, 5]),
+        // Farm animals.
+        "pig" => f("pig/pig_temperate", HEAD),
+        "cow" => f("cow/cow_temperate", [6, 6, 8, 8]),
+        "mooshroom" => f("cow/mooshroom_red", [6, 6, 8, 8]),
+        "sheep" => f("sheep/sheep", [8, 8, 6, 6]),
+        "chicken" => f("chicken/chicken_temperate", [3, 3, 4, 6]),
+        "goat" => f("goat/goat", [44, 56, 5, 7]),
+        "rabbit" => f("rabbit/rabbit_brown", [5, 21, 5, 5]),
+        // Bees have no head: the front of the body.
+        "bee" => f("bee/bee", [10, 10, 7, 7]),
+        "horse" => f("horse/horse_brown", HORSE),
+        "donkey" => f("horse/donkey", HORSE),
+        "mule" => f("horse/mule", HORSE),
+        "skeleton_horse" => f("horse/horse_skeleton", HORSE),
+        "zombie_horse" => f("horse/horse_zombie", HORSE),
+        // The top of the head front, with the eyes.
+        "llama" | "trader_llama" => w("llama/llama_creamy", 128, [6, 20, 8, 8]),
+        "camel" => w("camel/camel", 128, [28, 7, 7, 14]),
+        "camel_husk" => w("camel/camel_husk", 128, [28, 7, 7, 14]),
+        // The lower beak (the head's front is see-through).
+        "sniffer" => w("sniffer/sniffer", 192, [19, 66, 13, 12]),
+        // Pets and wild animals.
+        "wolf" => w("wolf/wolf", 64, [4, 4, 6, 6]),
+        "cat" => f("cat/cat_tabby", [5, 5, 5, 4]),
+        "ocelot" => f("cat/ocelot", [5, 5, 5, 4]),
+        "fox" => w("fox/fox", 48, [7, 11, 8, 6]),
+        "frog" => w("frog/frog_temperate", 48, [9, 22, 7, 3]),
+        "panda" => f("panda/panda", [9, 15, 13, 10]),
+        "polar_bear" => w("bear/polarbear", 128, [7, 7, 7, 7]),
+        "armadillo" => f("armadillo/armadillo", [45, 17, 3, 5]),
+        "parrot" => w("parrot/parrot_red_blue", 32, [4, 4, 2, 3]),
+        "allay" => w("allay/allay", 32, [5, 5, 5, 5]),
+        "bat" => w("bat/bat", 32, [2, 9, 4, 3]),
+        // The face is the body's front.
+        "strider" => f("strider/strider", [16, 16, 16, 14]),
+        // Water.
+        "turtle" => w("turtle/turtle", 128, [9, 6, 6, 5]),
+        "axolotl" => f("axolotl/axolotl_lucy", [5, 6, 8, 5]),
+        "dolphin" => f("dolphin/dolphin", [6, 6, 8, 7]),
+        "squid" => f("squid/squid", [12, 12, 12, 16]),
+        "glow_squid" => f("squid/glow_squid", [12, 12, 12, 16]),
+        "cod" => w("fish/cod", 32, [14, 3, 2, 4]),
+        "salmon" => w("fish/salmon", 32, [25, 3, 2, 4]),
+        "pufferfish" => w("fish/pufferfish", 32, [8, 8, 8, 8]),
+        "tropical_fish" => w("fish/tropical_a", 32, [6, 6, 2, 3]),
+        "tadpole" => w("tadpole/tadpole", 16, [3, 3, 3, 2]),
+        // The side of the shell, with the eye.
+        "nautilus" => w("nautilus/nautilus", 128, [24, 68, 14, 8]),
+        "zombie_nautilus" => w("nautilus/zombie_nautilus", 128, [24, 68, 14, 8]),
+        // Mannequins wear the player model.
+        "mannequin" => f("player/wide/steve", HEAD),
         _ => None,
     }
 }
@@ -177,7 +273,7 @@ pub fn dots(
         .filter(|e| shown(e, s))
         .filter(|e| (e.pos[1] - center[1]).abs() <= e.class.height_limit(s))
         .collect();
-    visible.sort_by_key(|e| (e.class.order(), e.id));
+    visible.sort_by_key(|e| (e.order(), e.id));
     visible.truncate(s.max_entities as usize);
     let mut ops = Vec::with_capacity(visible.len() * 2);
     for e in visible {
@@ -220,6 +316,7 @@ pub fn dots(
                 texture: face.texture.clone(),
                 rect: [x - half, y - half, 2.0 * half, 2.0 * half],
                 uv: face.uv,
+                base: face.base,
                 argb: 0xFF00_0000 | shade,
             });
         } else {
@@ -291,6 +388,7 @@ mod tests {
             kind: "minecraft:zombie".into(),
             name: None,
             face: face_for("minecraft:zombie", None),
+            tamed: false,
         }
     }
 
@@ -371,6 +469,18 @@ mod tests {
     }
 
     #[test]
+    fn tamed_animals_over_wild_ones() {
+        let s = RadarSettings::default();
+        let mut dog = e(1, Class::Friendly, [1.0, 64.0, 0.0]);
+        dog.tamed = true;
+        let zombie = e(2, Class::Hostile, [2.0, 64.0, 0.0]);
+        let ops = dots(&layout(), [0.0, 64.0, 0.0], 0.0, &[dog, zombie], &s);
+        // Dots come in pairs (rim, colour); the tamed friend is drawn last.
+        let DrawOp::Quad { points, .. } = &ops[3] else { panic!() };
+        assert_eq!(points[0][0], 1.0 * layout().blocks_per_pixel + 50.0, "the dog over the zombie");
+    }
+
+    #[test]
     fn excluded_kinds_never_show() {
         let mut s = RadarSettings::default();
         let z = e(1, Class::Hostile, [0.0; 3]);
@@ -379,6 +489,21 @@ mod tests {
         assert!(!shown(&z, &s));
         s.reversed = true;
         assert!(!shown(&z, &s), "not even reversed");
+    }
+
+    #[test]
+    fn faces_lie_inside_their_textures() {
+        let kinds = [
+            "bee", "wolf", "ghast", "iron_golem", "polar_bear", "sniffer", "fox", "tadpole",
+            "llama", "warden", "camel", "turtle", "parrot", "zombie",
+        ];
+        for k in kinds {
+            let f = face(k).unwrap_or_else(|| panic!("{k} has a face"));
+            let [u, _, w, _] = f.uv;
+            assert!(u + w <= f.base, "{k}: {:?} outside {} wide", f.uv, f.base);
+            assert!(f.texture.starts_with("entity/"));
+        }
+        assert!(face("magma_cube").is_none() && face("ender_dragon").is_none());
     }
 
     #[test]
