@@ -6,12 +6,11 @@ Minecraft version the Fabric version offers (1.1 to 26.3).
 
 ## Reference sources (read only)
 
-- Engine: `DUzzL/Seed-Atlas` main, `seedatlas-engine/` (`*.c`, `*.h`,
-  `tables/`). Local clone:
-  `/private/tmp/claude-501/-Users-noahwill--claude-spares-spare-MV41O6/663dbc40-872a-4e81-8776-b72268375221/scratchpad/upstream/seed-atlas/seedatlas-engine`
-- Glue: `DUzzL/seed-atlas-xaero` main, `src/main/native/seedatlas_xaero.c`
-  (ABI 6). Local clone:
-  `/private/tmp/claude-501/-Users-noahwill--claude-spares-spare-MV41O6/663dbc40-872a-4e81-8776-b72268375221/scratchpad/upstream/seed-atlas-xaero`
+- Engine: https://github.com/DUzzL/Seed-Atlas, `seedatlas-engine/` (`*.c`,
+  `*.h`, `tables/`), ported at commit `fc2c628`; `main` at `2539698` only
+  changed build and test files since.
+- Glue: https://github.com/DUzzL/seed-atlas-xaero, `src/main/native/seedatlas_xaero.c`
+  (ABI 6), compared at commit `58c70ff` (release 2.0.0).
 
 Never open anything of Xaero's (no decompiled code, jars or assets).
 

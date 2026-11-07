@@ -125,7 +125,7 @@ Die Bridge besteht aus zwei Modulen und drei HEAD-Injektionen (`mixins/meridian/
 - Der Adapter linkt gegen `horizon_client` und erreicht die Bridge als `horizon_client::game::meridian_bridge`.
 - Nur einfache Daten kreuzen die Grenze, `VERSION` sichert das Format ab.
 
-Folge für die Host-Schnittstelle: Chunks werden **angefragt** (`request_chunk`) und **abgeholt** (`take_chunks`), ein Frame später. Die Engine verfolgt offene Anfragen, fragt nach 200 Ticks neu und gibt nach 3 Versuchen auf, bis zum nächsten Lade- oder Änderungsereignis.
+Folge für die Host-Schnittstelle: Chunks werden **angefragt** (`request_chunk`) und **abgeholt** (`take_chunks`), ein Frame später. Die Engine verfolgt offene Anfragen, fragt nach 10 s neu (seit D-039 Wanduhrzeit; vorher zählten die „200 Ticks“ tatsächlich Frames) und gibt nach 3 Versuchen auf, bis zum nächsten Lade- oder Änderungsereignis.
 
 `tools/check-adapter.sh` wendet die Mixins mit der horizon-mixins-Revision des Launchers an und kompiliert dagegen. Eigenheiten, die das Skript berücksichtigt:
 
@@ -216,7 +216,7 @@ Horizons `client_entities` kennt keinen Entity-Typ. Die Bridge (Version 3) kopie
 - abgelegte Items,
 - Positionen auf den Frame interpoliert.
 
-Rüstungsständer sind ausgeschlossen. Boote und Loren (Klasse „Sonstige“) fehlen noch.
+Rüstungsständer waren hier ausgeschlossen (seit D-037 zählen sie zu den sonstigen Entities). Boote und Loren liest die Bridge ebenfalls, als Klasse „Sonstige“.
 
 Die Darstellung folgt den Standard-Kategorien der Referenz (O2):
 
@@ -259,10 +259,10 @@ Die Fabric-Version rechnet mit einer C-Bibliothek (Seed-Atlas-Engine, aus cubiom
 - Die API spiegelt die native Schnittstelle der Fabric-Version (`sax_*`, ABI 4) Aufruf für Aufruf.
 - Parität: `tools/seedatlas-fixtures/` baut lokal die echte Glue-Schicht der Fabric-Version samt Engine und schreibt Fixtures. Die Tests vergleichen jede Zahl:
   - Biome: Punkte, Flächen mit Schrittweite 1 bis 1024, Chunks;
-  - drei Dimensionen, normale und große Biome, sechs Seeds.
+  - drei Dimensionen, normale und große Biome (große nur für Seed 0), drei Seeds (`fixtures.c`).
 - Gleitkomma: Die Fabric-Bibliothek für Apple Silicon ist mit clang gebaut, das `a*b + c` zu FMA zusammenzieht. Weit draußen im End (über rund 78.000 Blöcke) ändert das die Inselgewichte. Meridian rechnet dort mit `mul_add` wie dieser Build. Auf x86-Builds der Fabric-Version können End-Biome so weit draußen abweichen.
 - Biomnamen, Farben und Existenz kommen generiert aus der Engine (`biome_table.c`), der Biom-Suchbaum aus ihrer Tabelle (`btree_table.py`).
-- Strukturen: Positionen, Biom- und Geländeprüfung, Varianten, Festungsringe, Spawn, Schleimchunks, Erzadern, End-Inseln, End-Gateways und End-Schiffe (Teile der End-Stadt) sind portiert. Die Paritätstests vergleichen jeden Treffer der Fabric-Schnittstelle für 25 Strukturtypen mit und ohne Biomprüfung, über fünf Seeds (`structures.txt.gz`).
+- Strukturen: Positionen, Biom- und Geländeprüfung, Varianten, Festungsringe, Spawn, Schleimchunks, Erzadern, End-Inseln, End-Gateways und End-Schiffe (Teile der End-Stadt) sind portiert. Die Paritätstests vergleichen jeden Treffer der Fabric-Schnittstelle für 25 Strukturtypen mit und ohne Biomprüfung, über drei Seeds (`structures.txt.gz`).
 
 ## D-026: Seed Atlas auf dem Stand von main, alle Minecraft-Versionen
 
@@ -273,13 +273,13 @@ Der Port folgt jetzt DUzzL/Seed-Atlas main (Engine, identisch mit fc2c628) und D
 - Strukturen, Festungen und Spawn je Version;
 - die neuen Funktionen für Geländehöhen und den Nether-Boden (mit und ohne Carving-Maske).
 
-Fixtures liegen pro Version in `seedatlas/tests/fixtures/<version>.txt.gz`. Sie stammen aus der echten Glue-Schicht (`tools/seedatlas-fixtures/build.sh`). `tests/parity.rs` prüft jede Zeile aller 38 Versionen, alle stimmen exakt überein. Die Arbeit lief in getrennten Teilaufgaben (Layer, Klima, Gelände, Strukturpositionen, Strukturprüfungen). Die Regeln dafür stehen in `docs/SEEDATLAS_PORT.md`.
+Fixtures liegen pro Version in `seedatlas/tests/fixtures/<version>.txt.gz`. Sie stammen aus der echten Glue-Schicht (`tools/seedatlas-fixtures/build.sh`). `tests/parity.rs` prüft jede Zeile aller 38 Versionen: Biome, Strukturen und Spawn stimmen exakt überein, Geländehöhen auf eine relative Toleranz von 1e-6. Die Arbeit lief in getrennten Teilaufgaben (Layer, Klima, Gelände, Strukturpositionen, Strukturprüfungen). Die Regeln dafür stehen in `docs/SEEDATLAS_PORT.md`.
 
 ## D-027: Übersichtsbilder für die herausgezoomte Weltkarte
 
 Eine voll erkundete Region braucht im Speicher rund 5 MiB (1024 Kacheln mit je 256 Spalten plus 512 × 512 Pixel). Herausgezoomt hielt die Karte bisher bis zu 15 × 15 Regionen ganz, bei großen Karten also über 1 GiB.
 
-- Ist eine Region auf dem Bildschirm kleiner als 96 GUI-Pixel, bleiben nur die 5 × 5 Regionen um die Kartenmitte ganz im Speicher.
+- Ist eine Region auf dem Bildschirm kleiner als 96 GUI-Pixel, bleiben nur die 5 × 5 Regionen um die Kartenmitte ganz im Speicher. (Bis D-039 hörte die Karte dort nur auf, neue Regionen anzufordern; schon geladene blieben bis zum Regionslimit. Seit D-039 werden alle anderen tatsächlich zu Übersichtsbildern, und ein Speicherbudget begrenzt die ganzen Regionen.)
 - Alle anderen zeichnet die Karte aus Übersichtsbildern: 128 × 128 Pixel (64 KiB), der Mittelwert aus je 4 × 4 Pixeln.
   - Sie entstehen, wenn eine Region aus dem Speicher fällt.
   - Für sichtbare Regionen ohne Bild lädt die Engine bis zu vier Regionsdateien gleichzeitig, zeichnet sie, behält das Bild und gibt die Region wieder frei.
@@ -358,7 +358,7 @@ Bisher fragte Meridian Marker je Region (512 Blöcke) an, nur im Umkreis von 7 R
   | Erzadern, Geoden, Brunnen, Schätze | 0,25 | 8192 |
   | Minenschächte | 0,25 | 12288 |
   | Lager, Dörfer, Schiffswracks, Ruinen, Portale, Pfade, Kammern, Außenposten, Tempel, Hütten, Iglus | 0,125 | 24576 |
-  | Ozeanmonumente (auf Wunsch, auch in der Java-Mod) | 0,0625 | – |
+  | Ozeanmonumente (auf Wunsch; in der Java-Mod nur im offenen PR #12) | 0,0625 | – |
   | Spawn, Festungen, Anwesen, antike Städte, Netherfestungen, Bastionen, End-Städte, Gateways | immer | – |
   | Übrige | 0,03125 | – |
 
@@ -397,7 +397,7 @@ Die Seed-Atlas-Einstellungen waren bisher eine Gruppe im Raster der Minimap-Eins
   - Menüs sind jetzt so breit wie ihr längster Eintrag, gemessen mit den Zeichenbreiten der Spielschrift (`ui::text_width`).
   - „Copy coordinates“ geht über die Bridge (Version 7) in die Zwischenablage des Spiels.
   - Tooltips verschwinden, solange ein Menü offen ist.
-- **Auf Wunsch, in Meridian und in der Java-Mod gleich** (Branch `marker-zoom-and-ancient-city-size` in DUzzL/seed-atlas-xaero):
+- **Auf Wunsch, in Meridian und in der Java-Mod gleich** (Branch `marker-zoom-and-ancient-city-size` in DUzzL/seed-atlas-xaero, PR #12, Commit `007f94f`; Stand des Audits: **nicht gemergt**, `main` (`58c70ff`) zeigt Monumente weiter immer und antike Städte mit 18 Pixeln):
   - Ozeanmonumente erst ab Zoom 0,0625 statt immer, weil sie in Ozeanen dicht stehen.
   - Antike Städte auf der Karte 24 statt 18 Pixel: Der Wardenkopf ist breit und dunkel und wirkte neben den Block-Icons klein.
   - Die Markerliste in den Einstellungen behält 18 Pixel.
@@ -451,7 +451,7 @@ Auf Wunsch, mit Vorrang für die Leistung: Weit draußen genügt ein ungefähres
 - **Landmarken verschwinden weit draußen:**
   - Antike Städte unter 0,0625x, wie Monumente.
   - Waldanwesen und Strongholds unter 0,03125x.
-  - Nether- und End-Landmarken sowie der Spawn bleiben immer.
+  - Nether- und End-Landmarken sowie der Spawn bleiben immer. (Das hielt das Scan-Budget nicht ein; seit D-039 gelten für Festungen, Bastionen, End-Städte, End-Gateways und End-Schiffe Radiusgrenzen, siehe dort.)
 - **Kein Zusammenlegen, nirgends:** Bisher prüfte ein Scan mit mehr Kandidaten als dem Limit nur jede k-te Zelle und dünnte die Treffer auf ein Raster aus (D-031). Nahe Marker fielen dabei weg, das wirkte wie Zusammenlegen.
   - Jetzt gilt „alles oder nichts“ (`Atlas::scan_complete`).
   - Der Scan prüft jede Zelle. Passt die Zahl der Zellen nicht ins Budget (2²⁰ für Arten pro Chunk oder Erzader-Zelle, 2¹⁵ für die übrigen) oder findet er mehr als 8192 Treffer, bleibt die Art bei diesem Zoom ganz weg.
@@ -495,3 +495,98 @@ Auf Wunsch, mit Vorrang für die Leistung: Weit draußen genügt ein ungefähres
   - Die Liste zeigt die Wegpunkte der gewählten Stelle; neue und bearbeitete Wegpunkte werden dort gespeichert (bei einer anderen Welt sofort in deren Datei).
   - Teleportieren und Teilen gehen nur in der Welt, in der man ist.
   - Beim Schließen der Screens springt die Auswahl auf „auto“ zurück.
+
+## D-039: Korrekturen aus dem Audit (`docs/AUDIT_REPORT.md`)
+
+Das Audit vom 2026-11-07 (Commit `92c0fd5`) fand 42 Punkte (AUD-001 bis AUD-042). Was dabei bewusst entschieden wurde:
+
+**Wegpunkte**
+
+- **Todespunkte (AUD-001):** „Erreichte Todespunkte löschen“ wirkt nur im Spiel (nicht auf dem Todesbildschirm) und erst, nachdem der Spieler seit dem Tod einmal weiter als 4 Blöcke vom Punkt weg war. Vorher löschte der nächste Frame den gerade gesetzten Punkt.
+- **Unbekannte Höhe (AUD-007):** Wegpunkte können eine unbekannte Höhe haben (`y_unknown`). Teleport-Befehle senden dann `~` für `{y}`; Teilen, Import und Editor zeigen `~`. „Hierher teleportieren“, B auf der Karte und Strukturwegpunkte nutzen das statt Y 64. Im Nether gilt eine Spalte, deren Oberkante das Bedrock-Dach ist (Y ≥ 127), als unbekannt. Ingame-Markierungen ohne Höhe stehen auf Augenhöhe.
+- **Teleport (AUD-004, AUD-035):** Ein Wegpunkt einer anderen Dimension nutzt das Dimensionsformat der Weltkarte, einer mit Blickrichtung das Rotationsformat. In eine andere Welt bleibt der Teleport gesperrt.
+- **Geteilte Wegpunkte (AUD-008):** Eine Chatzeile im Teilen-Format wird nicht mehr automatisch übernommen. Sie bekommt einen anklickbaren Link „[Add waypoint]“ (`/meridian waypoint accept <n>`); die letzten 8 bleiben abrufbar (`/meridian waypoint shared`). Namen höchstens 32 Zeichen, höchstens 16 temporäre Wegpunkte pro Dimension.
+- **Temporäre Wegpunkte** sind wie in O2 global und werden nie gespeichert.
+- **Sets (AUD-005):** Anlegen, Umbenennen und Löschen in der Liste und mit `/meridian waypoint set [list | new | use | rename | delete]`. Das letzte Set bleibt als leeres Standardset.
+- **Liste (AUD-024):** Sortierung (neueste, Name, Entfernung, Initialen; `waypoints.sort`), Entfernungsspalte für die eigene Welt und Dimension, Mehrfachauswahl mit Umschalt- und Strg/Cmd-Klick.
+- **Weltkarte (AUD-011, AUD-026):** Aktionen und Editor arbeiten in der gezeigten Dimension. Die Wegpunkte der Partnerdimension (Oberwelt ↔ Nether) erscheinen abgeblendet im Maßstab 1:8. Die Werkzeugleiste hat einen Dimensionsknopf.
+- **Tod:** Statt „Set beim Tod wechseln“ (Meridian hat keine feste manuelle Setwahl) springen die Wegpunkt-Screens beim Tod auf die eigene Welt und Dimension zurück.
+- **Tasten (AUD-034):** `quick_confirm` bestätigt Editor, Setnamen, Löschabfragen und „Reset completed“. Sechs Tasten ohne Funktion tragen „(not available)“ im Namen.
+
+**Speichern und Laden**
+
+- **Unlesbare Dateien werden nie überschrieben (AUD-003, AUD-015):** Ein gemeinsamer Lader (`persist::load_or_set_aside`) gilt für Regionen, `waypoints.json`, `meridian.toml`, `seeds.toml`, `maps.toml` und `completed.json`.
+  - Fehlt die Datei: Standardwerte.
+  - Ist sie kaputt: Sie wird zu `<name>.broken.<unix-zeit>` umbenannt, dann frisch begonnen.
+  - Stammt sie von einem neueren Meridian oder bleibt sie nach drei Versuchen unlesbar: Sie bleibt unberührt, und der Speicher wird in dieser Sitzung nie geschrieben. Regionen werden dann trotzdem angezeigt.
+- **Beenden (AUD-023):** Beenden und Trennen warten bis zu 5 s auf offene Speicher-Jobs (`flush_and_wait`).
+- **Reihenfolge (AUD-037):** Laden wartet auf frühere Speicher-Jobs derselben Datei. Temporäre Dateien heißen nach Prozess und Zähler; der Ordner wird unter Unix mit `fsync` gesichert.
+- **Zweites Spiel (WM-20):** Eine Sperrdatei `meridian.lock` mit Betriebssystem-Sperre; ein zweites Spiel speichert keine Regionen und zeigt einen Hinweis. Wegpunkte, Seeds und Einstellungen sind davon nicht erfasst.
+- **Kartennamen** werden ohne Groß-/Kleinschreibung verglichen. Umbenennen nimmt Seeds, erledigte Strukturen und Spielversionen mit.
+
+**Weltkarte und Engine**
+
+- **Speicherbudget (AUD-009):** Neben `max_loaded_regions` gilt `world_map.max_region_mib` (Standard 512 MiB). Weit herausgezoomt werden alle Regionen außerhalb der 5 × 5 um die Kartenmitte und der 3 × 3 um den Spieler zu Übersichtsbildern. D-027 stimmt damit. GPU-Texturen werden beim Trennen und beim Kartenwechsel verworfen.
+- **Höhlenebenen (AUD-012):** Chunk-Antworten tragen ihren Lesemodus; Antworten für eine andere Ebene werden verworfen. Die Bridge führt Anfragen nach Position und Modus (Version 11).
+- **Revisionen (AUD-013)** kommen aus einem prozessweiten Zähler; der Texturschlüssel enthält den Kartennamen.
+- **Spawn auf Servern (AUD-022):** Horizon meldet nicht, wann ein Server einen neuen Spawn angekündigt hat. Nach dem Laden einer Ebene gilt ein Spawn erst, wenn ein anderer gemeldet wird oder 5 s vergangen sind (`SPAWN_GRACE`). Bis dahin liest die Engine weiter, speichert aber nichts. Fällt die Wahl auf eine andere Karte, wird das Gelesene verworfen und neu gelesen.
+- **Zeit statt Frames (AUD-038):** Das Anfrage-Timeout sind 10 s, `chunk_reads_per_tick` gilt pro 50 ms Wanduhrzeit (nicht Spielzeit, die unter `/tick freeze` steht). Standard jetzt 64 (rund 1280 Chunks/s); vorher waren es 16 pro Frame. `frame_budget_us` und das 1,5-ms-Budget der Bridge bleiben bewusst pro Frame.
+- **Threads (AUD-039):** Kartenworker, Nächste-Suche und PNG-Export laufen mit niedriger Priorität. Die Ansicht einer anderen Dimension hat höchstens 2 Worker und wird auf einem eigenen Thread abgebaut.
+
+**Minimap, Radar, Einstellungen**
+
+- **Minimap-Bild (AUD-006):** Die Textur läuft ringförmig um und bewegt sich in Zellen zu 32 × 32 Texeln. Beim Gehen werden nur hereinrollende Zellen zusammengesetzt und als Teilrechtecke hochgeladen, bei neu gezeichneten Regionen nur deren Zellen. Herausgezoomt deckt ein Texel 2 bis 16 Blöcke (etwa ein physischer Pixel). Schleimchunks werden pro Chunk geprüft. Gemessen (Release, vergrößerte Minimap): ~1 µs pro Frame beim Gehen statt 3,4 ms plus 9 MB Upload je Blockschritt. Im Spiel noch nicht gemessen.
+- **Radar (AUD-016):** Filtern, auf die Karte beschränken, nach Entfernung sortieren, kappen, dann nach Zeichenreihenfolge sortieren. Über dem Limit bleiben also die nächsten Entities. Minimap und Weltkarte teilen den Filter (Höhenlimit, Ausblendung, Limit, Reihenfolge, Punktgröße).
+- **Glatte Entity-Punkte (AUD-010):** Die Bridge liefert neben der interpolierten auch die Tick-Position; „Smooth Entity Dots“ aus zeigt die Tick-Position.
+- **Biom-Übergänge (AUD-010):** „Biome Blending“ mittelt Gras-, Laub- und Wasserfarben über ein 5 × 5-Fenster, aber nur innerhalb eines Chunks, weil ein Chunk-Abzug seine Nachbarn nicht kennt. Grenzen auf einer Chunkkante bleiben hart. Umschalten liest geladene Chunks neu.
+- **Höhlentiefe** wirkt: Boden tiefer als Ebene − Tiefe bleibt unerkundet.
+- **Entfernte Felder:** `minimap.frame`, `share_world_map_tiles`, `minimap.terrain` und `world_map.cave` taten nichts und sind entfernt; alte Dateien laden weiter. „Lighting“ unter Gelände gilt für beide Karten; die doppelte Zeile „Map Lighting“ entfällt.
+- **Lesbare Höhlenkarten (AUD-027):** Standard jetzt aus, wie O2. Bereits gespeicherte Dateien enthalten den Wert und behalten ihn.
+- **Einstellungen (AUD-021, AUD-025):** Schieberegler wirken sofort und speichern beim Loslassen. Neues Textfeld (Enter oder Klick daneben übernimmt, Escape verwirft) für die Teleport-Formate (müssen mit `/` beginnen), maximale Entities, km-Schwelle und Höhlen-Dimensionen. Dazu Schieberegler und Wertknöpfe für Deckkräfte, Skalen, Lichtminimum, Höhlentiefe und die Leistungsbudgets.
+
+**Seed Atlas**
+
+- **Erzader-Marker (AUD-002)** werden nach Marker-ID zusammengeführt, nicht nach Trefferart, und nur, wenn ein Scan fertig wird oder sich die sichtbaren Arten ändern.
+- **Seed-Ebene über erkundetem Gelände (AUD-010, AUD-017):** Ein zweiter Durchgang zeichnet die Seed-Kacheln über das Gelände: für „Over Explored Terrain“ mit der Deckkraft der Ebene, für die Biom-Hervorhebung deckend wie in der Fabric-Version.
+- **Prefetch (AUD-010):** ein Ring von 0 bis 3 Kacheln um den Spieler in der feinsten Stufe, nur bei offener Karte in der eigenen Dimension, hinter allem, was die Ansicht braucht.
+- **Cache (AUD-030, ändert D-035):** Kacheln und ihre Texturen bleiben 45 s nach der letzten Anfrage, höchstens 64 MB (die am längsten unbenutzten gehen zuerst). Die Caches des Gelände-Samplers werden mit den Kacheln freigegeben.
+- **Detailgrenze (AUD-019, ändert D-035):** „≥ 1 Pixel pro Block“ gilt nur für die Oberwelt-Oberfläche; Nether-Boden und End-Höhen werden bei jedem Zoom verfeinert.
+- **Scan-Bereich (AUD-018):** in Blöcken aus der Kartentransformation statt `Fensterpixel / Zoom`.
+- **Sichtweite der Marker (AUD-020, ändert D-036):** `visible_at_zoom` ist die einzige Quelle. Die Zellbudgets (2²² für günstige Arten, sonst 2¹⁷) schneiden keine Art mehr vor ihrer Grenze ab; die Grenzen sind so gewählt, dass ein typischer Seed unter 8192 Treffern bleibt (gemessen mit Seed 42):
+
+  | Art | Sichtbar |
+  |---|---|
+  | Schleimchunks | ab 0,5x, r ≤ 2048 |
+  | Geoden | ab 0,25x, r ≤ 3072 |
+  | Erzadern | ab 0,25x, r ≤ 6144 |
+  | Brunnen, Schatz | ab 0,25x, r ≤ 8192 |
+  | Minen | ab 0,25x, r ≤ 10240 |
+  | Trial Chambers | ab 0,125x, r ≤ 20480 |
+  | Dörfer, Ruinen und die anderen mittleren Arten | ab 0,125x, r ≤ 24576 |
+  | Monumente, antike Städte | ab 0,0625x |
+  | Strongholds, Anwesen | ab 0,03125x |
+  | Festungen, Bastionen | r ≤ 24576 |
+  | End-Gateways | r ≤ 14336 |
+  | End-Städte | r ≤ 40960 |
+  | End-Schiffe | ab 0,03125x, r ≤ 40960 |
+  | Spawn | immer |
+
+- **Kleinster Zoom:** mit Seed-Ebene 1/512 wie in der Fabric-Version.
+- **Y-Werte:** Oberwelt-, Nether- und End-Y sind Textfelder (−2048 bis 2048) wie in der Fabric-Version, statt 9 Voreinstellungen.
+- **Spielversion pro Welt** liegt jetzt in `seeds.toml` (`[versions]`) statt im Einstellungsprofil; alte Einträge werden beim Start übernommen.
+- **Fabric-Details (AUD-036):** Spawn als Schätzung mit „(approx.)“; einzeiliger Marker-Tooltip mit Lagerbiom und `Y=?`; Biomnamen der gewählten Version; Ozeanruinen-Icon mit Rahmen; die Wahl eines Bioms schaltet die Hervorhebung ein; Ergebnisse der Nächste-Suche verfallen, wenn der Screen verlassen oder die Welt gewechselt wurde; „Copy coordinates“ mit Y; „Create waypoint“ öffnet den Editor.
+- **Worker** starten erst mit dem ersten Auftrag, laufen also nicht bei abgeschaltetem Seed Atlas. Die Nether-Höhlenmasken werden außerhalb der globalen Sperre geschnitzt.
+- **Fixtures (AUD-029):** zusätzlich Schrittweiten 32/128/512, je Dimension eine ganze 128 × 128-Kachel und Höhenschritte 8 und 32 (End 8). Alle bisherigen Zeilen sind unverändert.
+
+**Bisher nicht festgehalten (AUD-040), jetzt dokumentiert**
+
+- Im Einzelspieler kommt „Large Biomes“ aus dem Welt-Preset statt aus der Option; die Option gilt für Seeds, die von Hand eingegeben werden.
+- Ein von Hand eingegebener Seed hat im Einzelspieler Vorrang vor dem erkannten (die Fabric-Version setzt bei jedem Laden den erkannten wieder ein). So lässt sich ein anderer Seed über eine Welt legen.
+- Automatische Seed-Atlas-Worker: `clamp(Kerne − 2, 1, 4)` in einem Pool, mit niedriger Priorität (Fabric: `clamp(Kerne − 2, 2, 8)` plus ein Strukturpool), wegen der Last aus D-034.
+
+**Nicht umgesetzt**
+
+- `/seedatlas` ohne Tab-Vervollständigung: Horizons `tab_complete` gilt nur serverseitig für LAN-Gäste.
+- Antworten von `/seedatlas` bleiben in einer Zeile der Aktionsleiste, weil Horizon keine lokale Chatzeile ausgeben kann.
+- Die maximale Wegpunkt-Entfernung wird nicht nach Dimension skaliert (O2 `waypoint_max_distance_dimension_scale`): Was die Option genau tut, lässt sich aus erlaubten Quellen nicht sicher ablesen, und beim Standard 0 wirkt sie nicht.
+- Offene O3-Beobachtungen (D-012, KEYBINDS „Offene Beobachtungen“) bleiben offen; sie brauchen die Referenz im Spiel.

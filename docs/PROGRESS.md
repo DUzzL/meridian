@@ -53,7 +53,7 @@
   - `geom`, `tile`, `region`: Datenmodell Chunk → Tile → Region; inkrementelles Neuzeichnen nur der geänderten Chunks und ihrer Süd-/Ost-Nachbarn, auch über Regionsgrenzen.
   - `color`: Vanilla- und Texturfarben, Biom-Tints, drei Hangmodi, Höhentiefe, Wasser nach Tiefe, Tag/Nacht- und Blocklicht.
   - `codec`: Regionsdateien, versioniert, gegen kaputte Dateien abgesichert.
-  - `worker`: Thread-Pool; Panics in Jobs stoppen ihn nicht; beim Beenden werden offene Speicher-Jobs abgearbeitet.
+  - `worker`: Thread-Pool; Panics in Jobs stoppen ihn nicht; beim Beenden werden offene Speicher-Jobs abgearbeitet (seit D-039 wartet Meridian beim Beenden und Trennen bis zu 5 s darauf, statt sich darauf zu verlassen, dass Horizon die Hooks freigibt).
   - `engine`:
     - Chunks lesen: nächste zuerst, begrenzt pro Tick;
     - Tiles werden auf Workern gebaut;
@@ -270,9 +270,9 @@
   - 25 Strukturtypen mit Biom- und Geländeprüfung, Varianten und Lagern mit Spezialbeute;
   - End-Städte mit Inselhöhe und Schiffen, End-Gateways (fest und gestreut), End-Inseln;
   - Festungen, Spawn, Schleimchunks, Erzadern.
-- Parität: Fixtures direkt aus der nativen Schnittstelle der Fabric-Version (`tools/seedatlas-fixtures/build.sh`). Alle Werte stimmen exakt:
+- Parität: Fixtures direkt aus der nativen Schnittstelle der Fabric-Version (`tools/seedatlas-fixtures/build.sh`). Alle Werte stimmen exakt, Geländehöhen auf eine relative Toleranz von 1e-6:
   - Biome: über 50.000 Proben;
-  - Strukturen: jeder Treffer für fünf Seeds.
+  - Strukturen: jeder Treffer für drei Seeds.
 - Einbindung in Meridian:
   - Seed im Einzelspieler automatisch aus der Welt (Horizons `save::Level`), sonst `/seedatlas seed <seed>`. Gespeichert wird pro Welt bzw. Server lokal in `seeds.toml`, der Seed verlässt den Client nie.
   - `/seedatlas seed|clear|status|settings`.
@@ -493,7 +493,7 @@ Neue Tests:
 ### Phase 6: Strukturmenü, Monumente, antike Städte (D-033)
 
 - Rechtsklick auf eine Struktur öffnet ihr eigenes Menü wie in der Fabric-Version; Menüs passen sich der Textbreite an.
-- Monumente verschwinden unter 0,0625x; antike Städte sind auf der Karte größer. Beides auch in der Java-Mod (Commit `007f94f`, `./gradlew check` grün, PR DUzzL/seed-atlas-xaero#12).
+- Monumente verschwinden unter 0,0625x; antike Städte sind auf der Karte größer. Beides auch in der Java-Mod (Commit `007f94f`, `./gradlew check` grün), dort aber nur im noch offenen PR DUzzL/seed-atlas-xaero#12, nicht auf `main`.
 - **Im Spiel geprüft:** Strukturmenü auf einem Ruinenportal mit passender Breite.
 - **Nicht geprüft:** „Copy coordinates“, weil der Test sonst die Zwischenablage überschrieben hätte; die Java-Mod im Spiel.
 
@@ -563,3 +563,19 @@ Neue Tests:
 - **Neue Tests:** `waypoint_world_and_dimension_dropdowns`, `waypoint_places_on_disk`.
 
 **Build und Tests**: 197 Kern-Tests grün; Clippy sauber, Adapter-Check grün; Launcher-Build `native-66f3981-2096c8af0689`.
+
+## Audit-Korrekturen (D-039)
+
+Das Audit (`docs/AUDIT_REPORT.md`, Commit `92c0fd5`) fand 6 hohe, 23 mittlere und 13 niedrige Punkte. Alle sind bearbeitet; was bewusst entschieden wurde und was offen bleibt, steht in D-039.
+
+- **Behoben, die hohen Punkte:**
+  - Todespunkte bleiben, bis man einmal weg war und zurückkommt (AUD-001).
+  - Erzader-Marker vervielfachen sich nicht mehr (AUD-002).
+  - Unlesbare Dateien werden nie mehr überschrieben (AUD-003, AUD-015).
+  - Teleport zu Wegpunkten anderer Dimensionen nutzt das Dimensionsformat (AUD-004).
+  - Wegpunkt-Sets lassen sich anlegen, umbenennen und löschen (AUD-005).
+  - Die Minimap setzt beim Gehen nur hereinrollende Zellen neu zusammen (AUD-006).
+- **Bridge:** Version 11 (Chunk-Abzüge mit Lesemodus, Anfragen nach Position und Modus, Tick-Positionen der Entities, gemeinsame Entity-Liste).
+- **Tests:** Kern 258 (dazu 3 ignorierte Messungen), Host 2, Paritätstest aller 38 Versionen mit den erweiterten Fixtures. Neu getestet sind unter anderem Todespunkt-Ablauf, Teleport-Formate, geteilte Wegpunkte, Sets, Sortierung, kaputte und neuere Dateien jeder Ablage, `flush_and_wait`, Speicherbudget, Spawn-Wache, Kartennamen, Sperrdatei, Marker-Stabilität, festhängende Seed-Atlas-Aufträge, Verfeinerung in Nether und End, Scan-Grenzen pro Art, Radar-Auswahl, Textfelder und das Minimap-Bild. Die schwachen Engine-Tests aus AUD-029 prüfen jetzt Inhalte.
+- **Nicht im Spiel geprüft:** Die Korrekturen sind mit Unit-Tests und dem Adapter-Build geprüft, aber noch nicht in einem Testspiel. Offen sind vor allem: Bildrate der vergrößerten Minimap beim Sprinten (AUD-006), Erzader-Marker über eine Minute (AUD-002), die neueren-Version-Datei aus AUD-003, der „[Add waypoint]“-Link im Chat, Teleports in andere Dimensionen, das Verhalten der Spawn-Wache auf einem Servernetz und die neuen Sichtweiten der Marker (AUD-020).
+- **Bekannte Grenzen:** keine Tab-Vervollständigung für `/seedatlas`, Antworten in einer Zeile der Aktionsleiste, keine Dimensionsskalierung der maximalen Wegpunkt-Entfernung, Biom-Übergänge nur innerhalb eines Chunks, Sperrdatei nur für Regionen (siehe D-039).

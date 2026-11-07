@@ -338,9 +338,9 @@ fn rows(c: Category) -> Vec<Row> {
             row(SeedAtlas, "World & Seed", "The seed, game version and world type of this world or server.", Button("sa:world", |_| "Change...".into())),
             opt(SeedAtlas, "World", "Game version of the open world (the generation differs between versions)."),
             opt(SeedAtlas, "World type", "Normal or Large Biomes."),
-            opt(SeedAtlas, "Overworld Y", "Height the Overworld's biomes are taken at."),
-            opt(SeedAtlas, "Nether Y", "Height the Nether's biomes are taken at."),
-            opt(SeedAtlas, "End Y", "Height the End's biomes are taken at."),
+            row(SeedAtlas, "Overworld Y", "Height the Overworld's biomes are taken at (-2048 to 2048).", Text(|s| s.seed_atlas.overworld_y.to_string(), |s, t| number(t, -2048..=2048).map(|v| s.seed_atlas.overworld_y = v).is_some())),
+            row(SeedAtlas, "Nether Y", "Height the Nether's biomes are taken at (-2048 to 2048).", Text(|s| s.seed_atlas.nether_y.to_string(), |s, t| number(t, -2048..=2048).map(|v| s.seed_atlas.nether_y = v).is_some())),
+            row(SeedAtlas, "End Y", "Height the End's biomes are taken at (-2048 to 2048).", Text(|s| s.seed_atlas.end_y.to_string(), |s, t| number(t, -2048..=2048).map(|v| s.seed_atlas.end_y = v).is_some())),
             opt(SeedAtlas, "Biome highlighting", "Dims every biome but the chosen ones, over explored terrain too."),
             row(SeedAtlas, "Highlighted Biomes", "Chooses the biomes biome highlighting keeps bright.", Button("sa:highlight", |_| "Choose...".into())),
             row(SeedAtlas, "Nearest Biome", "Finds the closest biome of a kind and shows it on the map.", Button("sa:biome", |_| "Find...".into())),
@@ -1099,6 +1099,10 @@ mod tests {
                     "Faces While Tab Held",
                     "Completed",
                     "Layer opacity",
+                    // Typed in text rows (any height, not the presets).
+                    "Overworld Y",
+                    "Nether Y",
+                    "End Y",
                 ]
                 .contains(l)
             })
@@ -1262,6 +1266,21 @@ mod tests {
             ["minecraft:overworld", "minecraft:the_nether", "mymod:deep"]
         );
         assert_eq!(dimension_list(&dims), "overworld, the_nether, mymod:deep");
+        // Seed Atlas heights take any Y in range, also below zero.
+        let mut sa = SettingsScreen::at(Category::SeedAtlas);
+        let i = rows(Category::SeedAtlas)
+            .iter()
+            .position(|r| r.label == "Nether Y")
+            .unwrap();
+        let field = format!("row:{i}");
+        sa.click(Some(&field), [0.0, 0.0], false, &mut e);
+        for _ in 0..10 {
+            sa.key("key.keyboard.backspace", &mut e);
+        }
+        "-40".chars().for_each(|c| sa.typed(c));
+        sa.key("key.keyboard.enter", &mut e);
+        assert_eq!(e.settings.seed_atlas.nether_y, -40);
+        assert!(number::<i32>("4096", -2048..=2048).is_none());
         assert_eq!(
             parse_dimensions(" ").unwrap(),
             Vec::<String>::new(),

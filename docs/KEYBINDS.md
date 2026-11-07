@@ -50,7 +50,7 @@ Meridian übernimmt die Standardbelegung der beiden Referenz-Mods 1:1, damit Ums
 | `meridian.worldmap.server_settings` | Server-Einstellungen Weltkarte | ungebunden | `gui.xaero_world_map_server_settings` |
 | `meridian.worldmap.zoom_in` | Karte hineinzoomen (Tastatur-Alternative zum Mausrad) | ungebunden | `gui.xaero_map_zoom_in` |
 | `meridian.worldmap.zoom_out` | Karte herauszoomen | ungebunden | `gui.xaero_map_zoom_out` |
-| `meridian.quick_confirm` | Schnellbestätigung in Dialogen (z. B. Kartenauswahl) | **Rechte Umschalttaste** `key.keyboard.right.shift` | `gui.xaero_quick_confirm` |
+| `meridian.quick_confirm` | Schnellbestätigung in Dialogen: Wegpunkt-Editor, Setname, Löschabfragen, „Reset completed“ (D-039) | **Rechte Umschalttaste** `key.keyboard.right.shift` | `gui.xaero_quick_confirm` |
 | `meridian.worldmap.toggle_dimension` | Dimension in der Karte wechseln | ungebunden | `gui.xaero_toggle_dimension` |
 
 ## Seed Atlas
@@ -69,6 +69,8 @@ Diese Bedienung steht nicht in der Steuerungsliste. Laut S3/S4 zeigt die Vollbil
 | Weltkarte | Symbol unten links: Kartenauswahl und Höhlenmodus; Symbol unten rechts: Wegpunktmenü | S3, S4 | übernommen |
 | Weltkarte | Tasten der Steuerungsliste wirken auch in der Karte (z. B. **B** setzt den Wegpunkt am Cursor, **M** schließt) | — | **im Spiel zu beobachten** |
 | Wegpunktliste | Tasten im Menü | — | **im Spiel zu beobachten** |
+
+Ohne Funktion in Meridian (in der Steuerung mit „(not available)“ markiert, D-039): `players.alt_list`, `players.tracked_map`, `players.tracked_world`, `overlay.claims`, `server_settings`, `worldmap.server_settings`. Sie bleiben registriert, damit die Belegungen der Referenz erhalten bleiben.
 
 ## Offene Beobachtungen im Spiel
 

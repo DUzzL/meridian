@@ -29,15 +29,15 @@ The bundle targets the Horizon revision named in `mixins/meridian/horizon-mixin.
 
 Everything else (zoom keys, waypoint sets, radar, cave mode, overlays, dimension switch on the map) is available and unbound by default; see `docs/KEYBINDS.md`. Keys are changed in the game's controls screen.
 
-On the world map: drag to pan, scroll to zoom, arrow keys or WASD move, Space centres on you, right click opens the menu (waypoints, teleport to a spot or a player, share, PNG export, Seed Atlas structure actions). The "?" button on the right lists the controls.
+On the world map: drag to pan, scroll to zoom, arrow keys or WASD move, Space centres on you, right click opens the menu (waypoints, teleport to a spot or a player, share, PNG export, Seed Atlas structure actions). The "?" button in the toolbar on the right lists the controls.
 
-Waypoints: `/meridian waypoint export` writes all of a world's waypoints to a JSON file in `exports/`; `/meridian waypoint import <file or folder>` reads such a file, or the plain-text waypoint files other map mods keep (a world folder with `dim%0`, `dim%-1`, … inside).
+Waypoints: `/meridian waypoint export` writes all of a world's waypoints to a JSON file in `exports/`; `/meridian waypoint import <file or folder>` reads such a file, or the plain-text waypoint files other map mods keep (a world folder with `dim%0`, `dim%-1`, … inside). Waypoint sets are created, renamed and deleted in the waypoint list or with `/meridian waypoint set list | new <name> | use <name> | rename <new name> | delete [name]`.
 
 On servers that show several worlds behind one address, Meridian keeps one map per world spawn; `/meridian map list | use <name> | new <name> | rename <old> <new>` picks and names maps by hand ("Multiplayer Maps" in the world map settings).
 
-Radar: `/meridian radar hide <entity id>` (and `show`, `hidden`) leaves single kinds out; "Fair Play" in the miscellaneous settings switches the radar and cave maps off.
+Radar: `/meridian radar hide <entity id>` (and `show`, `hidden`) leaves single kinds out; "Fair Play" in the General settings category switches the radar and cave maps off.
 
-Settings profiles are switched, added, renamed and deleted on the main settings page; "Change Position" lets you drag the minimap where you want it.
+Settings profiles are switched, added, renamed and deleted in the General settings category; "Minimap Position" there lets you drag the minimap where you want it.
 
 ## Seed Atlas
 
@@ -49,14 +49,14 @@ Seed Atlas is on by default and can be switched off in its settings. In singlepl
 - `/seedatlas version [<version>|auto]`: the Minecraft version the world was generated with (1.1 to 26.3)
 - `/seedatlas status`, `/seedatlas settings`
 
-On the world map, "SA" (bottom left) switches the seed layer, "M" and "SA" (top left) open the map and Seed Atlas settings. The seed layer fills unexplored areas with the seed's biomes and, from 1.18, its terrain; structure markers (off by default) show where structures generate, with a right-click menu to mark them completed or set a waypoint. The settings also offer nearest biome and structure search, biome highlighting and the world generation version.
+On the world map, the toolbar on the right edge switches the seed layer and opens the Seed Atlas settings (both only while Seed Atlas is on), next to zoom, centring, waypoints, settings and the controls. The seed layer fills unexplored areas with the seed's biomes and, from 1.18, its terrain; structure markers (off by default) show where structures generate, with a right-click menu to mark them completed or set a waypoint. The settings also offer nearest biome and structure search, biome highlighting and the world generation version.
 
 The engine is a Rust port of the Seed Atlas engine and the Seed Atlas Fabric mod's native interface; parity tests compare it with the Fabric version for every Minecraft version (`mixins/meridian/engine/seedatlas/tests`).
 
 ## Coming from other map mods
 
 - Default keys and most options follow the common conventions of popular minimap and world map mods, so the keys you know work.
-- Waypoints, map data and settings are Meridian's own (`<instance>/horizon-mods/.horizon-mod-data/meridian`, settings in the game's config folder). Waypoints shared in chat in the usual text form are picked up as temporary waypoints.
+- Waypoints, map data and settings are Meridian's own (`<instance>/horizon-mods/.horizon-mod-data/meridian`, settings in the game's config folder). Waypoints shared in chat in the usual text form get a clickable "[Add waypoint]" link that adds them as temporary waypoints (`/meridian waypoint shared` lists the last ones, `/meridian waypoint accept [n]` adds one).
 - Seed Atlas users: the commands, options, marker types and defaults match the Fabric version 2.0.
 
 ## Development

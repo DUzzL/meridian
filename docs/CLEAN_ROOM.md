@@ -23,7 +23,7 @@ Meridian ist eine Neuentwicklung. Das Verhalten der Referenz-Mods (Minimap und W
 | O3 | Beobachtung im laufenden Spiel: Bildschirmaufnahmen der Prism-Instanz (Minimap, Wegpunkt in Welt und Minimap, B-Editor, U-Liste, Y-Einstellungen, M-Weltkarte) | eigene Beobachtung; Aufnahmen nur lokal, nicht im Repo | 2026-11-06 |
 | SA | `DUzzL/seed-atlas-xaero` (lokal, Commit `df4e212`), `config/seedatlas_xaero.json` | eigener Code des Auftraggebers | 2026-11-06 |
 
-**Zu O2:** Diese Dateien sind keine Jar-Inhalte, sondern Laufzeitausgabe des Spiels im Konfigurationsordner des Nutzers. Sie sind dafür gedacht, dass der Nutzer sie liest und bearbeitet. Verwendet werden nur Optionsnamen, Standardwerte und die Struktur der Radar-Kategorien, um den Funktionsumfang festzustellen. Meridian verwendet eigene Schlüsselnamen und ein eigenes Dateiformat.
+**Zu O2:** Diese Dateien sind keine Jar-Inhalte, sondern Laufzeitausgabe des Spiels im Konfigurationsordner des Nutzers. Sie sind dafür gedacht, dass der Nutzer sie liest und bearbeitet. Verwendet werden nur Optionsnamen, Standardwerte und die Struktur der Radar-Kategorien, um den Funktionsumfang festzustellen. Meridian verwendet ein eigenes Dateiformat (TOML/JSON) und überwiegend eigene Schlüsselnamen. 15 Schlüssel sind schlichte beschreibende Namen, die zufällig oder bewusst wie die O2-Optionsnamen heißen (z. B. `deathpoints`, `footsteps`, `lighting`, `block_colors`, `max_loaded_regions`); sie stammen aus einer erlaubten Quelle (O2) und sind kein übernommener Code.
 
 **Nicht verwendet:** die Jars `xaerominimap-*.jar` und `xaeroworldmap-*.jar` und deren Inhalte. `mods/.index` wurde nicht geöffnet; gelesen wurden nur die Dateinamen in `mods/`.
 
