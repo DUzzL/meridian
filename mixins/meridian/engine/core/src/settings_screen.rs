@@ -554,7 +554,7 @@ fn rows(c: Category) -> Vec<Row> {
             opt(
                 SeedAtlas,
                 "Biome highlighting",
-                "Dims every biome but the chosen ones.",
+                "Dims every biome but the chosen ones, over explored terrain too.",
             ),
             row(
                 SeedAtlas,
@@ -626,7 +626,7 @@ fn rows(c: Category) -> Vec<Row> {
             opt(
                 Performance,
                 "Background prefetch",
-                "Computes the map around the view in advance while the world map is open.",
+                "Computes the map around the player in advance while the world map is open.",
             ),
             opt(
                 Performance,

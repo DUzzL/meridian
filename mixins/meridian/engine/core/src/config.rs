@@ -456,7 +456,11 @@ pub struct SeedAtlasSettings {
     /// Also draws the seed map over explored terrain.
     pub overlay_explored: bool,
     /// Minecraft version chosen per world or server (`persist::source_key`);
-    /// a missing context follows the game ("auto", 26.3 in Horizon).
+    /// a missing context follows the game ("auto", 26.3 in Horizon). Stored
+    /// in the seed book, the same in every profile (see
+    /// `seedatlas_state::mirror_versions`); only read here from settings
+    /// files of older releases, to move it there.
+    #[serde(skip_serializing)]
     pub game_versions: std::collections::BTreeMap<String, String>,
     /// The open world or server's key, so the settings screen can show its
     /// version. Not stored; the adapter sets it when the world changes.

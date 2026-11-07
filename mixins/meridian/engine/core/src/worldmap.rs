@@ -19,6 +19,9 @@ pub const MAX_ZOOM: f64 = 50.0;
 /// The limits with "unlimited zoom" on (the draw radius still caps how much
 /// is drawn when zoomed far out).
 pub const MIN_ZOOM_UNLIMITED: f64 = 1.0 / 64.0;
+/// How far out the map goes while it shows the seed layer, which has
+/// something to show there (the Fabric version's 1/512).
+pub const MIN_ZOOM_SEED_LAYER: f64 = 1.0 / 512.0;
 pub const MAX_ZOOM_UNLIMITED: f64 = 1000.0;
 /// How long the opening animation runs, seconds.
 const OPENING_SECONDS: f32 = 0.25;
@@ -179,10 +182,13 @@ impl WorldMap {
         }
     }
 
-    /// Lifts the zoom limits in either direction (the world map settings).
-    pub fn set_unlimited(&mut self, zoom_in: bool, zoom_out: bool) {
+    /// Lifts the zoom limits in either direction (the world map settings);
+    /// the seed layer, when shown, lets the map zoom out further still.
+    pub fn set_unlimited(&mut self, zoom_in: bool, zoom_out: bool, seed_layer: bool) {
         self.limits = (
-            if zoom_out {
+            if seed_layer {
+                MIN_ZOOM_SEED_LAYER
+            } else if zoom_out {
                 MIN_ZOOM_UNLIMITED
             } else {
                 MIN_ZOOM
@@ -1090,7 +1096,7 @@ mod tests {
             m.scroll(-5.0, [500.0, 300.0], GUI, 1.0);
         }
         assert_eq!(m.zoom, MIN_ZOOM);
-        m.set_unlimited(true, true);
+        m.set_unlimited(true, true, false);
         for _ in 0..100 {
             m.scroll(-5.0, [500.0, 300.0], GUI, 1.0);
         }
@@ -1099,8 +1105,18 @@ mod tests {
             m.scroll(5.0, [500.0, 300.0], GUI, 1.0);
         }
         assert_eq!(m.zoom, MAX_ZOOM_UNLIMITED);
-        m.set_unlimited(false, false);
+        m.set_unlimited(false, false, false);
         assert_eq!(m.zoom, MAX_ZOOM, "back within the limits");
+        m.set_unlimited(false, false, true);
+        for _ in 0..300 {
+            m.scroll(-5.0, [500.0, 300.0], GUI, 1.0);
+        }
+        assert_eq!(
+            m.zoom, MIN_ZOOM_SEED_LAYER,
+            "the seed layer goes out to 1/512"
+        );
+        m.set_unlimited(false, false, false);
+        assert_eq!(m.zoom, MIN_ZOOM, "and back in without it");
     }
 
     #[test]

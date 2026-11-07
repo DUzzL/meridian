@@ -58,18 +58,35 @@ impl StructureKey {
     }
 
     fn group(&self) -> Group {
-        (
-            self.world.clone(),
+        group_of(
+            &self.world,
             self.seed,
             self.large_biomes,
-            self.dimension.clone(),
-            self.kind.clone(),
+            &self.dimension,
+            &self.kind,
         )
+    }
+
+    fn in_group(&self, world: &str, seed: i64, large: bool, dimension: &str, kind: &str) -> bool {
+        self.seed == seed
+            && self.large_biomes == large
+            && self.world == world
+            && self.dimension == dimension
+            && self.kind == kind
     }
 }
 
-/// Everything that identifies a completed structure except its position.
-type Group = (String, i64, bool, String, String);
+/// Everything that identifies a completed structure except its position,
+/// hashed (the entries are compared again, so a collision only costs time):
+/// looking one up allocates nothing.
+type Group = u64;
+
+fn group_of(world: &str, seed: i64, large: bool, dimension: &str, kind: &str) -> Group {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (world, seed, large, dimension, kind).hash(&mut h);
+    h.finish()
+}
 
 #[derive(Default, Serialize, Deserialize)]
 struct CompletedFile {
@@ -140,15 +157,57 @@ impl CompletedStore {
     }
 
     fn near(&self, key: &StructureKey) -> Option<&StructureKey> {
-        self.groups.get(&key.group())?.iter().find(|o| {
-            (i64::from(o.x) - i64::from(key.x)).abs() <= i64::from(COMPLETED_TOLERANCE)
-                && (i64::from(o.z) - i64::from(key.z)).abs() <= i64::from(COMPLETED_TOLERANCE)
+        let k = key;
+        self.near_at(
+            &k.world,
+            k.seed,
+            k.large_biomes,
+            &k.dimension,
+            &k.kind,
+            k.x,
+            k.z,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn near_at(
+        &self,
+        world: &str,
+        seed: i64,
+        large: bool,
+        dimension: &str,
+        kind: &str,
+        x: i32,
+        z: i32,
+    ) -> Option<&StructureKey> {
+        let group = group_of(world, seed, large, dimension, kind);
+        self.groups.get(&group)?.iter().find(|o| {
+            (i64::from(o.x) - i64::from(x)).abs() <= i64::from(COMPLETED_TOLERANCE)
+                && (i64::from(o.z) - i64::from(z)).abs() <= i64::from(COMPLETED_TOLERANCE)
+                && o.in_group(world, seed, large, dimension, kind)
         })
     }
 
     /// Completed at this position or within the tolerance of it.
     pub fn is_completed(&self, key: &StructureKey) -> bool {
-        self.set.contains(key) || self.near(key).is_some()
+        self.near(key).is_some()
+    }
+
+    /// [`CompletedStore::is_completed`] without a key: the map asks this
+    /// for every marker it draws, every frame.
+    #[allow(clippy::too_many_arguments)]
+    pub fn is_completed_at(
+        &self,
+        world: &str,
+        seed: i64,
+        large_biomes: bool,
+        dimension: &str,
+        kind: &str,
+        x: i32,
+        z: i32,
+    ) -> bool {
+        self.near_at(world, seed, large_biomes, dimension, kind, x, z)
+            .is_some()
     }
 
     /// Marks or unmarks a structure (unmarking also removes every entry
@@ -347,6 +406,13 @@ mod tests {
         let mut nether = a.clone();
         nether.dimension = "minecraft:the_nether".into();
         assert!(!s.is_completed(&nether));
+        // The same without a key.
+        let at = |kind: &str, x| {
+            s.is_completed_at("sp-a", a.seed, a.large_biomes, &a.dimension, kind, x, 205)
+        };
+        assert!(at("village", 110));
+        assert!(!at("village", 113));
+        assert!(!at("igloo", 100));
         // Unmarking at a nearby position removes it.
         assert!(s.unmark(&key("sp-a", "village", 108, 200)));
         assert!(!s.is_completed(&a));

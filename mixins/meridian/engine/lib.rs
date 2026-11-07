@@ -187,6 +187,8 @@ struct State {
     completed: meridian_core::completed::CompletedStore,
     /// The world or server the seeds were last resolved for.
     seed_key: Option<String>,
+    /// What the seeds were last resolved from (see `State::update_seeds`).
+    seed_inputs: Option<SeedInputs>,
     /// The Seed Atlas marker under the cursor on the map, for its menu.
     hovered_marker: Option<HoveredMarker>,
     /// Whether the game's biome looks were handed to Seed Atlas.
@@ -206,6 +208,14 @@ struct State {
     minimap_place: Option<meridian_core::screens::MinimapPlace>,
     /// The nearest search's options, kept for the session.
     nearest_opts: meridian_core::nearest::NearestOptions,
+}
+
+/// What the Seed Atlas service was configured from: the world and map, the
+/// settings and the world's own seed.
+struct SeedInputs {
+    place: Option<(WorldSource, String)>,
+    settings: meridian_core::config::SeedAtlasSettings,
+    detected: Option<(i64, bool)>,
 }
 
 /// The last finished export's message, for the action bar.
@@ -636,6 +646,14 @@ impl Meridian {
             let store = ConfigStore::new(&config_dir(host));
             let mut config = store.load();
             meridian_core::seedatlas_state::normalize(&mut config.current_mut().seed_atlas);
+            // The version chosen per world lives with its seeds; older
+            // settings files kept it per profile.
+            let mut seeds = meridian_core::seedatlas::SeedBook::load(&data_dir(host));
+            if meridian_core::seedatlas_state::adopt_profile_versions(&mut seeds, &mut config)
+                && let Err(e) = store.save(&config)
+            {
+                log::warn!("meridian: cannot save settings: {e}");
+            }
             let engine = MapEngine::new(config.current().clone(), data_dir(host));
             if bridge::VERSION == BRIDGE_VERSION {
                 bridge::enable();
@@ -675,10 +693,11 @@ impl Meridian {
                 viewer: None,
                 export_dir: data_dir(host).join("exports"),
                 levels: 0,
-                seeds: meridian_core::seedatlas::SeedBook::load(&data_dir(host)),
+                seeds,
                 seed_svc: Default::default(),
                 completed: meridian_core::completed::CompletedStore::load(&data_dir(host)),
                 seed_key: None,
+                seed_inputs: None,
                 hovered_marker: None,
                 looks_ready: false,
                 faces_held: false,
@@ -1999,6 +2018,7 @@ impl Meridian {
             }
             if settings_changed {
                 *s.config.current_mut() = settings;
+                meridian_core::seedatlas_state::store_versions(&mut s.seeds, &mut s.config);
                 s.engine.set_settings(s.config.current().clone());
                 s.save_config();
             }
@@ -2063,6 +2083,7 @@ impl Meridian {
                         ProfileOp::Delete(name) => c.delete_profile(&name),
                     };
                     if changed {
+                        meridian_core::seedatlas_state::mirror_versions(&s.seeds, &mut s.config);
                         s.engine.set_settings(s.config.current().clone());
                         s.save_config();
                     }
@@ -2328,7 +2349,9 @@ impl Meridian {
             let dt = now.duration_since(s.map_frame).as_secs_f32().min(0.05);
             s.map_frame = now;
             let wm = &s.config.current().world_map;
-            s.map.set_unlimited(wm.unlimited_zoom_in, wm.unlimited_zoom_out);
+            let sa_now = &s.config.current().seed_atlas;
+            let seed_layer = sa_now.enabled && sa_now.biome_layer && s.seed_svc.active();
+            s.map.set_unlimited(wm.unlimited_zoom_in, wm.unlimited_zoom_out, seed_layer);
             s.map.tick(dt);
             let here = s.dimension.clone().unwrap_or_default();
             let (shown, engine) = match &mut s.viewer {
@@ -2386,10 +2409,12 @@ impl Meridian {
                 engine.layer().hash(&mut h);
                 h.finish()
             };
-            // Seed Atlas: the biome layer under the terrain and the markers.
+            // Seed Atlas: the biome layer (under the terrain, or over it) and
+            // the markers.
             let sa_settings = s.config.current().seed_atlas.clone();
             let sa_dim = sa::dimension_of(&shown);
             let gui_scale = bridge::window_size().map_or(2.0, |w| w[1] as f32 / gui[1].max(1.0));
+            let (seed_above, seed_alpha) = sa::layer_pass(&sa_settings);
             let mut background = Vec::new();
             let mut icons = Vec::new();
             let mut marker_hover: Option<MarkerHover> = None;
@@ -2398,8 +2423,6 @@ impl Meridian {
                 let step = sa::step_for(region_side, sa_settings.biome_resolution);
                 let refine = sa::refine_allowed(region_side);
                 let y = sa::sample_y(&sa_settings, dim);
-                let mut order: Vec<RegionPos> = (dmin.x..=dmax.x).flat_map(|x| (dmin.z..=dmax.z).map(move |z| RegionPos::new(x, z))).collect();
-                order.sort_by_key(|r| (r.x - mid.x).abs().max((r.z - mid.z).abs()));
                 if sa_settings.biome_layer {
                     // Tiles of 128 samples at the chosen step, nearest first;
                     // a coarser tile already computed shows under one that is
@@ -2413,9 +2436,11 @@ impl Meridian {
                             pos: [t.x, t.z],
                             rect: [a[0], a[1], b[0], b[1]],
                             size: tile.as_ref().map_or(sa::TILE_SAMPLES as u32, |t| t.size),
-                            revision: tile.as_ref().map_or(0, |t| t.revision),
+                            // The opacity is baked into the texture: another
+                            // one uploads it again.
+                            revision: tile.as_ref().map_or(0, |t| t.revision ^ (u64::from(seed_alpha) << 56)),
                             pixels: tile.map(|t| t.pixels),
-                            alpha: sa_settings.biome_opacity,
+                            alpha: seed_alpha,
                             layer: step as u32,
                         }
                     };
@@ -2476,6 +2501,14 @@ impl Meridian {
                     }
                     background.extend(coarse);
                     background.extend(fine);
+                    // The background ring around the player at the finest
+                    // step (`prefetch_radius`), behind what the view needs.
+                    if shown == here && sa_settings.prefetch_radius > 0 {
+                        let fine_step = i32::from(sa_settings.biome_resolution.clamp(1, 16));
+                        for t in sa::prefetch_ring([player.position[0], player.position[2]], fine_step, sa_settings.prefetch_radius) {
+                            s.seed_svc.prefetch(sa::Job::Tile { dimension: dim, region: t, step: fine_step, y, refine: false });
+                        }
+                    }
                 }
                 s.hovered_marker = None;
                 // Structures belong to the seed map layer: off, they go too.
@@ -2492,17 +2525,21 @@ impl Meridian {
                     let px = units / icons::DISPLAY_SIZE;
                     let completed_alpha = sa_settings.completed_opacity_pct() as f32 / 100.0;
                     // The whole view at once, as the Fabric version scans it:
-                    // dense kinds only when zoomed in far enough.
-                    // `request`: the window's pixels over the map's scale (its
-                    // zoom, as the reference map shows it), at least 1/512.
+                    // dense kinds only when zoomed in far enough. The view in
+                    // blocks comes from the map's transform, as the tiles'
+                    // does; the zoom only picks the kinds.
                     let zoom = s.map.zoom;
-                    let window = bridge::window_size().map_or([gui[0] as f64 * 2.0, gui[1] as f64 * 2.0], |w| [w[0] as f64, w[1] as f64]);
-                    let safe = zoom.max(1.0 / 512.0);
-                    let (bbox, radius) = sa::view_box(s.map.center, [window[0] / safe, window[1] / safe]);
+                    let w0 = s.map.to_world([0.0, 0.0], gui, u);
+                    let w1 = s.map.to_world(gui, gui, u);
+                    let (bbox, radius) = sa::view_box(s.map.center, [w1[0] - w0[0], w1[1] - w0[1]]);
                     let shows = |k: i32| sa::marker_for(k).is_some_and(|m| sa::visible_at_zoom(m.id, zoom, radius));
                     let hits = s.seed_svc.view_markers(dim, bbox, shows, Instant::now());
+                    // What completed markers are looked up by, once a frame.
+                    let world = s.seed_key.clone();
+                    let generator = s.seed_svc.atlas_for(dim).map(|a| (a.seed, a.large_biomes, a.mc));
+                    let dim_id = dimension_id(dim);
                     {
-                        for h in hits.iter().filter(|h| shows(h.kind)) {
+                        for h in hits.iter() {
                             let Some(m) = sa::marker_for(h.kind) else { continue };
                             let special = h.kind == meridian_seedatlas::structures::kind::ABANDONED_CAMP
                                 && h.detail >= 0
@@ -2522,8 +2559,10 @@ impl Meridian {
                             if rect[0] > gui[0] || rect[1] > gui[1] || rect[0] + w < 0.0 || rect[1] + hgt < 0.0 {
                                 continue;
                             }
-                            let key = structure_key(s.seed_key.as_deref(), &s.seed_svc, m.id, dim, h.x, h.z);
-                            let completed = key.as_ref().is_some_and(|k| s.completed.is_completed(k));
+                            let completed = match (&world, generator) {
+                                (Some(w), Some((seed, large, _))) => s.completed.is_completed_at(w, seed, large, dim_id, m.id, h.x, h.z),
+                                _ => false,
+                            };
                             if completed && completed_alpha <= 0.0 {
                                 continue;
                             }
@@ -2540,27 +2579,16 @@ impl Meridian {
                                 icons.push(gpu_map::IconQuad { icon: badge, rect: [rect[0] + w - b + 3.0 * px, rect[1] + hgt - b + 3.0 * px, b, b], alpha });
                             }
                             if inside(rect, mouse) {
-                                s.hovered_marker = Some(HoveredMarker { name: m.name, x: h.x, z: h.z, key: key.clone() });
-                                let mut first = m.name.to_owned();
-                                if h.flags & meridian_seedatlas::atlas::RESULT_APPROXIMATE != 0 {
-                                    first.push_str(" (approx.)");
-                                }
-                                let mut lines = vec![first];
-                                if completed {
-                                    lines.push("Completed".into());
-                                }
-                                if special {
-                                    lines.push("Special loot".into());
-                                }
-                                let y = h.y.map_or(String::new(), |y| format!(" · Y={y}"));
-                                lines.push(format!("X={}{y} · Z={}", h.x, h.z));
-                                marker_hover = Some(MarkerHover { lines });
+                                let key = structure_key(s.seed_key.as_deref(), &s.seed_svc, m.id, dim, h.x, h.z);
+                                s.hovered_marker = Some(HoveredMarker { name: m.name, x: h.x, z: h.z, key });
+                                let mc = generator.map_or(meridian_seedatlas::mc::MC_NEWEST, |g| g.2);
+                                marker_hover = Some(MarkerHover { lines: vec![sa::marker_tooltip(m, h, mc, completed)] });
                             }
                         }
                     }
                 }
             }
-            gpu_map::set_frame(Some(gpu_map::WorldMapFrame { gui, world, regions, background, icons, at: Instant::now() }));
+            gpu_map::set_frame(Some(gpu_map::WorldMapFrame { gui, world, regions, background, seed_above, icons, at: Instant::now() }));
             let hovered = s.map.to_world(mouse, gui, u);
             let (hx, hz) = (hovered[0].floor() as i32, hovered[1].floor() as i32);
             let sampler = engine.sampler();
@@ -2616,8 +2644,10 @@ impl Meridian {
                     && s.map.menu.is_none()
                 {
                     let y = sa::sample_y(&sa_settings, dim);
+                    // The name in the seed's version, as the Fabric version's.
+                    let mc = s.seed_svc.atlas_for(dim).map_or(meridian_seedatlas::mc::MC_NEWEST, |a| a.mc);
                     if let Some(id) = s.seed_svc.biome_at(dim, hx, y, hz)
-                        && let Some(name) = meridian_seedatlas::biomes::name(id)
+                        && let Some(name) = meridian_seedatlas::biomes::name_in(mc, id)
                     {
                         let line = format!("{} · Y={y} · X={hx} · Z={hz}", meridian_core::info::title_case(name));
                         tooltip(&mut ops, mouse, gui, &[line]);
@@ -2853,11 +2883,13 @@ impl Meridian {
             };
             if outcome.settings_changed {
                 s.config.current_mut().seed_atlas = settings;
+                meridian_core::seedatlas_state::store_versions(&mut s.seeds, &mut s.config);
                 s.engine.set_settings(s.config.current().clone());
                 s.save_config();
             }
             if outcome.seeds_changed || outcome.settings_changed {
                 s.seed_key = None;
+                s.seed_inputs = None;
                 s.update_seeds();
             }
             (outcome.lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join(" · "), outcome.open_settings)
@@ -2962,17 +2994,30 @@ impl State {
     }
 
     /// Resolves the seed of every dimension for the open world and hands
-    /// them to the Seed Atlas service.
+    /// them to the Seed Atlas service. The frame calls this every time: it
+    /// returns at once when nothing it reads changed since.
     fn update_seeds(&mut self) {
+        let detected = self.detected_seed();
+        if self.looks_ready
+            && let Some(i) = &self.seed_inputs
+            && i.detected == detected
+            && i.place.as_ref().map(|(source, map)| (source, map.as_str())) == self.engine.context().map(|c| (&c.source, self.engine.map()))
+            && i.settings == self.config.current().seed_atlas
+        {
+            return;
+        }
         let sa = self.config.current().seed_atlas.clone();
         let map = self.engine.map().to_owned();
         let context = self.engine.context().map(|c| meridian_core::seedatlas_state::SeedContext::of_map(&c.source, &map));
-        if let Some(c) = &context
-            && self.seed_key.as_deref() != Some(c.key.as_str())
-        {
-            self.seeds.context_changed(&c.key);
-            self.config.current_mut().seed_atlas.context_key = c.key.clone();
-            self.seed_key = Some(c.key.clone());
+        if let Some(c) = &context {
+            if self.seed_key.as_deref() != Some(c.key.as_str()) {
+                self.seeds.context_changed(&c.key);
+                self.seed_key = Some(c.key.clone());
+            }
+            // Also after a profile switch: the screens show this context's version.
+            if self.config.current().seed_atlas.context_key != c.key {
+                self.config.current_mut().seed_atlas.context_key = c.key.clone();
+            }
         }
         if !self.looks_ready {
             let mut table = std::collections::HashMap::new();
@@ -2992,15 +3037,21 @@ impl State {
                         })
                     }),
                     std::sync::Arc::new(terrain_sampler::nether_cave_mask),
+                    std::sync::Arc::new(terrain_sampler::release_caches),
                 );
                 self.looks_ready = true;
             }
         }
         let specs = match (&context, sa.enabled) {
-            (Some(c), true) => meridian_core::seedatlas_state::resolve_all(&self.seeds, &sa, &c.key, self.detected_seed()),
+            (Some(c), true) => meridian_core::seedatlas_state::resolve_all(&self.seeds, &sa, &c.key, detected),
             _ => [None, None, None],
         };
         self.seed_svc.configure_dimensions(specs, &sa);
+        self.seed_inputs = Some(SeedInputs {
+            place: self.engine.context().map(|c| (c.source.clone(), self.engine.map().to_owned())),
+            settings: self.config.current().seed_atlas.clone(),
+            detected,
+        });
     }
 
 }
@@ -3017,12 +3068,16 @@ fn structure_key(
     {
         let world = seed_key?;
         let atlas = svc.atlas_for(dimension)?;
-        let dim_id = match dimension {
-            meridian_seedatlas::Dimension::Overworld => "minecraft:overworld",
-            meridian_seedatlas::Dimension::Nether => "minecraft:the_nether",
-            meridian_seedatlas::Dimension::End => "minecraft:the_end",
-        };
-        meridian_core::completed::StructureKey::new(world, atlas.seed, atlas.large_biomes, dim_id, id, x, z)
+        meridian_core::completed::StructureKey::new(world, atlas.seed, atlas.large_biomes, dimension_id(dimension), id, x, z)
+    }
+}
+
+/// The game's id of a Seed Atlas dimension.
+fn dimension_id(dimension: meridian_seedatlas::Dimension) -> &'static str {
+    match dimension {
+        meridian_seedatlas::Dimension::Overworld => "minecraft:overworld",
+        meridian_seedatlas::Dimension::Nether => "minecraft:the_nether",
+        meridian_seedatlas::Dimension::End => "minecraft:the_end",
     }
 }
 
@@ -3058,9 +3113,15 @@ fn tooltip(ops: &mut Vec<DrawOp>, mouse: [f32; 2], gui: [f32; 2], lines: &[Strin
     }
 }
 
-/// A nearest search's result: where (if found), the name and the waypoint
-/// wanted.
-type NearestDone = (Option<meridian_core::nearest::NearestResult>, String, meridian_core::nearest::WaypointMode);
+/// A nearest search's result: where (if found), the name, the waypoint
+/// wanted, and the world (seed key) and dimension it was searched in.
+type NearestDone = (
+    Option<meridian_core::nearest::NearestResult>,
+    String,
+    meridian_core::nearest::WaypointMode,
+    String,
+    meridian_seedatlas::Dimension,
+);
 static NEAREST_DONE: Mutex<Option<NearestDone>> = Mutex::new(None);
 
 impl State {
@@ -3076,12 +3137,9 @@ impl State {
         use meridian_core::screens_seedatlas::NearestKind;
         let Some(atlas) = self.seed_svc.atlas_for(dim).cloned() else { return };
         let y = sa::sample_y(&self.config.current().seed_atlas, dim);
-        let dim_id = match dim {
-            meridian_seedatlas::Dimension::Overworld => "minecraft:overworld",
-            meridian_seedatlas::Dimension::Nether => "minecraft:the_nether",
-            meridian_seedatlas::Dimension::End => "minecraft:the_end",
-        };
+        let dim_id = dimension_id(dim);
         let world = self.seed_key.clone().unwrap_or_default();
+        let searched_in = world.clone();
         let done: Vec<(i32, i32)> = match &kind {
             NearestKind::Structure { marker, .. } if skip_completed => self
                 .completed
@@ -3103,7 +3161,7 @@ impl State {
                     (found, name)
                 }
             };
-            *NEAREST_DONE.lock() = Some((found, name, mode));
+            *NEAREST_DONE.lock() = Some((found, name, mode, searched_in, dim));
         });
     }
 
@@ -3112,7 +3170,13 @@ impl State {
     fn poll_nearest(&mut self) {
         use meridian_core::nearest::WaypointMode;
         use meridian_core::screens_seedatlas::NearestOutcome;
-        let Some((found, name, mode)) = NEAREST_DONE.lock().take() else { return };
+        let Some((found, name, mode, world, dim)) = NEAREST_DONE.lock().take() else { return };
+        // Dropped when the screen was left or the world changed meanwhile,
+        // as in the Fabric version.
+        let here = sa::dimension_of(self.dimension.as_deref().unwrap_or("")).unwrap_or(meridian_seedatlas::Dimension::Overworld);
+        if !matches!(self.screen, Some(Screen::Nearest(_))) || self.seed_key.as_deref() != Some(world.as_str()) || here != dim {
+            return;
+        }
         let outcome = match found {
             Some(r) => {
                 if let Some((book, dim)) = self.book_here() {

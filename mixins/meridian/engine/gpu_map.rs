@@ -51,8 +51,10 @@ pub struct WorldMapFrame {
     /// Which map the regions belong to (world, dimension, cave layer).
     pub world: u64,
     pub regions: Vec<RegionQuad>,
-    /// Drawn first, under the terrain (the Seed Atlas biome layer).
+    /// The Seed Atlas biome layer: drawn first, under the terrain, or over
+    /// it when `seed_above` (biome highlighting, "Over Explored Terrain").
     pub background: Vec<RegionQuad>,
+    pub seed_above: bool,
     /// Drawn last, over the terrain.
     pub icons: Vec<IconQuad>,
     pub at: std::time::Instant,
@@ -94,8 +96,9 @@ fn fs(in: Out) -> @location(0) vec4<f32> {
 }
 "#;
 
-/// How long after the map's last frame its Seed Atlas textures are dropped.
-const RELEASE_AFTER: std::time::Duration = std::time::Duration::from_secs(2);
+/// How long after the map's last frame its Seed Atlas textures are dropped
+/// (as long as `meridian_core::seedatlas::RELEASE_AFTER` keeps the tiles).
+const RELEASE_AFTER: std::time::Duration = meridian_core::seedatlas::RELEASE_AFTER;
 /// Region textures uploaded per frame at most.
 const UPLOADS_PER_FRAME: usize = 6;
 /// Texture memory kept before the least recently drawn are dropped.
@@ -439,7 +442,8 @@ impl WorldMapRenderer {
             let d = |r: &RegionQuad| ((r.rect[0] + r.rect[2]) / 2.0 - mid[0]).abs() + ((r.rect[1] + r.rect[3]) / 2.0 - mid[1]).abs();
             d(a).total_cmp(&d(b))
         };
-        // The Seed Atlas layer under the terrain, at the size it comes in.
+        // The Seed Atlas layer, at the size it comes in: under the terrain,
+        // or moved over it below.
         let mut background = frame.background.clone();
         background.sort_by(near);
         let layer = frame.world ^ 0x5EED_A71A5;
@@ -461,6 +465,7 @@ impl WorldMapRenderer {
             quad(ndc(r.rect[0], r.rect[1]), ndc(r.rect[2], r.rect[3]), 1.0);
             draws.push(Draw::Entry(key));
         }
+        let seed_quads = draws.len();
         // Nearest regions first, so uploads fill in from the middle.
         let mut regions = frame.regions.clone();
         regions.sort_by(near);
@@ -502,6 +507,14 @@ impl WorldMapRenderer {
                 quad(ndc(icon.rect[0], icon.rect[1]), ndc(icon.rect[0] + icon.rect[2], icon.rect[1] + icon.rect[3]), icon.alpha);
                 draws.push(Draw::Icon(icon.icon));
             }
+        }
+        if frame.seed_above {
+            // The seed layer's quads after the terrain's (quad 0 is the
+            // backdrop, icons stay last).
+            let terrain_quads = draws.iter().filter(|d| matches!(d, Draw::Entry(_))).count() - seed_quads;
+            let floats = 30;
+            vertices[floats..floats * (1 + seed_quads + terrain_quads)].rotate_left(floats * seed_quads);
+            draws[..seed_quads + terrain_quads].rotate_left(seed_quads);
         }
         gpu.evict();
         let bytes: Vec<u8> = vertices.iter().flat_map(|v| v.to_le_bytes()).collect();
