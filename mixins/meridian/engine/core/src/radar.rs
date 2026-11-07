@@ -7,7 +7,7 @@
 //! (players almost never), darker the further up or down they are; items
 //! drawn first, then living things, hostile ones, players last.
 
-use crate::config::RadarSettings;
+use crate::config::{NameMode, RadarSettings};
 use crate::minimap::{Axes, DrawOp, Layout};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -56,6 +56,54 @@ pub struct Entity {
     pub class: Class,
     pub pos: [f64; 3],
     pub invisible: bool,
+    /// `minecraft:zombie`...
+    pub kind: String,
+    /// A player's name or a custom name.
+    pub name: Option<String>,
+}
+
+/// Where a mob's face is in its texture: the front of its model's head
+/// cube (texture path under `textures/`, and u, v, width, height in texels
+/// of a 64-wide texture).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Face {
+    pub texture: &'static str,
+    pub uv: [u16; 4],
+}
+
+/// The face of an entity kind, for kinds whose model has a plain head.
+pub fn face(kind: &str) -> Option<Face> {
+    let id = kind.strip_prefix("minecraft:").unwrap_or(kind);
+    let f = |texture, uv| Some(Face { texture, uv });
+    // Humanoid heads: 8x8x8 at (0, 0); villagers and illagers 8x10x8.
+    const HEAD: [u16; 4] = [8, 8, 8, 8];
+    const LONG: [u16; 4] = [8, 8, 8, 10];
+    match id {
+        "zombie" => f("entity/zombie/zombie", HEAD),
+        "husk" => f("entity/zombie/husk", HEAD),
+        "drowned" => f("entity/zombie/drowned", HEAD),
+        "skeleton" => f("entity/skeleton/skeleton", HEAD),
+        "stray" => f("entity/skeleton/stray", HEAD),
+        "wither_skeleton" => f("entity/skeleton/wither_skeleton", HEAD),
+        "bogged" => f("entity/skeleton/bogged", HEAD),
+        "creeper" => f("entity/creeper/creeper", HEAD),
+        "enderman" => f("entity/enderman/enderman", HEAD),
+        "blaze" => f("entity/blaze", HEAD),
+        "slime" => f("entity/slime/slime", HEAD),
+        "spider" => f("entity/spider/spider", [40, 12, 8, 8]),
+        "cave_spider" => f("entity/spider/cave_spider", [40, 12, 8, 8]),
+        "pig" => f("entity/pig/pig_temperate", HEAD),
+        "cow" => f("entity/cow/cow_temperate", [6, 6, 8, 8]),
+        "sheep" => f("entity/sheep/sheep", [8, 8, 6, 6]),
+        "chicken" => f("entity/chicken/chicken_temperate", [3, 3, 4, 6]),
+        "villager" => f("entity/villager/villager", LONG),
+        "zombie_villager" => f("entity/zombie_villager/zombie_villager", LONG),
+        "witch" => f("entity/witch", LONG),
+        "pillager" => f("entity/illager/pillager", LONG),
+        "vindicator" => f("entity/illager/vindicator", LONG),
+        "evoker" => f("entity/illager/evoker", LONG),
+        _ => None,
+    }
 }
 
 /// Whether the radar shows an entity, before position.
@@ -125,17 +173,68 @@ pub fn dots(
         } else {
             e.class.rgb()
         };
-        let diamond = |r: f32| [[x, y - r], [x + r, y], [x, y + r], [x - r, y]];
-        ops.push(DrawOp::Quad {
-            points: diamond(r + u * 0.75),
-            argb: 0xFF00_0000,
-        });
-        ops.push(DrawOp::Quad {
-            points: diamond(r),
-            argb: 0xFF00_0000 | rgb,
-        });
+        let face = if s.faces { face(&e.kind) } else { None };
+        if let Some(face) = face {
+            // The face, a little larger than a dot, on a dark rim.
+            let half = r * 1.6;
+            let rim = 0.6 * u;
+            ops.push(DrawOp::Fill {
+                rect: [
+                    x - half - rim,
+                    y - half - rim,
+                    2.0 * (half + rim),
+                    2.0 * (half + rim),
+                ],
+                argb: 0xFF00_0000,
+            });
+            let shade = rgb_to_shade(e.class.rgb(), rgb);
+            ops.push(DrawOp::Blit {
+                texture: face.texture.to_owned(),
+                rect: [x - half, y - half, 2.0 * half, 2.0 * half],
+                uv: face.uv,
+                argb: 0xFF00_0000 | shade,
+            });
+        } else {
+            let diamond = |r: f32| [[x, y - r], [x + r, y], [x, y + r], [x - r, y]];
+            ops.push(DrawOp::Quad {
+                points: diamond(r + u * 0.75),
+                argb: 0xFF00_0000,
+            });
+            ops.push(DrawOp::Quad {
+                points: diamond(r),
+                argb: 0xFF00_0000 | rgb,
+            });
+        }
+        let named = match s.names {
+            NameMode::Off => false,
+            NameMode::Players => e.class == Class::Player,
+            NameMode::All => true,
+        };
+        if named && let Some(name) = &e.name {
+            let scale = 0.5 * s.name_scale.clamp(0.25, 4.0) * (u / 1.5).max(0.5);
+            ops.push(DrawOp::Text {
+                x,
+                y: y + r + u,
+                text: name.clone(),
+                argb: 0xFF00_0000 | rgb,
+                align: crate::minimap::Align::Center,
+                scale,
+            });
+        }
     }
     ops
+}
+
+/// The grey a face is tinted with to show the same height fade as a dot
+/// (`faded` against the class colour).
+fn rgb_to_shade(base: u32, faded: u32) -> u32 {
+    let lum = |c: u32| ((c >> 16) & 0xFF) + ((c >> 8) & 0xFF) + (c & 0xFF);
+    let k = if lum(base) == 0 {
+        255
+    } else {
+        (lum(faded) * 255 / lum(base)).min(255)
+    };
+    k << 16 | k << 8 | k
 }
 
 #[cfg(test)]
@@ -161,6 +260,8 @@ mod tests {
             class,
             pos,
             invisible: false,
+            kind: "minecraft:zombie".into(),
+            name: None,
         }
     }
 
@@ -238,5 +339,54 @@ mod tests {
             ..s
         };
         assert!(dots(&layout(), [0.0; 3], 0.0, &ents, &disabled).is_empty());
+    }
+
+    #[test]
+    fn faces_and_names() {
+        let mut s = RadarSettings::default();
+        let mut zombie = e(1, Class::Hostile, [5.0, 64.0, 0.0]);
+        let mut steve = e(2, Class::Player, [-5.0, 64.0, 0.0]);
+        steve.kind = "minecraft:player".into();
+        steve.name = Some("Steve".into());
+        zombie.name = Some("Bob".into());
+        let ops =
+            |s: &RadarSettings, list: &[Entity]| dots(&layout(), [0.0, 64.0, 0.0], 0.0, list, s);
+        let list = [zombie.clone(), steve.clone()];
+        let texts = |ops: &[DrawOp]| {
+            ops.iter()
+                .filter_map(|o| {
+                    if let DrawOp::Text { text, .. } = o {
+                        Some(text.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            texts(&ops(&s, &list)),
+            ["Steve"],
+            "players' names by default"
+        );
+        s.names = NameMode::All;
+        assert_eq!(texts(&ops(&s, &list)).len(), 2);
+        s.names = NameMode::Off;
+        assert!(texts(&ops(&s, &list)).is_empty());
+        assert!(
+            !ops(&s, &list)
+                .iter()
+                .any(|o| matches!(o, DrawOp::Blit { .. })),
+            "dots by default"
+        );
+        s.faces = true;
+        let blits: Vec<_> = ops(&s, &list)
+            .into_iter()
+            .filter(|o| matches!(o, DrawOp::Blit { .. }))
+            .collect();
+        assert_eq!(blits.len(), 1, "the zombie's face; the player stays a dot");
+        assert!(
+            matches!(&blits[0], DrawOp::Blit { texture, uv: [8, 8, 8, 8], .. } if texture == "entity/zombie/zombie")
+        );
+        assert!(face("minecraft:ender_dragon").is_none());
     }
 }

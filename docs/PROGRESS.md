@@ -383,9 +383,38 @@ Nicht eigens geprüft: Spieler als Punkt, Teleport zu Spielern (braucht einen zw
 
 **Offen**
 
-- Höhlenmodus: Extra-Zoom und „lesbare Höhlen“ als Schalter.
 - Gefärbtes Glas, Höhenanpassung kurzer Blöcke.
-- Unterwelten und Kartenauswahl im Mehrspieler (CTX-02 bis CTX-05), Schnellbestätigung.
-- Radar: Symbole und Köpfe statt Rauten, Namen, eigene Kategorien.
-- Wegpunkte: Import und Export (IO-01, IO-02).
+- Bestätigungsdialog beim Kartenwechsel (CTX-03), Daten zwischen Karten verschieben (CTX-04/05).
+- Radar: eigene Kategorien, Spielerköpfe mit ihrem Skin.
 - Server-Regeln (SRV-*), Claims (OV-06).
+
+## Phase 6: Feinschliff (Zwischenstand 2)
+
+- **Höhlenmodus:** Die Einstellungen stehen jetzt in „Miscellaneous Settings“:
+  - an/aus, automatisch (aus, 1×1, 3×3, 5×5 Dach), Umschaltverzögerung;
+  - „Legible Cave Maps“: lesbar wie bisher, oder dunkel, sodass nur Fackeln aufhellen;
+  - „Cave Mode Extra Zoom“: Die Minimap zoomt in Höhlen hinein.
+- **Wegpunkte exportieren und importieren** (IO-01, IO-02, `waypoint_io.rs`):
+  - `/meridian waypoint export` schreibt alle Dimensionen und Sets als JSON nach `exports/`.
+  - `/meridian waypoint import <Datei oder Ordner>` liest:
+    - ein solches Export-JSON;
+    - eine `.txt`-Datei mit `waypoint:`-Zeilen;
+    - einen Weltordner mit `dim%…`-Unterordnern im Textformat anderer Karten-Mods.
+  - Das Format ist aus dem Kopf der Dateien abgeleitet, die die Prism-Instanz geschrieben hat.
+  - Doppelte Wegpunkte (gleicher Name und Ort) werden übersprungen.
+- **Mehrspieler-Karten** (CTX-02, `subworld.rs`, D-029):
+  - Eine Serveradresse kann mehrere Karten haben; Standard ist eine Karte je Weltspawn, den der Server meldet.
+  - Jede Karte hat eigene Wegpunkte und eigene Seed-Atlas-Seeds.
+  - Alternativen: eine Karte je Server, oder manuell mit `/meridian map list | use <Name> | new <Name>`.
+- **Radar:**
+  - „Mob Faces“ zeigt Mobs als ihr Gesicht, ausgeschnitten aus den Texturen des Spiels.
+  - „Entity Names“ (aus, Spieler, alle) schreibt Namen unter die Marke.
+
+**Im Spiel geprüft:**
+
+- Gesichter von Creeper, Skelett, Enderman, Zombie und Spinne sind erkennbar; der Name „Bob“ steht unter seiner Marke.
+- Einzelspieler bleibt auf der Standardkarte.
+
+Nicht im Spiel geprüft: Mehrspieler-Karten (dafür braucht es einen Server; Unit-Tests decken die Auswahl ab), Import und Export, die Höhlenoptionen.
+
+**Build und Tests**: 182 Kern-Tests und der Paritätstest grün; Clippy sauber, Adapter-Check grün; Launcher-Build `native-66f3981-4b682b06b3b7`.

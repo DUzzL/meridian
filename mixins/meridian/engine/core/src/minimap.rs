@@ -75,6 +75,15 @@ pub enum DrawOp {
         rect: [f32; 4],
         argb: u32,
     },
+    /// Part of one of the game's textures (`entity/zombie/zombie`, the path
+    /// under `textures/`): `uv` = u, v, width, height in texels of a
+    /// 64-texel-wide texture, stretched into `rect`, tinted by `argb`.
+    Blit {
+        texture: String,
+        rect: [f32; 4],
+        uv: [u16; 4],
+        argb: u32,
+    },
 }
 
 /// Where and how big the map is this frame.

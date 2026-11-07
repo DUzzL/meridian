@@ -358,9 +358,22 @@ impl Default for WaypointSettings {
     }
 }
 
+/// Whose names the radar writes under their mark.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NameMode {
+    Off,
+    #[default]
+    Players,
+    All,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RadarSettings {
+    /// Mobs as their faces (from the game's textures) instead of dots.
+    pub faces: bool,
+    pub names: NameMode,
     pub enabled: bool,
     /// Shows what the filters hide and hides what they show (the reverse key).
     pub reversed: bool,
@@ -384,6 +397,8 @@ pub struct RadarSettings {
 impl Default for RadarSettings {
     fn default() -> Self {
         Self {
+            faces: false,
+            names: NameMode::Players,
             enabled: true,
             reversed: false,
             hide_invisible: true,

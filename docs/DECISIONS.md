@@ -291,3 +291,15 @@ Eine voll erkundete Region braucht im Speicher rund 5 MiB (1024 Kacheln mit je 2
 - Profile: Die Hauptseite der Einstellungen wechselt das Profil (Klick vor, Rechtsklick zurück) und legt neue Profile an („New Profile“, eine Kopie des aktuellen). Ein Klick auf „ID“ benennt das Profil um, „Delete Profile“ löscht es, solange es nicht das letzte ist.
 - Positionseditor: „Change Position“ zeigt die Minimap über dem Screen. Man zieht sie mit der Maus. Sie rastet an der nächsten Ecke ein und behält ihren Abstand dazu (`corner` + `offset`), auch bei anderer Fenstergröße.
 - Die Taste `]` und der Knopf „M“ auf der Karte öffnen die eigene Seite „World Map Settings“. „Back“ schließt sie dort direkt, wie bei der Seed-Atlas-Seite.
+
+## D-029: Mehrere Karten je Server nach Weltspawn
+
+Server-Netzwerke zeigen hinter einer Adresse mehrere Welten (Lobby, Modi). Meridian ordnet Karten deshalb standardmäßig nach dem Weltspawn, den der Server meldet (`SetDefaultSpawnPosition`, über die Bridge, Version 6).
+
+- Jeder neue Spawn bekommt eine eigene Karte (`map-2`, `map-3`, …).
+- Der erste Spawn übernimmt die Standardkarte. Ein Server mit einer einzigen Welt behält so genau eine Karte, und bisherige Daten bleiben erhalten.
+- Die Liste liegt pro Server in `worlds/<server>/maps.toml`.
+- Wegpunkte und Seed-Atlas-Seeds gehören zur jeweiligen Karte. Der Seed-Kontext anderer Karten ist `<server>/<karte>`.
+- Beim Laden eines Levels gilt zunächst die zuletzt gezeigte Karte, weil der gemeldete Spawn noch vom vorigen Server stammen kann. Sobald der neue Spawn bekannt ist, wechselt die Karte.
+- Einzelspieler hat immer genau eine Karte.
+- Ändert ein Server seinen Spawn (`/setworldspawn`), entsteht eine neue Karte. Mit `/meridian map use default` kehrt man zur alten zurück; das stellt die Auswahl auf manuell.

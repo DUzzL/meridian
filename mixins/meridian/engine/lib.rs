@@ -621,6 +621,33 @@ fn paint(host: &dyn Host, batch: &mut HudBatch, ops: &[DrawOp]) {
             DrawOp::Fill { rect, argb } => host.fill(batch, *rect, *argb),
             DrawOp::Quad { points, argb } => host.quad(batch, *points, *argb),
             DrawOp::NineSlice { sprite, rect, argb } => host.gui_nine_slice(batch, sprite, *rect, *argb),
+            DrawOp::Blit { texture, rect, uv, argb } => {
+                // A missing texture (another resource pack) draws nothing.
+                let Some(tex) = texture_size(texture) else { continue };
+                // `uv` is in texels of a 64-wide texture; higher resolutions scale it.
+                let k = (tex[0] / 64).max(1);
+                let [u, v, w, h] = uv.map(|c| c as i32 * k);
+                const SIDE: i32 = 16;
+                host.gui_paint(
+                    batch,
+                    &[
+                        GuiDraw::Push(vec![PoseOp::Translate(rect[0], rect[1]), PoseOp::Scale(rect[2] / SIDE as f32, rect[3] / SIDE as f32)]),
+                        GuiDraw::Blit {
+                            texture: texture.clone().into(),
+                            blend: horizon_client::hud_layout::Blend::Textured,
+                            x: 0,
+                            y: 0,
+                            w: SIDE,
+                            h: SIDE,
+                            uv: [u as f32, v as f32],
+                            src: [w, h],
+                            tex,
+                            color: *argb,
+                        },
+                        GuiDraw::Pop,
+                    ],
+                );
+            }
             DrawOp::Plate { x, y, text, align, scale, pad, argb } => {
                 let w = host.text_width(text) * scale;
                 let x = match align {
@@ -1859,8 +1886,30 @@ fn radar_entities() -> Vec<radar::Entity> {
             },
             pos: e.pos,
             invisible: e.invisible,
+            kind: e.kind,
+            name: e.name,
         })
         .collect()
+}
+
+/// A texture's size in texels, read once from its PNG header in the game's
+/// resources (`entity/zombie/zombie`); none when it is missing.
+fn texture_size(texture: &str) -> Option<[i32; 2]> {
+    static SIZES: Mutex<Option<HashMap<String, Option<[i32; 2]>>>> = Mutex::new(None);
+    let mut sizes = SIZES.lock();
+    let sizes = sizes.get_or_insert_with(HashMap::new);
+    if let Some(size) = sizes.get(texture) {
+        return *size;
+    }
+    let root = bridge::resources_dir()?;
+    let path = root.join("assets/minecraft/textures").join(format!("{texture}.png"));
+    let size = std::fs::File::open(path).ok().and_then(|f| {
+        let reader = png::Decoder::new(std::io::BufReader::new(f)).read_info().ok()?;
+        let info = reader.info();
+        Some([info.width as i32, info.height as i32])
+    });
+    sizes.insert(texture.to_owned(), size);
+    size
 }
 
 /// The map screen's size: GUI pixels and GUI pixels per minimap unit.

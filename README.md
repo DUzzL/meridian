@@ -31,6 +31,10 @@ Everything else (zoom keys, waypoint sets, radar, cave mode, overlays, dimension
 
 On the world map: drag to pan, scroll to zoom, arrow keys or WASD move, Space centres on you, right click opens the menu (waypoints, teleport to a spot or a player, share, PNG export, Seed Atlas structure actions). The "?" button on the right lists the controls.
 
+Waypoints: `/meridian waypoint export` writes all of a world's waypoints to a JSON file in `exports/`; `/meridian waypoint import <file or folder>` reads such a file, or the plain-text waypoint files other map mods keep (a world folder with `dim%0`, `dim%-1`, … inside).
+
+On servers that show several worlds behind one address, Meridian keeps one map per world spawn; `/meridian map list | use <name> | new <name>` picks a map by hand ("Multiplayer Maps" in the world map settings).
+
 Settings profiles are switched, added, renamed and deleted on the main settings page; "Change Position" lets you drag the minimap where you want it.
 
 ## Seed Atlas

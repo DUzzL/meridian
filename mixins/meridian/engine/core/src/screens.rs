@@ -950,6 +950,20 @@ pub fn options() -> Vec<Opt> {
         toggle!("Entity Radar", Radar, radar.enabled),
         toggle!("Hide Invisible Entities", Radar, radar.hide_invisible),
         toggle!("Smooth Entity Dots", Radar, radar.smooth),
+        toggle!("Mob Faces", Radar, radar.faces),
+        Opt {
+            label: "Entity Names",
+            group: Radar,
+            value: |s| match s.radar.names {
+                crate::config::NameMode::Off => "OFF".into(),
+                crate::config::NameMode::Players => "Players".into(),
+                crate::config::NameMode::All => "All".into(),
+            },
+            step: |s, b| {
+                use crate::config::NameMode::*;
+                s.radar.names = cycle(&[Off, Players, All], s.radar.names, b);
+            },
+        },
         toggle!("Display Players", Radar, radar.players),
         toggle!("Display Hostile Mobs", Radar, radar.hostile),
         toggle!("Display Friendly Mobs", Radar, radar.friendly),
