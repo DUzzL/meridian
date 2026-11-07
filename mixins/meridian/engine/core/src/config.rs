@@ -342,6 +342,21 @@ pub struct WaypointSettings {
     pub distance_in_km_from: u32,
     /// A beacon-like beam over waypoints in the world (off by default).
     pub beam: bool,
+    /// How the waypoint list orders its rows.
+    pub sort: WaypointSort,
+}
+
+/// How the waypoint list orders its rows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WaypointSort {
+    /// Newest first (ties keep the set's order).
+    #[default]
+    Creation,
+    Name,
+    /// Nearest first.
+    Distance,
+    Initials,
 }
 
 impl Default for WaypointSettings {
@@ -360,6 +375,7 @@ impl Default for WaypointSettings {
             opacity_on_minimap: 90,
             distance_in_km_from: 10_000,
             beam: false,
+            sort: WaypointSort::default(),
         }
     }
 }

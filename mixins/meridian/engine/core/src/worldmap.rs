@@ -10,7 +10,8 @@
 use crate::geom::{REGION_BLOCKS, RegionPos};
 use crate::minimap::{Align, DrawOp};
 use crate::radar;
-use crate::waypoint::Waypoint;
+use crate::waypoint::{Spot, Waypoint};
+use meridian_host::WorldContext;
 
 /// The zoom a map opens at, as the reference shows it ("3.0x").
 pub const DEFAULT_ZOOM: f64 = 3.0;
@@ -40,9 +41,9 @@ const FOOTSTEPS: usize = 2048;
 pub enum MenuItem {
     /// The header: the clicked block's coordinates (not clickable).
     Header(String),
-    CreateWaypoint([i32; 3]),
-    TeleportHere([i32; 3]),
-    ShareLocation([i32; 3]),
+    CreateWaypoint(Spot),
+    TeleportHere(Spot),
+    ShareLocation(Spot),
     EditWaypoint(u64),
     TeleportToWaypoint(u64),
     DeleteWaypoint(u64),
@@ -127,6 +128,9 @@ pub struct Overlay<'a> {
     pub hovered_height: Option<i16>,
     pub hovered_biome: Option<String>,
     pub waypoints: &'a [&'a Waypoint],
+    /// The paired dimension's waypoints, already scaled to this map
+    /// (`waypoint::scaled_to`), drawn dimmed under the shown ones.
+    pub paired_waypoints: &'a [Waypoint],
     pub entities: &'a [radar::Entity],
     /// Entities as their faces (where known) instead of dots.
     pub faces: bool,
@@ -153,6 +157,8 @@ pub struct WorldMap {
     pub press: Option<[f32; 2]>,
     pub dragged: bool,
     pub footsteps: Vec<[i32; 2]>,
+    /// The world, map and dimension the footsteps were walked in.
+    pub footsteps_of: Option<(WorldContext, String)>,
     /// The zoom range (see [`WorldMap::set_unlimited`]).
     pub limits: (f64, f64),
     /// The opening animation: its target zoom and seconds run so far.
@@ -172,6 +178,7 @@ impl WorldMap {
             press: None,
             dragged: false,
             footsteps: Vec::new(),
+            footsteps_of: None,
             limits: (MIN_ZOOM, MAX_ZOOM),
             opening: None,
             seed_atlas: false,
@@ -292,6 +299,19 @@ impl WorldMap {
         [sx, sy, side, side]
     }
 
+    /// The footsteps belong to one world, map and dimension: another one
+    /// starts them afresh.
+    pub fn footsteps_in(&mut self, context: &WorldContext, map: &str) {
+        if self
+            .footsteps_of
+            .as_ref()
+            .is_none_or(|(c, m)| c != context || m != map)
+        {
+            self.footsteps.clear();
+            self.footsteps_of = Some((context.clone(), map.to_owned()));
+        }
+    }
+
     /// Notes where the player walked (every other block).
     pub fn step(&mut self, player: [f64; 3]) {
         self.player_at = Some([player[0], player[2]]);
@@ -329,6 +349,8 @@ impl WorldMap {
     }
 
     /// A right click: opens the menu for the block (and waypoint) there.
+    /// `height` is the column's explored top ([`surface_height`]); without
+    /// it the header and every action say `~`.
     pub fn right_click(
         &mut self,
         p: [f32; 2],
@@ -339,15 +361,19 @@ impl WorldMap {
     ) {
         let w = self.to_world(p, gui, unit);
         let (x, z) = (w[0].floor() as i32, w[1].floor() as i32);
-        let y = height.map_or(64, |h| h as i32 + 1);
+        let spot = Spot {
+            x,
+            y: height.map(|h| h as i32 + 1),
+            z,
+        };
         let mut items = vec![
             MenuItem::Header(format!(
                 "X: {x}, Y: {}, Z: {z}",
                 height.map_or("~".to_owned(), |h| h.to_string())
             )),
-            MenuItem::CreateWaypoint([x, y, z]),
-            MenuItem::TeleportHere([x, y, z]),
-            MenuItem::ShareLocation([x, y, z]),
+            MenuItem::CreateWaypoint(spot),
+            MenuItem::TeleportHere(spot),
+            MenuItem::ShareLocation(spot),
         ];
         if let Some(id) = self.waypoint_at(p, gui, unit, waypoints) {
             items.extend([
@@ -473,6 +499,11 @@ impl WorldMap {
                 points: diamond(r),
                 argb: 0xFF00_0000 | e.class.rgb(),
             });
+        }
+        // The paired dimension's waypoints, dimmed, under the shown ones.
+        for w in o.paired_waypoints {
+            let [x, y] = self.to_screen([w.pos[0] as f64 + 0.5, w.pos[2] as f64 + 0.5], gui, u);
+            ops.extend(pin([x, y], u, 0x7000_0000 | w.rgb(), &w.initials));
         }
         // Waypoints: a shield in the waypoint's colour with its initial, its
         // point on the block.
@@ -650,6 +681,13 @@ impl WorldMap {
     }
 }
 
+/// The explored top of a column as the map's menu and keys use it: none
+/// where unexplored, or on the Nether's bedrock roof (its top at Y 127),
+/// which says nothing about the ground below.
+pub fn surface_height(dimension: &str, height: Option<i16>) -> Option<i16> {
+    height.filter(|h| !(dimension == "minecraft:the_nether" && *h >= 127))
+}
+
 /// Font pixels per minimap unit of the map screen's texts (measured on the
 /// reference: about seven physical pixels per font pixel at three per unit).
 const TEXT_SCALE: f32 = 2.3;
@@ -804,7 +842,7 @@ pub const CONTROLS: &[&str] = &[
     "Right click: menu (waypoints, teleport, share, export)",
     "B: new waypoint at the cursor",
     "M or Esc: close the map",
-    "Switch map dimension key: Overworld, Nether, End",
+    "Dimension button or key: Overworld, Nether, End",
 ];
 
 /// The toolbar's buttons, top to bottom.
@@ -813,6 +851,8 @@ pub enum Button {
     ZoomIn,
     ZoomOut,
     Center,
+    /// Shows the next dimension (Overworld, Nether, End).
+    Dimension,
     SeedLayer,
     SeedSettings,
     Waypoints,
@@ -833,6 +873,7 @@ impl Button {
             Button::ZoomIn => Icon::Text("+"),
             Button::ZoomOut => Icon::Text("-"),
             Button::Center => Icon::Item("item/compass_00"),
+            Button::Dimension => Icon::Item("item/ender_pearl"),
             Button::SeedLayer => Icon::Item("item/filled_map"),
             Button::SeedSettings => Icon::Item("item/ender_eye"),
             Button::Waypoints => Icon::Item("item/name_tag"),
@@ -846,6 +887,7 @@ impl Button {
             Button::ZoomIn => "Zoom in",
             Button::ZoomOut => "Zoom out",
             Button::Center => "Centre on the player (Space)",
+            Button::Dimension => "Switch dimension: Overworld, Nether, End",
             Button::SeedLayer if seed_layer => "Seed map layer: On",
             Button::SeedLayer => "Seed map layer: Off",
             Button::SeedSettings => "Seed Atlas settings",
@@ -858,7 +900,12 @@ impl Button {
 
 /// The toolbar, top to bottom (the Seed Atlas buttons while it is on).
 pub fn toolbar(seed_atlas: bool) -> Vec<Button> {
-    let mut b = vec![Button::ZoomIn, Button::ZoomOut, Button::Center];
+    let mut b = vec![
+        Button::ZoomIn,
+        Button::ZoomOut,
+        Button::Center,
+        Button::Dimension,
+    ];
     if seed_atlas {
         b.extend([Button::SeedLayer, Button::SeedSettings]);
     }
@@ -993,7 +1040,11 @@ mod tests {
         let action = m.release([rect[0] + 5.0, rect[1] + 1.0 + row * 1.5], GUI, 1.0);
         assert!(matches!(
             action,
-            MapAction::Menu(MenuItem::CreateWaypoint([10, 71, _]))
+            MapAction::Menu(MenuItem::CreateWaypoint(Spot {
+                x: 10,
+                y: Some(71),
+                ..
+            }))
         ));
         assert!(m.menu.is_none());
     }
@@ -1028,7 +1079,11 @@ mod tests {
         let mut m = WorldMap::new([0.0; 3]);
         m.menu = Some(Menu {
             at: [0.0, 0.0],
-            items: vec![MenuItem::TeleportHere([0, 0, 0])],
+            items: vec![MenuItem::TeleportHere(Spot {
+                x: 0,
+                y: None,
+                z: 0,
+            })],
             scale: 1.0,
         });
         m.press([5.0, 5.0]);
@@ -1124,6 +1179,65 @@ mod tests {
         assert!((m.zoom - DEFAULT_ZOOM * ZOOM_STEP).abs() < 1e-9);
         m.open([0.0; 3], false);
         assert!((m.zoom - DEFAULT_ZOOM * ZOOM_STEP).abs() < 1e-9);
+    }
+
+    #[test]
+    fn unknown_heights_stay_unknown() {
+        assert_eq!(surface_height("minecraft:overworld", Some(130)), Some(130));
+        assert_eq!(
+            surface_height("minecraft:the_nether", Some(127)),
+            None,
+            "the bedrock roof"
+        );
+        assert_eq!(surface_height("minecraft:the_nether", Some(40)), Some(40));
+        assert_eq!(surface_height("minecraft:overworld", None), None);
+        let mut m = WorldMap::new([0.0; 3]);
+        m.right_click([500.0, 300.0], GUI, 1.0, None, &[]);
+        let items = &m.menu.as_ref().unwrap().items;
+        assert_eq!(items[0], MenuItem::Header("X: 0, Y: ~, Z: 0".into()));
+        assert_eq!(
+            items[2],
+            MenuItem::TeleportHere(Spot {
+                x: 0,
+                y: None,
+                z: 0
+            })
+        );
+    }
+
+    #[test]
+    fn footsteps_start_afresh_in_another_world_or_dimension() {
+        use meridian_host::{DimensionId, WorldSource};
+        let world = |name: &str, dim: &str| WorldContext {
+            source: WorldSource::Singleplayer { world: name.into() },
+            dimension: DimensionId::new(dim),
+        };
+        let mut m = WorldMap::new([0.0; 3]);
+        let home = world("a", "minecraft:overworld");
+        m.footsteps_in(&home, "default");
+        m.step([0.0, 64.0, 0.0]);
+        m.step([5.0, 64.0, 0.0]);
+        m.footsteps_in(&home, "default");
+        assert_eq!(m.footsteps.len(), 2, "the same place keeps them");
+        m.footsteps_in(&world("a", "minecraft:the_nether"), "default");
+        assert!(m.footsteps.is_empty());
+        m.step([0.0, 64.0, 0.0]);
+        m.footsteps_in(&world("b", "minecraft:the_nether"), "default");
+        assert!(m.footsteps.is_empty());
+        m.step([0.0, 64.0, 0.0]);
+        m.footsteps_in(&world("b", "minecraft:the_nether"), "map-2");
+        assert!(m.footsteps.is_empty());
+    }
+
+    #[test]
+    fn the_toolbar_switches_dimensions() {
+        let all = toolbar(false);
+        let i = all.iter().position(|b| *b == Button::Dimension).unwrap();
+        let [x, y, w, h] = toolbar_rect(i, all.len(), GUI);
+        let p = [x + w / 2.0, y + h / 2.0];
+        let mut m = WorldMap::new([0.0; 3]);
+        m.press(p);
+        assert_eq!(m.release(p, GUI, 1.0), MapAction::Button(Button::Dimension));
     }
 
     #[test]

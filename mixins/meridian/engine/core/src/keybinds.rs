@@ -15,7 +15,9 @@ macro_rules! bindings {
     };
 }
 
-/// Every key binding, in the order the controls screen lists them.
+/// Every key binding, in the order the controls screen lists them. Keys
+/// kept for the reference's layout whose feature Meridian lacks (other
+/// players, claims, server-side settings) say so in their label.
 pub const KEY_BINDINGS: &[KeyBinding] = bindings! {
     // Minimap
     "minimap.zoom_in", "Zoom minimap in", UNBOUND;
@@ -36,16 +38,16 @@ pub const KEY_BINDINGS: &[KeyBinding] = bindings! {
     "radar.reverse", "Reverse entity radar filter", UNBOUND;
     "radar.faces", "Entity faces (hold)", "key.keyboard.tab";
     "cave.toggle_manual", "Manual cave mode", UNBOUND;
-    "players.alt_list", "Alternative player list", UNBOUND;
-    "players.tracked_map", "Tracked players on the map", UNBOUND;
-    "players.tracked_world", "Tracked players in the world", UNBOUND;
-    "overlay.claims", "Show/hide claims", UNBOUND;
+    "players.alt_list", "Alternative player list (not available)", UNBOUND;
+    "players.tracked_map", "Tracked players on the map (not available)", UNBOUND;
+    "players.tracked_world", "Tracked players in the world (not available)", UNBOUND;
+    "overlay.claims", "Show/hide claims (not available)", UNBOUND;
     "settings", "Minimap settings", "key.keyboard.y";
-    "server_settings", "Minimap server settings", UNBOUND;
+    "server_settings", "Minimap server settings (not available)", UNBOUND;
     // World map
     "worldmap.open", "Open world map", "key.keyboard.m";
     "worldmap.settings", "World map settings", "key.keyboard.right.bracket";
-    "worldmap.server_settings", "World map server settings", UNBOUND;
+    "worldmap.server_settings", "World map server settings (not available)", UNBOUND;
     "worldmap.zoom_in", "Zoom world map in", UNBOUND;
     "worldmap.zoom_out", "Zoom world map out", UNBOUND;
     "quick_confirm", "Quick confirm", "key.keyboard.right.shift";
@@ -101,6 +103,26 @@ mod tests {
                 ("worldmap.open", "key.keyboard.m"),
                 ("worldmap.settings", "key.keyboard.right.bracket"),
                 ("quick_confirm", "key.keyboard.right.shift"),
+            ]
+        );
+    }
+
+    #[test]
+    fn keys_without_a_feature_say_so() {
+        let unavailable: Vec<_> = KEY_BINDINGS
+            .iter()
+            .filter(|b| b.label.ends_with(" (not available)"))
+            .map(|b| b.id)
+            .collect();
+        assert_eq!(
+            unavailable,
+            [
+                "players.alt_list",
+                "players.tracked_map",
+                "players.tracked_world",
+                "overlay.claims",
+                "server_settings",
+                "worldmap.server_settings",
             ]
         );
     }

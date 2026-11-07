@@ -35,8 +35,9 @@ use meridian_core::minimap::{self, Align, Controls, DrawOp};
 use meridian_core::screens::{Action, Editor, Env, List, Screen, SettingsScreen};
 use meridian_core::persist::MapPaths;
 use meridian_core::radar;
-use meridian_core::waypoint::{self, Kind, Waypoint, WaypointBook};
+use meridian_core::waypoint::{self, Kind, Spot, Waypoint, WaypointBook};
 use meridian_core::worldmap::{MapAction, MenuItem, Overlay, WorldMap};
+use horizon_client::text::{ClickEvent, Style};
 use meridian_host::{
     BiomeAppearance, BlockAppearance, ChunkPos, ChunkSnapshot, ColumnSample, DimensionId,
     HostEvent, MapHost, PlayerState, ReadMode, Tint, WorldContext, WorldSource,
@@ -162,6 +163,8 @@ struct State {
     pending: Vec<Pending>,
     /// The current death has its deathpoint (until the player plays again).
     death_recorded: bool,
+    /// Waypoints shared in chat, waiting to be accepted.
+    shared: waypoint::SharedInbox,
     /// Cave mode: automatic under a roof, or manual.
     cave: meridian_core::cave::CaveControl,
     /// The world map's view (kept between openings) and its footsteps.
@@ -580,6 +583,7 @@ impl State {
         self.save_book();
         self.book = None;
         self.close_other_book();
+        self.shared.clear();
     }
 
     /// Saves and drops another world's waypoints the screens showed.
@@ -668,6 +672,7 @@ impl Meridian {
                 pending: Vec::new(),
                 cave: Default::default(),
                 death_recorded: false,
+                shared: Default::default(),
                 map: WorldMap::new([0.0; 3]),
                 map_open: false,
                 open_map: false,
@@ -941,14 +946,15 @@ impl Meridian {
             for id in hits {
                 s.engine.handle(&map_host, HostEvent::Key { id, pressed });
             }
-            s.notice.take()
+            // A release (also under other screens) leaves notices for a press.
+            if pressed { s.notice.take() } else { None }
         })
     }
 
     /// `/meridian ...`; answers what to tell the player and a chat line to
     /// send (a teleport or a shared waypoint).
     fn on_command(&self, host: &dyn Host, args: &[&str]) -> (String, Option<String>) {
-        const USAGE: &str = "/meridian waypoint add|remove|tp|share|list [name], /meridian waypoint export, /meridian waypoint import <file or folder>";
+        const USAGE: &str = "/meridian waypoint add|remove|tp|share|list [name], /meridian waypoint set [new|use|rename|delete <name>], /meridian waypoint accept [number], /meridian waypoint shared, /meridian waypoint export, /meridian waypoint import <file or folder>";
         self.with_state(host, |s| {
             let export_dir = s.export_dir.clone();
             let world_name = context_labels(s).0.trim_end_matches(" (auto)").to_owned();
@@ -957,7 +963,41 @@ impl Meridian {
                 dimension: s.dimension.as_deref(),
             }
             .player();
-            let tp = s.config.current().waypoints.teleport_format.clone();
+            let settings = s.config.current().clone();
+            let formats = waypoint::TeleportFormats::of(&settings);
+            if args.get(1) == Some(&"waypoint") {
+                match args.get(2).copied() {
+                    // A waypoint shared in chat (its link runs this).
+                    Some("accept") => {
+                        let number = match args.get(3).map(|n| n.parse::<u32>()) {
+                            None => None,
+                            Some(Ok(n)) => Some(n),
+                            Some(Err(_)) => return ("/meridian waypoint accept [number]".to_owned(), None),
+                        };
+                        let Some(shared) = s.shared.take(number) else {
+                            return ("No shared waypoint to add".to_owned(), None);
+                        };
+                        let Some((book, dim)) = s.book_here() else {
+                            return ("Meridian: no world open".to_owned(), None);
+                        };
+                        let name = shared.waypoint.name.clone();
+                        let target = shared.dimension.unwrap_or(dim);
+                        return match book.add_temporary(&target, shared.waypoint, waypoint::now()) {
+                            Some(_) => (format!("Added shared waypoint {name} (temporary)"), None),
+                            None => (format!("{name} is already a waypoint"), None),
+                        };
+                    }
+                    Some("shared") => {
+                        let waiting: Vec<String> = s.shared.waiting().map(|w| format!("{} {}", w.number, w.waypoint.name)).collect();
+                        return if waiting.is_empty() {
+                            ("No shared waypoints".to_owned(), None)
+                        } else {
+                            (format!("Shared: {} (/meridian waypoint accept <number>)", waiting.join(", ")), None)
+                        };
+                    }
+                    _ => {}
+                }
+            }
             let Some((book, dim)) = s.book_here() else {
                 return ("Meridian: no world open".to_owned(), None);
             };
@@ -1010,7 +1050,7 @@ impl Meridian {
                 Some("tp") => match find(book) {
                     Some(w) => (
                         format!("Teleporting to {}", w.name),
-                        Some(waypoint::command(&tp, &w, &dim)),
+                        Some(waypoint::teleport_command(&w, &dim, &dim, formats)),
                     ),
                     None => (format!("No waypoint named {name}"), None),
                 },
@@ -1059,6 +1099,38 @@ impl Meridian {
                         }
                     };
                     (format!("Imported {added} waypoints"), None)
+                }
+                // The sets of the dimension.
+                Some("set") => {
+                    let rest = args.get(4..).map(|r| r.join(" ")).unwrap_or_default();
+                    let sets = book.dimension_mut(&dim);
+                    let current = sets.current_set.clone();
+                    let reply = match args.get(3).copied() {
+                        None | Some("list") => {
+                            let names: Vec<&str> = sets.sets.keys().map(String::as_str).collect();
+                            return (format!("Sets: {} (current: {current})", names.join(", ")), None);
+                        }
+                        Some("new") if sets.create_set(&rest) => {
+                            sets.current_set = rest.trim().to_owned();
+                            format!("Created set {}", rest.trim())
+                        }
+                        Some("use") if sets.sets.contains_key(&rest) => {
+                            sets.current_set = rest.clone();
+                            format!("Waypoint set: {rest}")
+                        }
+                        Some("rename") if sets.rename_set(&current, &rest) => format!("Renamed set {current} to {}", rest.trim()),
+                        Some("delete") => {
+                            let name = if rest.is_empty() { current } else { rest };
+                            if !sets.delete_set(&name) {
+                                return (format!("No set named {name}"), None);
+                            }
+                            format!("Deleted set {name} (current: {})", sets.current_set)
+                        }
+                        Some(op @ ("new" | "use" | "rename")) => return (format!("Cannot {op} set \"{rest}\""), None),
+                        _ => return ("/meridian waypoint set [list | new <name> | use <name> | rename <new name> | delete [name]]".to_owned(), None),
+                    };
+                    book.dirty = true;
+                    (reply, None)
                 }
                 Some("list") => {
                     let names: Vec<String> = book
@@ -1126,8 +1198,11 @@ impl Hooks for Meridian {
                     s.menu_marker = Some(m);
                     s.menu_player = None;
                 } else if right {
+                    // The dimension shown: its heights and its waypoints.
                     let w = s.map.to_world(at, view.gui, view.unit);
-                    let height = s.engine.sampler().column(w[0].floor() as i32, w[1].floor() as i32).map(|c| c.height);
+                    let (shown, engine) = s.shown_map();
+                    let column = engine.sampler().column(w[0].floor() as i32, w[1].floor() as i32);
+                    let height = meridian_core::worldmap::surface_height(&shown, column.map(|c| c.height));
                     let waypoints = map_data.waypoints.iter().collect::<Vec<_>>();
                     s.map.right_click(at, view.gui, view.unit, height, &waypoints);
                     s.menu_marker = None;
@@ -1157,7 +1232,12 @@ impl Hooks for Meridian {
             });
             return Flow::Cancel;
         }
-        self.with_screen(host, |screen, env| ((), screen.click(at, right, env)));
+        // GLFW's modifier bits: Shift, Ctrl, and Super (Cmd on macOS).
+        let (shift, ctrl) = (event.modifiers & 1 != 0, event.modifiers & (2 | 8) != 0);
+        self.with_screen(host, |screen, env| {
+            screen.set_modifiers(shift, ctrl);
+            ((), screen.click(at, right, env))
+        });
         Flow::Cancel
     }
 
@@ -1232,14 +1312,23 @@ impl Hooks for Meridian {
             self.map_key(host, &key);
             return Flow::Cancel;
         }
-        self.with_screen(host, |screen, env| ((), screen.key(&key, env)));
+        // The quick confirm key answers the screen, unless it is a key that
+        // types (it may be bound to a letter).
+        let chosen = |id: &str, default: &str| host.mod_key(MOD_ID, id, default);
+        let types = key.strip_prefix("key.keyboard.").is_some_and(|k| k.chars().count() == 1);
+        let quick = !types && bindings_for_key(&key, chosen).any(|b| b.id == "quick_confirm");
+        self.with_screen(host, |screen, env| ((), if quick { screen.quick_confirm(env) } else { screen.key(&key, env) }));
         Flow::Cancel
     }
 
     fn screen_key_released_pre(&self, host: &dyn Host, event: &mut ScreenKeyReleasedPreEvent<'_>) -> Flow {
         // Released over any screen (the key may have been pressed while
-        // playing): the faces go; only our map takes the key.
-        if self.faces_key(host, event.key, false) && host.mod_screen() == Some(MOD_ID) {
+        // playing, and the key hook only hears it while playing): our keys
+        // see the release (hold to enlarge, faces); only our map takes the
+        // faces key.
+        let faces = self.faces_key(host, event.key, false);
+        self.on_key(host, event.key, false);
+        if faces && host.mod_screen() == Some(MOD_ID) {
             return Flow::Cancel;
         }
         Flow::Continue
@@ -1374,31 +1463,25 @@ impl Hooks for Meridian {
         host: &mut dyn Host,
         event: &mut ClientChatReceivedEvent<'_>,
     ) -> Flow {
-        let Some((name, pos, shared_dim)) = waypoint::parse_shared(&event.message.plain()) else {
+        // A shared waypoint is only remembered: the line gets a link that
+        // adds it (`/meridian waypoint accept <n>`), so nobody else can
+        // fill the player's waypoints.
+        if event.overlay {
+            return Flow::Continue;
+        }
+        let Some((waypoint, dimension)) = waypoint::parse_shared(&event.message.plain()) else {
             return Flow::Continue;
         };
-        let added = self.with_state(&*host, |s| {
-            let (book, dim) = s.book_here()?;
-            if shared_dim.as_deref().is_some_and(|d| d != dim) {
-                return None;
-            }
-            let exists = book
-                .dimension(&dim)
-                .is_some_and(|d| d.current().iter().any(|w| w.pos == pos));
-            if exists {
-                return None;
-            }
-            let mut w = Waypoint::new(name.clone(), pos, 11);
-            w.kind = Kind::Temporary;
-            book.add(&dim, w, false, waypoint::now());
-            Some(name)
-        });
-        if let Some(name) = added {
-            host.client_action_bar(
-                Text::literal(format!("Shared waypoint added: {name} (temporary)")),
-                false,
-            );
-        }
+        let number = self.with_state(&*host, |s| s.shared.receive(waypoint, dimension));
+        let link = Text::styled(
+            " [Add waypoint]",
+            Style {
+                click: Some(ClickEvent::RunCommand(format!("/meridian waypoint accept {number}"))),
+                hover: Some(Box::new(Text::literal("Adds it as a temporary waypoint"))),
+                ..Style::color(0x55FF55)
+            },
+        );
+        *event.message = std::mem::take(event.message).append(link);
         Flow::Continue
     }
 
@@ -1551,6 +1634,9 @@ impl Hooks for Meridian {
             }
             let player = map_host.player();
             if let Some(p) = &player {
+                if let Some(context) = s.engine.context() {
+                    s.map.footsteps_in(context, s.engine.map());
+                }
                 s.map.step(p.position);
                 // Keep the regions around the player in memory.
                 let here = RegionPos::of_block(p.position[0] as i32, p.position[2] as i32);
@@ -1582,11 +1668,14 @@ impl Hooks for Meridian {
             if let Some((_, viewer)) = &mut s.viewer {
                 viewer.tick(&ViewerHost(HorizonHost { host, dimension: None }), budget / 2);
             }
+            // Not while dead (the death screen is at the deathpoint), and
+            // only once the player has been away from it.
+            let playing = host.playing();
             if let Some(p) = player
                 && s.config.current().waypoints.delete_reached_deathpoints
                 && let Some((book, dim)) = s.book_here()
             {
-                book.remove_reached_deathpoints(&dim, p.position);
+                book.reach_deathpoints(&dim, p.position, playing);
             }
             if s.last_book_save.elapsed() >= Duration::from_secs(2) {
                 s.save_book();
@@ -1646,13 +1735,14 @@ impl Hooks for Meridian {
                 // Alive again: the next death gets its own deathpoint.
                 s.death_recorded = false;
             }
-            if s.map_open && host.mod_screen() != Some(MOD_ID) {
+            if (s.map_open || s.screen.is_some()) && host.mod_screen() != Some(MOD_ID) {
                 // Closed without a closing event (Escape, another screen).
                 s.map_open = false;
                 s.screen = None;
                 s.return_to_map = false;
                 s.map.press = None;
                 s.viewer = None;
+                s.reset_waypoint_place();
                 gpu_map::set_frame(None);
             }
             if s.map_open {
@@ -1695,7 +1785,9 @@ fn world_waypoints(host: &dyn Host, s: &State, gui: [f32; 2], gui_scale: f32, op
         if !w.global && settings.max_distance > 0 && distance > settings.max_distance as f64 {
             continue;
         }
-        let at = [w.pos[0] as f64 + 0.5, w.pos[1] as f64 + 1.0, w.pos[2] as f64 + 0.5];
+        // An unknown height shows at eye level.
+        let y = w.height().map_or(camera.position[1], |y| y as f64 + 1.0);
+        let at = [w.pos[0] as f64 + 0.5, y, w.pos[2] as f64 + 0.5];
         let Some([x, y]) = minimap::world_to_screen(camera.position, &camera.view, &camera.projection, at, gui)
         else {
             continue;
@@ -1704,7 +1796,8 @@ fn world_waypoints(host: &dyn Host, s: &State, gui: [f32; 2], gui_scale: f32, op
             continue;
         }
         let initial: String = w.initials.chars().take(2).collect();
-        ops.extend(minimap::waypoint_mark([x, y], mark, alpha(settings.opacity_in_world, 0.6) | w.rgb(), &initial, u));
+        // 80 % opacity by default gives D-019's 60 %.
+        ops.extend(minimap::waypoint_mark([x, y], mark, alpha(settings.opacity_in_world, 0.75) | w.rgb(), &initial, u));
         let name_scale = 0.64 * u;
         let name_y = y + mark / 2.0 + 2.0 * u;
         let name_w = host.text_width(&w.name) * name_scale;
@@ -2030,10 +2123,12 @@ impl Meridian {
                 // Only in the world the player is in.
                 Action::Teleport(_) | Action::Share(_) if !here => {}
                 Action::Teleport(id) => {
-                    let tp = s.config.current().waypoints.teleport_format.clone();
+                    // Into the shown dimension when it isn't the player's.
+                    let player_dim = s.dimension.clone().unwrap_or_default();
                     if let Some(w) = s.book.as_ref().and_then(|(_, b)| b.dimension(&dim)?.find(id).cloned()) {
+                        let line = waypoint::teleport_command(&w, &dim, &player_dim, waypoint::TeleportFormats::of(s.config.current()));
                         s.pending.push(Pending::CloseScreen);
-                        s.pending.push(Pending::Chat(waypoint::command(&tp, &w, &dim)));
+                        s.pending.push(Pending::Chat(line));
                     }
                 }
                 Action::Share(id) => {
@@ -2135,6 +2230,9 @@ impl Meridian {
             if let Some((book, dim)) = s.book_here() {
                 book.record_death(&dim, pos, settings.keep_old_deathpoints, waypoint::now());
             }
+            // The waypoint screens show where the player is again (with the
+            // new deathpoint), as the reference's switch on death does.
+            s.reset_waypoint_place();
             s.save_book();
         });
     }
@@ -2199,7 +2297,7 @@ struct MapView {
     unit: f32,
 }
 
-/// What map input needs from the state besides the view: the current
+/// What map input needs from the state besides the view: the shown
 /// dimension's waypoints (copied, so the view can change meanwhile).
 struct MapData {
     waypoints: Vec<Waypoint>,
@@ -2247,16 +2345,19 @@ impl Meridian {
     fn map_input(&self, host: &dyn Host, f: impl FnOnce(&mut State, MapView, &MapData) -> MapAction) {
         let view = Self::map_view(host);
         self.with_state(host, |s| {
-            let waypoints = match (&s.dimension, &s.book) {
-                (Some(dim), Some((_, book))) => book
-                    .dimension(dim)
+            let (shown, _) = s.shown_map();
+            let waypoints = match &s.book {
+                Some((_, book)) => book
+                    .dimension(&shown)
                     .map(|d| d.visible(s.config.current().waypoints.all_sets).into_iter().cloned().collect())
                     .unwrap_or_default(),
                 _ => Vec::new(),
             };
             let data = MapData { waypoints };
-            let action = f(s, view, &data);
-            s.map_action(action);
+            match f(s, view, &data) {
+                MapAction::Button(meridian_core::worldmap::Button::Dimension) => s.next_map_dimension(host),
+                action => s.map_action(action),
+            }
         });
     }
 
@@ -2277,10 +2378,14 @@ impl Meridian {
                     "worldmap.zoom_in" | "minimap.zoom_in" => s.map.scroll(1.0, center, view.gui, view.unit),
                     "worldmap.zoom_out" | "minimap.zoom_out" => s.map.scroll(-1.0, center, view.gui, view.unit),
                     "waypoint.new" => {
+                        // At the cursor, in the dimension shown; `~` where
+                        // its height is unknown.
                         let w = s.map.to_world(at, view.gui, view.unit);
                         let (x, z) = (w[0].floor() as i32, w[1].floor() as i32);
-                        let y = s.engine.sampler().column(x, z).map_or(64, |c| c.height as i32 + 1);
-                        s.map_action(MapAction::Menu(MenuItem::CreateWaypoint([x, y, z])));
+                        let (shown, engine) = s.shown_map();
+                        let height = meridian_core::worldmap::surface_height(&shown, engine.sampler().column(x, z).map(|c| c.height));
+                        let y = height.map(|h| h as i32 + 1);
+                        s.map_action(MapAction::Menu(MenuItem::CreateWaypoint(Spot { x, y, z })));
                     }
                     _ => {}
                 }
@@ -2540,7 +2645,7 @@ impl Meridian {
                                 icons.push(gpu_map::IconQuad { icon: badge, rect: [rect[0] + w - b + 3.0 * px, rect[1] + hgt - b + 3.0 * px, b, b], alpha });
                             }
                             if inside(rect, mouse) {
-                                s.hovered_marker = Some(HoveredMarker { name: m.name, x: h.x, z: h.z, key: key.clone() });
+                                s.hovered_marker = Some(HoveredMarker { name: m.name, x: h.x, y: h.y, z: h.z, key: key.clone() });
                                 let mut first = m.name.to_owned();
                                 if h.flags & meridian_seedatlas::atlas::RESULT_APPROXIMATE != 0 {
                                     first.push_str(" (approx.)");
@@ -2581,6 +2686,15 @@ impl Meridian {
                 }
                 _ => Vec::new(),
             };
+            // The Overworld's waypoints on the Nether's map at an eighth, and
+            // the Nether's on the Overworld's.
+            let paired: Vec<Waypoint> = match (&s.book, waypoint::paired_dimension(&shown)) {
+                (Some((_, book)), Some(other)) if settings.waypoints.on_minimap => book
+                    .dimension(other)
+                    .map(|d| waypoint::scaled_to(&d.visible(settings.waypoints.all_sets), other, &shown))
+                    .unwrap_or_default(),
+                _ => Vec::new(),
+            };
             let entities = if shown == here { entities } else { Vec::new() };
             let wm = &settings.world_map;
             s.map.seed_atlas = sa_settings.enabled;
@@ -2593,13 +2707,15 @@ impl Meridian {
                 hovered_height,
                 hovered_biome,
                 waypoints: &waypoints,
+                paired_waypoints: &paired,
                 entities: &entities,
                 faces: radar_now(&settings.radar, s.faces_held).faces,
                 seed_layer: sa_settings.biome_layer,
                 show_coordinates: wm.show_coordinates,
                 show_zoom: wm.show_zoom,
                 show_biome: wm.show_hovered_biome,
-                show_footsteps: wm.footsteps,
+                // Walked in the player's dimension only.
+                show_footsteps: wm.footsteps && shown == here,
                 player_as_arrow: wm.player_as_arrow,
                 cave_layer,
                 other_dimension: (shown != here).then(|| shown.rsplit(':').next().unwrap_or(&shown).to_owned()),
@@ -2669,39 +2785,41 @@ impl State {
         let other = self.viewer.as_ref().map(|(d, _)| d.clone());
         let wm = &self.config.current().world_map;
         let tp = if other.is_some() { wm.map_teleport_dimension_format.clone() } else { wm.map_teleport_format.clone() };
-        let wp_tp = self.config.current().waypoints.teleport_format.clone();
+        let here = self.dimension.clone().unwrap_or_default();
+        let viewing = other.is_some();
         let Some(dim) = other.or_else(|| self.dimension.clone()) else { return };
         let Some((_, book)) = self.book.as_mut() else { return };
         let find = |book: &WaypointBook, id| book.dimension(&dim).and_then(|d| d.find(id).cloned());
         match item {
             MenuItem::Header(_) => {}
-            MenuItem::CreateWaypoint(pos) => {
+            MenuItem::CreateWaypoint(spot) => {
                 let mut editor = Editor::new(book.dimension_mut(&dim), waypoint::now(), false);
-                editor.x = pos[0].to_string();
-                editor.y = pos[1].to_string();
-                editor.z = pos[2].to_string();
-                self.open_from_map(Screen::Editor(editor));
+                editor.x = spot.x.to_string();
+                editor.y = spot.y.map_or("~".to_owned(), |y| y.to_string());
+                editor.z = spot.z.to_string();
+                self.open_from_map_in(Screen::Editor(editor), viewing.then_some(dim));
             }
-            MenuItem::TeleportHere(pos) => {
-                let w = Waypoint::new("Here", pos, 0);
+            MenuItem::TeleportHere(spot) => {
+                let w = Waypoint::at("Here", spot, 0);
                 self.pending.push(Pending::CloseScreen);
                 self.pending.push(Pending::Chat(waypoint::command(&tp, &w, &dim)));
             }
-            MenuItem::ShareLocation(pos) => {
-                let w = Waypoint::new("Location", pos, 0);
+            MenuItem::ShareLocation(spot) => {
+                let w = Waypoint::at("Location", spot, 0);
                 self.pending.push(Pending::Chat(waypoint::share_text(&w, &dim)));
             }
             MenuItem::EditWaypoint(id) => {
                 if let Some(w) = find(book, id) {
-                    let set = book.dimension(&dim).map_or_else(String::new, |d| d.current_set.clone());
-                    self.open_from_map(Screen::Editor(Editor::edit(&w, &set, false)));
+                    // In its own set, which need not be the current one.
+                    let set = book.dimension(&dim).and_then(|d| d.set_of(id)).unwrap_or_default().to_owned();
+                    self.open_from_map_in(Screen::Editor(Editor::edit(&w, &set, false)), viewing.then_some(dim));
                 }
             }
             MenuItem::TeleportToWaypoint(id) => {
                 if let Some(w) = find(book, id) {
-                    let template = if self.viewer.is_some() { &tp } else { &wp_tp };
+                    let line = waypoint::teleport_command(&w, &dim, &here, waypoint::TeleportFormats::of(self.config.current()));
                     self.pending.push(Pending::CloseScreen);
-                    self.pending.push(Pending::Chat(waypoint::command(template, &w, &dim)));
+                    self.pending.push(Pending::Chat(line));
                 }
             }
             MenuItem::DeleteWaypoint(id) => {
@@ -2709,6 +2827,15 @@ impl State {
                 book.dirty = true;
             }
             MenuItem::ExportPng | MenuItem::Extra(..) => {}
+        }
+    }
+
+    /// The dimension the world map shows, and its map: the player's own,
+    /// or another one's read from disk.
+    fn shown_map(&self) -> (String, &MapEngine) {
+        match &self.viewer {
+            Some((dim, engine)) => (dim.clone(), engine),
+            None => (self.dimension.clone().unwrap_or_default(), &self.engine),
         }
     }
 
@@ -2777,6 +2904,15 @@ impl State {
         self.screen = Some(screen);
         self.map_open = false;
         self.return_to_map = true;
+    }
+
+    /// Opens a waypoint screen from the map for the dimension it shows
+    /// (`Some` when that isn't the player's), so it saves there.
+    fn open_from_map_in(&mut self, screen: Screen, dimension: Option<String>) {
+        if dimension.is_some() {
+            self.waypoint_place.1 = dimension;
+        }
+        self.open_from_map(screen);
     }
 }
 
@@ -2870,6 +3006,8 @@ impl Meridian {
 struct HoveredMarker {
     name: &'static str,
     x: i32,
+    /// The structure's height, when the search knows it.
+    y: Option<i32>,
     z: i32,
     key: Option<meridian_core::completed::StructureKey>,
 }
@@ -2917,16 +3055,30 @@ impl State {
                 }
             }
             MENU_COPY_COORDINATES => {
-                bridge::copy_to_clipboard(&format!("X: {}, Z: {}", m.x, m.z));
+                // As the Fabric version copies them: Y only when known.
+                let y = m.y.map_or(String::new(), |y| format!(", Y: {y}"));
+                bridge::copy_to_clipboard(&format!("X: {}{y}, Z: {}", m.x, m.z));
                 self.pending.push(Pending::Notice("Coordinates copied".into()));
             }
-            MENU_STRUCTURE_WAYPOINT | MENU_TEMPORARY_WAYPOINT => {
-                let Some((book, dim)) = self.book_here() else { return };
-                let mut w = Waypoint::new(m.name, [m.x, 64, m.z], 11);
-                if id == MENU_TEMPORARY_WAYPOINT {
-                    w.kind = Kind::Temporary;
-                }
-                book.add(&dim, w, false, waypoint::now());
+            // In the dimension the map shows (the marker's), at the
+            // structure's height or `~`.
+            MENU_STRUCTURE_WAYPOINT => {
+                let viewing = self.viewer.as_ref().map(|(d, _)| d.clone());
+                let Some(dim) = viewing.clone().or_else(|| self.dimension.clone()) else { return };
+                let Some((_, book)) = self.book.as_mut() else { return };
+                // The editor opens filled in, as the Fabric version's does.
+                let mut editor = Editor::new(book.dimension_mut(&dim), waypoint::now(), false);
+                editor.name = m.name.to_owned();
+                editor.x = m.x.to_string();
+                editor.y = m.y.map_or("~".to_owned(), |y| y.to_string());
+                editor.z = m.z.to_string();
+                self.open_from_map_in(Screen::Editor(editor), viewing);
+            }
+            MENU_TEMPORARY_WAYPOINT => {
+                let (dim, _) = self.shown_map();
+                let Some((_, book)) = self.book.as_mut() else { return };
+                let w = Waypoint::at(m.name, Spot { x: m.x, y: m.y, z: m.z }, 11);
+                book.add_temporary(&dim, w, waypoint::now());
             }
             _ => {}
         }
