@@ -49,6 +49,26 @@ pub enum Kind {
     Mark {
         color: u32,
     },
+    /// The game's slider: `value` 0..=1, the text on it.
+    Slider {
+        value: f32,
+    },
+    /// A dark framed panel (a list's background).
+    Panel {
+        fill: u32,
+    },
+    /// A plain filled rectangle; not clickable.
+    Fill {
+        color: u32,
+    },
+    /// A structure icon by marker id (`text`), greyed when `dim`.
+    Icon {
+        dim: bool,
+    },
+    /// Text wrapped to the widget's width.
+    Paragraph {
+        color: u32,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -112,6 +132,52 @@ impl Widget {
         }
     }
 
+    pub fn slider(id: &str, rect: [f32; 4], text: impl Into<String>, value: f32) -> Self {
+        Self {
+            id: id.into(),
+            rect,
+            text: text.into(),
+            kind: Kind::Slider { value },
+        }
+    }
+
+    /// Plain text in `color` (left, centred or right of `x`).
+    pub fn text(x: f32, y: f32, text: impl Into<String>, color: u32, align: Align) -> Self {
+        Self {
+            id: String::new(),
+            rect: [x, y, 0.0, 9.0],
+            text: text.into(),
+            kind: Kind::Label { color, align },
+        }
+    }
+
+    pub fn fill(rect: [f32; 4], color: u32) -> Self {
+        Self {
+            id: String::new(),
+            rect,
+            text: String::new(),
+            kind: Kind::Fill { color },
+        }
+    }
+
+    pub fn icon(marker_id: &str, rect: [f32; 4], dim: bool) -> Self {
+        Self {
+            id: String::new(),
+            rect,
+            text: marker_id.into(),
+            kind: Kind::Icon { dim },
+        }
+    }
+
+    pub fn paragraph(rect: [f32; 4], text: impl Into<String>, color: u32) -> Self {
+        Self {
+            id: String::new(),
+            rect,
+            text: text.into(),
+            kind: Kind::Paragraph { color },
+        }
+    }
+
     pub fn separator(y: f32, width: f32) -> Self {
         Self {
             id: String::new(),
@@ -121,7 +187,7 @@ impl Widget {
         }
     }
 
-    fn contains(&self, p: [f32; 2]) -> bool {
+    pub fn contains(&self, p: [f32; 2]) -> bool {
         let [x, y, w, h] = self.rect;
         p[0] >= x && p[0] < x + w && p[1] >= y && p[1] < y + h
     }
@@ -129,8 +195,17 @@ impl Widget {
     fn interactive(&self) -> bool {
         match &self.kind {
             Kind::Button { enabled } => *enabled,
-            Kind::Field { .. } | Kind::Selector { .. } | Kind::Row { .. } => true,
-            Kind::Label { .. } | Kind::Separator | Kind::Mark { .. } => false,
+            Kind::Field { .. }
+            | Kind::Selector { .. }
+            | Kind::Row { .. }
+            | Kind::Slider { .. }
+            | Kind::Panel { .. } => true,
+            Kind::Label { .. }
+            | Kind::Separator
+            | Kind::Mark { .. }
+            | Kind::Fill { .. }
+            | Kind::Icon { .. }
+            | Kind::Paragraph { .. } => false,
         }
     }
 }
@@ -261,6 +336,71 @@ pub fn draw(widgets: &[Widget], mouse: [f32; 2]) -> Vec<DrawOp> {
                     scale: 1.0,
                 });
             }
+            Kind::Slider { value } => {
+                let (track, handle) = if hover {
+                    (
+                        "gui/sprites/widget/slider_highlighted",
+                        "gui/sprites/widget/slider_handle_highlighted",
+                    )
+                } else {
+                    (
+                        "gui/sprites/widget/slider",
+                        "gui/sprites/widget/slider_handle",
+                    )
+                };
+                ops.push(DrawOp::NineSlice {
+                    sprite: track,
+                    rect: w.rect,
+                    argb: WHITE,
+                });
+                ops.push(DrawOp::NineSlice {
+                    sprite: handle,
+                    rect: [x + value.clamp(0.0, 1.0) * (width - 8.0), y, 8.0, height],
+                    argb: WHITE,
+                });
+                center_text(&mut ops, WHITE);
+            }
+            Kind::Panel { fill } => {
+                ops.push(DrawOp::Fill {
+                    rect: w.rect,
+                    argb: *fill,
+                });
+                for r in [
+                    [x, y, width, 1.0],
+                    [x, y + height - 1.0, width, 1.0],
+                    [x, y, 1.0, height],
+                    [x + width - 1.0, y, 1.0, height],
+                ] {
+                    ops.push(DrawOp::Fill {
+                        rect: r,
+                        argb: 0xFF5A_5A5A,
+                    });
+                }
+                ops.push(DrawOp::Fill {
+                    rect: [x, y, width, 1.0],
+                    argb: 0xFF88_8888,
+                });
+                ops.push(DrawOp::Fill {
+                    rect: [x, y + height - 1.0, width, 1.0],
+                    argb: 0xFF30_3030,
+                });
+            }
+            Kind::Fill { color } => ops.push(DrawOp::Fill {
+                rect: w.rect,
+                argb: *color,
+            }),
+            Kind::Icon { dim } => ops.push(DrawOp::Icon {
+                id: w.text.clone(),
+                rect: w.rect,
+                dim: *dim,
+            }),
+            Kind::Paragraph { color } => ops.push(DrawOp::Paragraph {
+                x,
+                y,
+                width,
+                text: w.text.clone(),
+                argb: *color,
+            }),
             Kind::Separator => {
                 ops.push(DrawOp::Fill {
                     rect: [x, y, width, 1.0],

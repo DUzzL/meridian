@@ -47,6 +47,8 @@ pub const COLOR_NAMES: [&str; 16] = [
 #[derive(Debug)]
 pub struct Env<'a> {
     pub gui: [f32; 2],
+    /// The cursor in GUI pixels (rows highlight under it).
+    pub mouse: [f32; 2],
     /// "MeridianTest (auto)", "overworld (auto)".
     pub world_label: &'a str,
     pub dimension_label: &'a str,
@@ -114,10 +116,10 @@ pub enum Action {
         waypoint: WaypointMode,
         skip_completed: bool,
     },
-    /// Reset every completed structure of the open world or server
-    /// (`CompletedStore::reset_prompt` + `confirm_reset`), then open the
-    /// Seed Atlas settings again.
-    ResetCompleted,
+    /// Reset the completed structures of one kind (a marker id) or of every
+    /// kind of the open world or server (`CompletedStore::reset_prompt` +
+    /// `confirm_reset`), then show the marker settings again.
+    ResetCompleted(Option<String>),
     Profile(ProfileOp),
 }
 
@@ -131,6 +133,9 @@ pub enum Screen {
     WorldGeneration(WorldGenerationScreen),
     ConfirmReset(ConfirmResetScreen),
     Position(PositionScreen),
+    SeedAtlasSettings(crate::screens_sa::SeedAtlasSettingsScreen),
+    SeedAtlasMarkers(crate::screens_sa::MarkerSettingsScreen),
+    SeedAtlasPerformance(crate::screens_sa::PerformanceSettingsScreen),
 }
 
 impl Screen {
@@ -144,6 +149,25 @@ impl Screen {
             Screen::WorldGeneration(s) => s.widgets(env),
             Screen::ConfirmReset(s) => s.widgets(env),
             Screen::Position(s) => s.widgets(env),
+            Screen::SeedAtlasSettings(s) => s.widgets(env),
+            Screen::SeedAtlasMarkers(s) => s.widgets(env),
+            Screen::SeedAtlasPerformance(s) => s.widgets(env),
+        }
+    }
+
+    /// The tooltip of what is under `at`, if it has one.
+    pub fn tooltip(&self, at: [f32; 2], env: &Env<'_>) -> Option<String> {
+        let widgets = self.widgets(env);
+        let id = widgets
+            .iter()
+            .rev()
+            .find(|w| !w.id.is_empty() && w.contains(at))?
+            .id
+            .clone();
+        match self {
+            Screen::SeedAtlasSettings(s) => s.tooltip(&id, env),
+            Screen::SeedAtlasMarkers(s) => s.tooltip(&id, env),
+            _ => None,
         }
     }
 
@@ -160,6 +184,9 @@ impl Screen {
             Screen::BiomeHighlight(s) => s.click(id.as_deref(), env),
             Screen::WorldGeneration(s) => s.click(id.as_deref(), env),
             Screen::ConfirmReset(s) => s.click(id.as_deref()),
+            Screen::SeedAtlasSettings(s) => s.click(id.as_deref(), at, env),
+            Screen::SeedAtlasMarkers(s) => s.click(id.as_deref(), at, env),
+            Screen::SeedAtlasPerformance(s) => s.click(id.as_deref(), env),
         }
     }
 
@@ -170,22 +197,29 @@ impl Screen {
             Screen::Settings(s) => s.typed(c),
             Screen::Nearest(s) => s.typed(c),
             Screen::BiomeHighlight(s) => s.typed(c),
-            Screen::WorldGeneration(_) | Screen::ConfirmReset(_) | Screen::Position(_) => {}
+            Screen::SeedAtlasSettings(s) => s.typed(c),
+            _ => {}
         }
         let _ = env;
     }
 
     /// The mouse moved with the left button down.
     pub fn drag(&mut self, at: [f32; 2], env: &mut Env<'_>) {
-        if let Screen::Position(s) = self {
-            s.drag(at, env);
+        match self {
+            Screen::Position(s) => s.drag(at, env),
+            Screen::SeedAtlasSettings(s) => s.drag(at, env),
+            Screen::SeedAtlasMarkers(s) => s.drag(at, env),
+            _ => {}
         }
     }
 
     /// The left button went up.
     pub fn release(&mut self) {
-        if let Screen::Position(s) = self {
-            s.grab = None;
+        match self {
+            Screen::Position(s) => s.grab = None,
+            Screen::SeedAtlasSettings(s) => s.dragging = false,
+            Screen::SeedAtlasMarkers(s) => s.release(),
+            _ => {}
         }
     }
 
@@ -197,14 +231,17 @@ impl Screen {
             Screen::Settings(s) => s.key(key, env),
             Screen::Nearest(s) => s.key(key),
             Screen::BiomeHighlight(s) => s.key(key),
-            Screen::WorldGeneration(_) | Screen::ConfirmReset(_) | Screen::Position(_) => {
-                Action::None
-            }
+            Screen::SeedAtlasSettings(s) => s.key(key, env),
+            _ => Action::None,
         }
     }
 
-    pub fn scroll(&mut self, lines: f32) {
+    pub fn scroll(&mut self, lines: f32, env: &Env<'_>) {
         match self {
+            Screen::SeedAtlasMarkers(s) => s.scroll(
+                lines,
+                crate::screens_sa::MarkerSettingsScreen::max_scroll_for(env),
+            ),
             Screen::List(s) => s.scroll = (s.scroll as f32 - lines).max(0.0) as usize,
             Screen::Nearest(s) => s.scroll(lines),
             Screen::BiomeHighlight(s) => s.scroll(lines),
@@ -1296,14 +1333,6 @@ impl SettingsScreen {
         }
     }
 
-    /// The Seed Atlas settings page.
-    pub fn seed_atlas() -> Self {
-        Self {
-            direct: true,
-            ..Self::group(Group::SeedAtlas)
-        }
-    }
-
     /// The world map settings, as the world map settings key opens them.
     pub fn world_map() -> Self {
         Self {
@@ -1312,38 +1341,10 @@ impl SettingsScreen {
         }
     }
 
-    /// The buttons that open screens, before a group's options: id, label
-    /// and whether it can be used.
-    fn openers(&self, env: &Env<'_>) -> Vec<(&'static str, String, bool)> {
-        if !matches!(
-            self.page,
-            SettingsPage::Group {
-                group: Group::SeedAtlas,
-                ..
-            }
-        ) {
-            return Vec::new();
-        }
-        let sa = &env.settings.seed_atlas;
-        let version = crate::seedatlas_state::game_version(sa, &sa.context_key)
-            .0
-            .label();
-        let completed = env.seed_atlas.completed_count.unwrap_or(0);
-        vec![
-            ("sa:biome", "Nearest biome...".into(), true),
-            ("sa:structure", "Nearest structure...".into(), true),
-            ("sa:highlight", "Biome highlights...".into(), true),
-            (
-                "sa:world",
-                format!("World: {version}, {}", world_type_label(sa.large_biomes)),
-                true,
-            ),
-            (
-                "sa:reset",
-                crate::completed::reset_button_label(completed),
-                completed > 0,
-            ),
-        ]
+    /// The buttons that open screens, before a group's options (none now:
+    /// Seed Atlas has its own screens).
+    fn openers(&self, _env: &Env<'_>) -> Vec<(&'static str, String, bool)> {
+        Vec::new()
     }
 
     /// The two-column grid's button rectangles, row by row.
@@ -1546,22 +1547,16 @@ impl SettingsScreen {
             Some("g:info") => self.page = group(Group::Information),
             Some("g:waypoints") => self.page = group(Group::Waypoints),
             Some("g:misc") => self.page = group(Group::Misc),
-            Some("g:seedatlas") => self.page = group(Group::SeedAtlas),
+            Some("g:seedatlas") => {
+                return Action::Open(Screen::SeedAtlasSettings(
+                    crate::screens_sa::SeedAtlasSettingsScreen {
+                        from_settings: true,
+                        ..Default::default()
+                    },
+                ));
+            }
             Some("g:worldmap") => self.page = group(Group::WorldMap),
             Some("waypoints") => return Action::Open(Screen::List(List::default())),
-            Some("sa:biome") => return Action::Open(Screen::Nearest(NearestScreen::biome(env))),
-            Some("sa:structure") => {
-                return Action::Open(Screen::Nearest(NearestScreen::structure(env)));
-            }
-            Some("sa:highlight") => {
-                return Action::Open(Screen::BiomeHighlight(BiomeHighlightScreen::new()));
-            }
-            Some("sa:world") => {
-                return Action::Open(Screen::WorldGeneration(WorldGenerationScreen::new(env)));
-            }
-            Some("sa:reset") => {
-                return Action::Open(Screen::ConfirmReset(ConfirmResetScreen::new(env)));
-            }
             Some(o) if o.starts_with("opt:") => {
                 if let Some(opt) = o[4..]
                     .parse::<usize>()
@@ -1950,6 +1945,7 @@ mod tests {
     fn env<'a>(w: &'a mut DimensionWaypoints, s: &'a mut Settings) -> Env<'a> {
         Env {
             gui: [432.0, 246.0],
+            mouse: [-1.0, -1.0],
             world_label: "Test (auto)",
             dimension_label: "overworld (auto)",
             player_block: [130, 64, 10],

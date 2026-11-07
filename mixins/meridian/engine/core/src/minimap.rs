@@ -75,6 +75,21 @@ pub enum DrawOp {
         rect: [f32; 4],
         argb: u32,
     },
+    /// A Seed Atlas structure icon (by marker id, `completed` for the
+    /// badge), fitted into `rect`; greyed out when `dim`.
+    Icon {
+        id: String,
+        rect: [f32; 4],
+        dim: bool,
+    },
+    /// Text wrapped to `width` (the host measures it).
+    Paragraph {
+        x: f32,
+        y: f32,
+        width: f32,
+        text: String,
+        argb: u32,
+    },
     /// Part of one of the game's textures (`entity/zombie/zombie`, the path
     /// under `textures/`): `uv` = u, v, width, height in texels of a
     /// 64-texel-wide texture, stretched into `rect`, tinted by `argb`.

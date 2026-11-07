@@ -14,7 +14,7 @@ use meridian_seedatlas::{Dimension, biomes};
 
 use crate::minimap::Align;
 use crate::nearest::{NearestOptions, applies_to};
-use crate::screens::{Action, Env, Screen, SettingsScreen};
+use crate::screens::{Action, Env, Screen};
 use crate::seedatlas::MARKERS;
 use crate::seedatlas_state::{GameVersion, game_version, set_game_version, world_type_label};
 use crate::ui::{self, Widget};
@@ -36,6 +36,11 @@ pub struct SeedAtlasEnv {
     /// The choices of the nearest screens, remembered for the session by
     /// the host and handed to each new nearest screen.
     pub nearest: NearestOptions,
+    /// Completed structures by marker id.
+    pub completed_by_kind: std::collections::BTreeMap<String, usize>,
+    /// "Active seed: …" (with the Nether's and End's own seeds), or that
+    /// there is none.
+    pub seed_status: String,
 }
 
 impl Default for SeedAtlasEnv {
@@ -45,6 +50,8 @@ impl Default for SeedAtlasEnv {
             has_seed: false,
             completed_count: None,
             nearest: NearestOptions::default(),
+            completed_by_kind: Default::default(),
+            seed_status: "No seed configured for this world/server".into(),
         }
     }
 }
@@ -74,7 +81,9 @@ fn on_off(on: bool) -> &'static str {
 }
 
 fn parent() -> Action {
-    Action::Open(Screen::Settings(SettingsScreen::seed_atlas()))
+    Action::Open(Screen::SeedAtlasSettings(
+        crate::screens_sa::SeedAtlasSettingsScreen::new(),
+    ))
 }
 
 /// The biomes of the world's version (nothing without a seed), by name.
@@ -783,19 +792,38 @@ impl WorldGenerationScreen {
 pub struct ConfirmResetScreen {
     title: String,
     message: String,
+    /// The marker id reset, or every kind.
+    kind: Option<String>,
 }
 
 impl ConfirmResetScreen {
-    /// The question for resetting every completed structure of the open
-    /// world or server.
-    pub fn new(env: &Env<'_>) -> Self {
-        let count = env.seed_atlas.completed_count.unwrap_or(0);
-        Self {
-            title: "Reset completed structures?".into(),
-            message: format!(
-                "All {count} completed structures of {} become not completed again.",
+    /// The question for resetting the completed structures of one kind (a
+    /// marker id), or of every kind, of the open world or server.
+    pub fn new(env: &Env<'_>, kind: Option<&str>) -> Self {
+        let message = match kind {
+            None => format!(
+                "All {} completed structures of {} become not completed again.",
+                env.seed_atlas.completed_count.unwrap_or(0),
                 env.world_label
             ),
+            Some(id) => format!(
+                "{} completed of type {} in {} become not completed again.",
+                env.seed_atlas
+                    .completed_by_kind
+                    .get(id)
+                    .copied()
+                    .unwrap_or(0),
+                crate::seedatlas::MARKERS
+                    .iter()
+                    .find(|m| m.id == id)
+                    .map_or(id, |m| m.name),
+                env.world_label
+            ),
+        };
+        Self {
+            title: "Reset completed structures?".into(),
+            message,
+            kind: kind.map(str::to_owned),
         }
     }
 
@@ -819,8 +847,8 @@ impl ConfirmResetScreen {
 
     pub(crate) fn click(&mut self, id: Option<&str>) -> Action {
         match id {
-            Some("yes") => Action::ResetCompleted,
-            Some("no") => parent(),
+            Some("yes") => Action::ResetCompleted(self.kind.clone()),
+            Some("no") => Action::Open(Screen::SeedAtlasMarkers(Default::default())),
             _ => Action::None,
         }
     }
@@ -836,6 +864,7 @@ mod tests {
     fn env<'a>(w: &'a mut DimensionWaypoints, s: &'a mut Settings) -> Env<'a> {
         Env {
             gui: [432.0, 246.0],
+            mouse: [-1.0, -1.0],
             world_label: "My World",
             dimension_label: "overworld (auto)",
             player_block: [0, 64, 0],
@@ -1006,7 +1035,9 @@ mod tests {
         assert!(!ws.iter().any(|w| w.id == "search"));
         assert_eq!(
             click(&mut screen, "done", &mut e),
-            Action::Open(Screen::Settings(SettingsScreen::seed_atlas()))
+            Action::Open(Screen::SeedAtlasSettings(
+                crate::screens_sa::SeedAtlasSettingsScreen::new()
+            ))
         );
     }
 
@@ -1022,7 +1053,7 @@ mod tests {
             .unwrap()
             .id
             .clone();
-        screen.scroll(-3.0);
+        screen.scroll(-3.0, &e);
         let moved = screen.widgets(&e);
         assert_ne!(
             moved.iter().find(|w| w.id.starts_with("btn:")).unwrap().id,
@@ -1030,11 +1061,11 @@ mod tests {
         );
         within_gui(&moved, e.gui);
         // Scrolling far past the end stays on the last row.
-        screen.scroll(-10_000.0);
+        screen.scroll(-10_000.0, &e);
         let end = screen.widgets(&e);
         assert!(end.iter().any(|w| w.id.starts_with("btn:")));
-        screen.scroll(1.0);
-        screen.scroll(1.0);
+        screen.scroll(1.0, &e);
+        screen.scroll(1.0, &e);
         assert!(screen.widgets(&e).iter().any(|w| w.id.starts_with("btn:")));
     }
 
@@ -1074,7 +1105,9 @@ mod tests {
         assert!(!e.settings.seed_atlas.biome_highlight);
         assert_eq!(
             click(&mut screen, "done", &mut e),
-            Action::Open(Screen::Settings(SettingsScreen::seed_atlas()))
+            Action::Open(Screen::SeedAtlasSettings(
+                crate::screens_sa::SeedAtlasSettingsScreen::new()
+            ))
         );
     }
 
@@ -1136,7 +1169,9 @@ mod tests {
         assert_eq!(again.page, 2);
         assert_eq!(
             click(&mut screen, "done", &mut e),
-            Action::Open(Screen::Settings(SettingsScreen::seed_atlas()))
+            Action::Open(Screen::SeedAtlasSettings(
+                crate::screens_sa::SeedAtlasSettingsScreen::new()
+            ))
         );
     }
 
@@ -1160,7 +1195,7 @@ mod tests {
     fn confirm_reset_asks_and_answers() {
         let (mut w, mut s) = (DimensionWaypoints::default(), Settings::default());
         let mut e = env(&mut w, &mut s);
-        let mut screen = Screen::ConfirmReset(ConfirmResetScreen::new(&e));
+        let mut screen = Screen::ConfirmReset(ConfirmResetScreen::new(&e, None));
         let ws = screen.widgets(&e);
         within_gui(&ws, e.gui);
         assert!(ws.iter().any(|w| w.text == "Reset completed structures?"));
@@ -1169,16 +1204,20 @@ mod tests {
         }));
         assert_eq!(
             click(&mut screen, "no", &mut e),
-            Action::Open(Screen::Settings(SettingsScreen::seed_atlas()))
+            Action::Open(Screen::SeedAtlasMarkers(Default::default()))
         );
-        assert_eq!(click(&mut screen, "yes", &mut e), Action::ResetCompleted);
+        assert_eq!(
+            click(&mut screen, "yes", &mut e),
+            Action::ResetCompleted(None)
+        );
     }
 
     #[test]
     fn settings_group_opens_the_seed_atlas_screens() {
         let (mut w, mut s) = (DimensionWaypoints::default(), Settings::default());
         let mut e = env(&mut w, &mut s);
-        let mut screen = Screen::Settings(SettingsScreen::seed_atlas());
+        let mut screen =
+            Screen::SeedAtlasSettings(crate::screens_sa::SeedAtlasSettingsScreen::new());
         let ws = screen.widgets(&e);
         within_gui(&ws, e.gui);
         let text = |id: &str| ws.iter().find(|w| w.id == id).unwrap().text.clone();
@@ -1186,9 +1225,6 @@ mod tests {
         assert_eq!(text("sa:structure"), "Nearest structure...");
         assert_eq!(text("sa:highlight"), "Biome highlights...");
         assert_eq!(text("sa:world"), "World: 26.3, Normal");
-        assert_eq!(text("sa:reset"), "Reset completed (3)");
-        // The options follow on the same grid, and the pages still add up.
-        assert!(ws.iter().any(|w| w.id == "opt:0"));
         let Action::Open(Screen::Nearest(n)) = click(&mut screen, "sa:biome", &mut e) else {
             panic!()
         };
@@ -1205,17 +1241,18 @@ mod tests {
             click(&mut screen, "sa:world", &mut e),
             Action::Open(Screen::WorldGeneration(_))
         ));
-        let Action::Open(Screen::ConfirmReset(c)) = click(&mut screen, "sa:reset", &mut e) else {
+        // Every completed structure is reset from the marker settings.
+        let mut markers = Screen::SeedAtlasMarkers(Default::default());
+        let Action::Open(Screen::ConfirmReset(c)) = click(&mut markers, "mk:reset", &mut e) else {
             panic!()
         };
         assert!(c.message.starts_with("All 3 completed"));
-        // Nothing completed: the reset button is inactive.
         e.seed_atlas.completed_count = Some(0);
         assert!(
-            screen
+            markers
                 .widgets(&e)
                 .iter()
-                .any(|w| w.id == "sa:reset" && w.kind == ui::Kind::Button { enabled: false })
+                .any(|w| w.id == "mk:reset" && w.kind == ui::Kind::Button { enabled: false })
         );
         // The world button shows the chosen version and type.
         e.settings.seed_atlas.large_biomes = true;

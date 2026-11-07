@@ -367,3 +367,24 @@ Bisher fragte Meridian Marker je Region (512 Blöcke) an, nur im Umkreis von 7 R
   - Bis ein neuer Scan fertig ist, bleiben die alten Marker sichtbar.
   - Vom Zoom ausgeblendete Arten bleiben im Speicher (`mergeWithSkipped`).
   - Scans kommen in der Warteschlange vor den Kacheln.
+
+## D-032: Seed-Atlas-Einstellungen als eigene Screens wie in der Fabric-Version
+
+Die Seed-Atlas-Einstellungen waren bisher eine Gruppe im Raster der Minimap-Einstellungen. Jetzt sind es eigene Screens nach `SeedAtlasSettingsScreen`, `MarkerSettingsScreen` mit `MarkerToggleList` und `PerformanceSettingsScreen` der Fabric-Version 2.0 (`screens_sa.rs`): gleiche Knöpfe, Texte und Positionen in GUI-Pixeln.
+
+- **„Seed Atlas Settings“:**
+  - Inhalt 340 px breit, Reihen bei y 34/59/98/125/150/175 mit zwei bzw. drei Spalten.
+  - Ebene, Welt, Deckkraft als Schieberegler, Überlagern, Y-Felder für Oberwelt, Nether und End (übernommen beim Verlassen, `commitValues`), Strukturen, Strukturarten, Leistung, Gelände-Look (vor 1.18 inaktiv), Biom-Hervorhebung, nächstes Biom, nächste Struktur.
+  - Darunter der aktive Seed und „Done“; Tooltips wie im Original.
+- **„Seed Atlas Markers“:**
+  - Kopfzeile: Schieberegler „Completed“, „Marker size“ (50–250 %), „Reset completed (n)“.
+  - Darunter eine scrollbare Liste aller 28 Arten: Zeilen 28 px hoch, grüner bzw. grauer Streifen, Icon, Name, Zurücksetzen-Knopf mit Abzeichen und Anzahl, „On/Off“; Scrollbalken zum Ziehen.
+  - Das Zurücksetzen einzelner Arten fragt wie im Original nach.
+- **„Seed Atlas Performance“:** Biomauflösung, Worker-Threads, Hintergrund-Prefetch und der Beschreibungstext.
+- **Hintergrund:** Menüs, die von der Karte aus geöffnet werden, zeigen die Karte dahinter, ohne Weichzeichner und mit `0x88000000` abgedunkelt (`SeedAtlasScreen`). Die Karte bekommt den Cursor bei (−1, −1).
+- **Neue Bausteine:**
+  - Schieberegler aus den Sprites des Spiels;
+  - Listenpanel;
+  - Struktur-Icons in Menüs (pixelgenau unter skalierter Pose);
+  - umbrochener Text, Tooltips (umbrochen auf 170 px).
+- Die HUD-Schnittstelle von Horizon kennt kein Clipping (Scissor). Zeilen am Listenrand zeigen deshalb nur ihren Hintergrund, bis sie ganz sichtbar sind.

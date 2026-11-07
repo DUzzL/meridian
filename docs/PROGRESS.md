@@ -479,3 +479,13 @@ Neue Tests:
   - Im Spiel geprüft: Bei 0,3x sind alle Arten sichtbar. Bei 0,2x bleiben Dörfer, Ruinen und Tempel, Schätze, Minenschächte und Erzadern verschwinden. Bei 0,094x bleiben nur Monumente, Festungen und antike Städte.
   - Ein Bildschirmfoto mit Markern im Quadrat stammte aus Build `5e33e0f60780` von vor dieser Änderung: Ein offener Launcher hatte die Instanz beim Starten auf diesen Build zurückgesetzt.
   - Launcher-Build `native-66f3981-436b2aa39fc3`.
+
+### Phase 6: Seed-Atlas-Einstellungen wie in der Fabric-Version (D-032)
+
+- „Seed Atlas Settings“, „Seed Atlas Markers“ und „Seed Atlas Performance“ sind eigene Screens im Layout der Fabric-Version 2.0, mit Schiebereglern, Markerliste und Tooltips.
+- Von der Karte aus geöffnete Menüs zeigen die abgedunkelte Karte dahinter.
+- Die Seed-Atlas-Seite der Minimap-Einstellungen, der Knopf „SA“ und `/seedatlas settings` öffnen den neuen Screen.
+- **Im Spiel geprüft:** alle drei Screens, Scrollen der Markerliste, Umschalten einer Art, die Karte im Hintergrund.
+- **Neue Tests:** Layout des Hauptscreens in Pixeln, Y-Felder werden beim Verlassen übernommen, Schieberegler, Markerliste (Umschalten, Scrollen, Markergröße), Leistungsoptionen.
+
+**Build und Tests**: 193 Kern-Tests grün; Clippy sauber, Adapter-Check grün; Launcher-Build `native-66f3981-3d1bb3829116`.
