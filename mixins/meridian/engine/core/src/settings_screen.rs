@@ -83,7 +83,11 @@ enum Control {
     /// A switch outside the catalogue.
     Switch(fn(&Settings) -> bool, fn(&mut Settings, bool)),
     /// A slider: its value 0..=1, the text on it, and how a value is set.
-    Slider(fn(&Settings) -> f32, fn(&Settings) -> String, fn(&mut Settings, f32)),
+    Slider(
+        fn(&Settings) -> f32,
+        fn(&Settings) -> String,
+        fn(&mut Settings, f32),
+    ),
     /// A text field: the value as text, and how typed text is set (false
     /// when it is not valid: the old value stays). Enter or a click
     /// elsewhere sets it, Escape drops it.
@@ -182,7 +186,11 @@ fn dimension_list(ids: &[String]) -> String {
 /// A typed dimension list (`overworld, the_nether`); empty means all.
 fn parse_dimensions(text: &str) -> Option<Vec<String>> {
     let mut out = Vec::new();
-    for id in text.split([',', ' ']).map(str::trim).filter(|d| !d.is_empty()) {
+    for id in text
+        .split([',', ' '])
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+    {
         if !id
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "_-./:".contains(c))
@@ -396,7 +404,8 @@ fn profile_title(name: &str) -> String {
 fn tail(text: &str, width: f32) -> String {
     let chars: Vec<char> = text.chars().collect();
     let mut start = 0;
-    while start < chars.len() && ui::text_width(&chars[start..].iter().collect::<String>()) > width {
+    while start < chars.len() && ui::text_width(&chars[start..].iter().collect::<String>()) > width
+    {
         start += 1;
     }
     chars[start..].iter().collect()
@@ -520,16 +529,36 @@ impl SettingsScreen {
     fn row_rect(&self, env: &Env<'_>, i: usize) -> Option<[f32; 4]> {
         let l = Self::layout(env);
         let y = l.list_top + i as f32 * ROW_STEP - self.scroll;
-        (y >= l.list_top - 0.5 && y + ROW_H <= l.list_bottom + 0.5)
-            .then_some([l.content[0], y, l.content[2], ROW_H])
+        (y >= l.list_top - 0.5 && y + ROW_H <= l.list_bottom + 0.5).then_some([
+            l.content[0],
+            y,
+            l.content[2],
+            ROW_H,
+        ])
     }
 
     pub(crate) fn widgets(&self, env: &Env<'_>) -> Vec<Widget> {
         let l = Self::layout(env);
         let [w, h] = env.gui;
         let mut ws = vec![
-            Widget::fill([l.side[0] - 2.0, l.side[1] - 2.0, l.side[2] + 4.0, l.side[3] + 4.0], 0x8000_0000),
-            Widget::fill([l.content[0] - 2.0, l.content[1] - 2.0, l.content[2] + 10.0, l.content[3] + 4.0], 0x8000_0000),
+            Widget::fill(
+                [
+                    l.side[0] - 2.0,
+                    l.side[1] - 2.0,
+                    l.side[2] + 4.0,
+                    l.side[3] + 4.0,
+                ],
+                0x8000_0000,
+            ),
+            Widget::fill(
+                [
+                    l.content[0] - 2.0,
+                    l.content[1] - 2.0,
+                    l.content[2] + 10.0,
+                    l.content[3] + 4.0,
+                ],
+                0x8000_0000,
+            ),
             Widget::text(PAD, 11.0, "Meridian Settings", WHITE, Align::Left),
         ];
         // Sidebar.
@@ -551,7 +580,12 @@ impl SettingsScreen {
         let field_w = (l.content[2] * 0.4).clamp(80.0, 160.0);
         ws.push(Widget::field(
             "search",
-            [l.content[0] + l.content[2] - field_w, TOP - 1.0, field_w, 16.0],
+            [
+                l.content[0] + l.content[2] - field_w,
+                TOP - 1.0,
+                field_w,
+                16.0,
+            ],
             &self.search,
             "Search...",
             self.search_focused,
@@ -561,31 +595,63 @@ impl SettingsScreen {
         } else {
             self.category.title().to_owned()
         };
-        ws.push(Widget::text(l.content[0] + 4.0, TOP + 3.0, fit(&title, l.content[2] - field_w - 12.0), YELLOW, Align::Left));
+        ws.push(Widget::text(
+            l.content[0] + 4.0,
+            TOP + 3.0,
+            fit(&title, l.content[2] - field_w - 12.0),
+            YELLOW,
+            Align::Left,
+        ));
         // Rows.
         let rows = self.shown();
         if rows.is_empty() {
-            ws.push(Widget::text(l.content[0] + 4.0, l.list_top + 6.0, "Nothing matches.", GREY, Align::Left));
+            ws.push(Widget::text(
+                l.content[0] + 4.0,
+                l.list_top + 6.0,
+                "Nothing matches.",
+                GREY,
+                Align::Left,
+            ));
         }
         for (i, r) in rows.iter().enumerate() {
-            let Some(rect) = self.row_rect(env, i) else { continue };
+            let Some(rect) = self.row_rect(env, i) else {
+                continue;
+            };
             ws.extend(self.row_widgets(env, &l, i, r, rect, searching));
         }
         // Scrollbar.
         let max = self.max_scroll(env);
         if max > 0.0 {
-            let track = [l.content[0] + l.content[2] + 2.0, l.list_top, 4.0, l.list_bottom - l.list_top];
+            let track = [
+                l.content[0] + l.content[2] + 2.0,
+                l.list_top,
+                4.0,
+                l.list_bottom - l.list_top,
+            ];
             let visible = track[3] / (track[3] + max);
             let th = (track[3] * visible).max(12.0);
             let ty = track[1] + (track[3] - th) * (self.scroll / max);
             ws.push(Widget::fill(track, 0xFF20_2020));
             ws.push(Widget::fill([track[0], ty, track[2], th], 0xFF90_9090));
         }
-        ws.push(Widget::button("done", [(w / 2.0 - 75.0).floor(), h - 26.0, 150.0, 20.0], "Done", true));
+        ws.push(Widget::button(
+            "done",
+            [(w / 2.0 - 75.0).floor(), h - 26.0, 150.0, 20.0],
+            "Done",
+            true,
+        ));
         ws
     }
 
-    fn row_widgets(&self, env: &Env<'_>, l: &Layout, i: usize, r: &Row, rect: [f32; 4], searching: bool) -> Vec<Widget> {
+    fn row_widgets(
+        &self,
+        env: &Env<'_>,
+        l: &Layout,
+        i: usize,
+        r: &Row,
+        rect: [f32; 4],
+        searching: bool,
+    ) -> Vec<Widget> {
         let [x, y, cw, _] = rect;
         // Text fields take more room: commands are long.
         let control_w = match r.control {
@@ -593,7 +659,14 @@ impl SettingsScreen {
             _ => l.control_w,
         };
         let ctl = [x + cw - control_w - 2.0, y + 2.0, control_w, 20.0];
-        let mut ws = vec![Widget::fill([x, y, cw, ROW_H], if i.is_multiple_of(2) { 0x3000_0000 } else { 0x1800_0000 })];
+        let mut ws = vec![Widget::fill(
+            [x, y, cw, ROW_H],
+            if i.is_multiple_of(2) {
+                0x3000_0000
+            } else {
+                0x1800_0000
+            },
+        )];
         let mut text_x = x + 4.0;
         let text_w = ctl[0] - text_x - 6.0;
         let id = format!("row:{i}");
@@ -606,10 +679,20 @@ impl SettingsScreen {
                 ws.push(Widget::button(&id, ctl, fit(&value, ctl[2] - 8.0), true));
             }
             Control::Switch(get, _) => {
-                ws.push(Widget::button(&id, ctl, if get(env.settings) { "ON" } else { "OFF" }, true));
+                ws.push(Widget::button(
+                    &id,
+                    ctl,
+                    if get(env.settings) { "ON" } else { "OFF" },
+                    true,
+                ));
             }
             Control::Slider(value, text, _) => {
-                ws.push(Widget::slider(&id, ctl, text(env.settings), value(env.settings)));
+                ws.push(Widget::slider(
+                    &id,
+                    ctl,
+                    text(env.settings),
+                    value(env.settings),
+                ));
             }
             Control::Text(get, _) => {
                 let shown = match &self.editing {
@@ -625,9 +708,20 @@ impl SettingsScreen {
                 if action == "rename_profile"
                     && let Some(name) = &self.profile_name
                 {
-                    ws.push(Widget::field("profile_name", ctl, name, "Profile Name", true));
+                    ws.push(Widget::field(
+                        "profile_name",
+                        ctl,
+                        name,
+                        "Profile Name",
+                        true,
+                    ));
                 } else {
-                    ws.push(Widget::button(&id, ctl, fit(&text(env), ctl[2] - 8.0), enabled));
+                    ws.push(Widget::button(
+                        &id,
+                        ctl,
+                        fit(&text(env), ctl[2] - 8.0),
+                        enabled,
+                    ));
                 }
             }
             Control::Marker(kind) => {
@@ -636,29 +730,77 @@ impl SettingsScreen {
                 text_x += 22.0;
                 let reset_w = 46.0;
                 let toggle = [ctl[0] + reset_w + 4.0, ctl[1], ctl[2] - reset_w - 4.0, 20.0];
-                let count = env.seed_atlas.completed_by_kind.get(kind).copied().unwrap_or(0);
-                ws.push(Widget::button(&format!("mk:rs:{kind}"), [ctl[0], ctl[1], reset_w, 20.0], "Reset", count > 0));
-                ws.push(Widget::button(&id, toggle, if on { "ON" } else { "OFF" }, true));
+                let count = env
+                    .seed_atlas
+                    .completed_by_kind
+                    .get(kind)
+                    .copied()
+                    .unwrap_or(0);
+                ws.push(Widget::button(
+                    &format!("mk:rs:{kind}"),
+                    [ctl[0], ctl[1], reset_w, 20.0],
+                    "Reset",
+                    count > 0,
+                ));
+                ws.push(Widget::button(
+                    &id,
+                    toggle,
+                    if on { "ON" } else { "OFF" },
+                    true,
+                ));
             }
             Control::Info(text) => {
-                ws.push(Widget::text(x + 4.0, y + 3.0, fit(&r.label, cw - 8.0), WHITE, Align::Left));
-                ws.push(Widget::text(x + 4.0, y + 13.0, fit(&text(env), cw - 8.0), GREY, Align::Left));
+                ws.push(Widget::text(
+                    x + 4.0,
+                    y + 3.0,
+                    fit(&r.label, cw - 8.0),
+                    WHITE,
+                    Align::Left,
+                ));
+                ws.push(Widget::text(
+                    x + 4.0,
+                    y + 13.0,
+                    fit(&text(env), cw - 8.0),
+                    GREY,
+                    Align::Left,
+                ));
                 return ws;
             }
         }
         let desc = match r.control {
             Control::Marker(kind) => {
-                let count = env.seed_atlas.completed_by_kind.get(kind).copied().unwrap_or(0);
-                if count > 0 { format!("{count} completed") } else { String::new() }
+                let count = env
+                    .seed_atlas
+                    .completed_by_kind
+                    .get(kind)
+                    .copied()
+                    .unwrap_or(0);
+                if count > 0 {
+                    format!("{count} completed")
+                } else {
+                    String::new()
+                }
             }
             _ if searching => format!("{} · {}", r.category.title(), r.desc),
             _ => r.desc.to_owned(),
         };
         let text_w = text_w - (text_x - x - 4.0);
         let label_y = if desc.is_empty() { y + 8.0 } else { y + 3.0 };
-        ws.push(Widget::text(text_x, label_y, fit(&r.label, text_w), WHITE, Align::Left));
+        ws.push(Widget::text(
+            text_x,
+            label_y,
+            fit(&r.label, text_w),
+            WHITE,
+            Align::Left,
+        ));
         if !desc.is_empty() {
-            ws.push(Widget::text(text_x, y + 13.0, fit(&desc, text_w), GREY, Align::Left));
+            ws.push(Widget::text(
+                text_x,
+                y + 13.0,
+                fit(&desc, text_w),
+                GREY,
+                Align::Left,
+            ));
         }
         ws
     }
@@ -680,7 +822,13 @@ impl SettingsScreen {
         Some([x + cw - l.control_w - 2.0, y + 2.0, l.control_w, 20.0])
     }
 
-    pub(crate) fn click(&mut self, id: Option<&str>, at: [f32; 2], right: bool, env: &mut Env<'_>) -> Action {
+    pub(crate) fn click(
+        &mut self,
+        id: Option<&str>,
+        at: [f32; 2],
+        right: bool,
+        env: &mut Env<'_>,
+    ) -> Action {
         self.search_focused = false;
         // A click anywhere but the field being typed in sets its value.
         let row = id
@@ -707,7 +855,10 @@ impl SettingsScreen {
         if id == "done" {
             return Action::Close;
         }
-        if let Some(i) = id.strip_prefix("cat:").and_then(|i| i.parse::<usize>().ok()) {
+        if let Some(i) = id
+            .strip_prefix("cat:")
+            .and_then(|i| i.parse::<usize>().ok())
+        {
             if let Some(c) = Category::ALL.get(i) {
                 self.category = *c;
                 self.search.clear();
@@ -716,12 +867,20 @@ impl SettingsScreen {
             return Action::None;
         }
         if let Some(kind) = id.strip_prefix("mk:rs:") {
-            return Action::Open(Screen::ConfirmReset(ConfirmResetScreen::new(env, Some(kind))));
+            return Action::Open(Screen::ConfirmReset(ConfirmResetScreen::new(
+                env,
+                Some(kind),
+            )));
         }
-        let Some(i) = id.strip_prefix("row:").and_then(|i| i.parse::<usize>().ok()) else {
+        let Some(i) = id
+            .strip_prefix("row:")
+            .and_then(|i| i.parse::<usize>().ok())
+        else {
             return Action::None;
         };
-        let Some(r) = self.shown().into_iter().nth(i) else { return Action::None };
+        let Some(r) = self.shown().into_iter().nth(i) else {
+            return Action::None;
+        };
         match r.control {
             Control::Opt(key) => {
                 if let Some(o) = options().into_iter().find(|o| o.label == key) {
@@ -768,7 +927,11 @@ impl SettingsScreen {
                 Action::None
             }
             "profile" if !env.profiles.is_empty() => {
-                let i = env.profiles.iter().position(|p| *p == env.profile).unwrap_or(0);
+                let i = env
+                    .profiles
+                    .iter()
+                    .position(|p| *p == env.profile)
+                    .unwrap_or(0);
                 let n = env.profiles.len();
                 let next = if right { (i + n - 1) % n } else { (i + 1) % n };
                 Action::Profile(ProfileOp::Select(env.profiles[next].clone()))
@@ -784,7 +947,9 @@ impl SettingsScreen {
                 self.profile_name = Some(env.profile.clone());
                 Action::None
             }
-            "delete_profile" if env.profiles.len() > 1 => Action::Profile(ProfileOp::Delete(env.profile.clone())),
+            "delete_profile" if env.profiles.len() > 1 => {
+                Action::Profile(ProfileOp::Delete(env.profile.clone()))
+            }
             "mk:reset" => open(Screen::ConfirmReset(ConfirmResetScreen::new(env, None))),
             "sa:world" => open(Screen::WorldGeneration(WorldGenerationScreen::new(env))),
             "sa:highlight" => open(Screen::BiomeHighlight(BiomeHighlightScreen::new())),
@@ -796,8 +961,14 @@ impl SettingsScreen {
 
     pub(crate) fn drag(&mut self, at: [f32; 2], env: &mut Env<'_>) {
         let Some(i) = self.dragging else { return };
-        let Some(rect) = self.control_rect(env, i) else { return };
-        if let Some(Row { control: Control::Slider(_, _, set), .. }) = self.shown().into_iter().nth(i) {
+        let Some(rect) = self.control_rect(env, i) else {
+            return;
+        };
+        if let Some(Row {
+            control: Control::Slider(_, _, set),
+            ..
+        }) = self.shown().into_iter().nth(i)
+        {
             set(env.settings, Self::slider_value(rect, at[0]));
             env.settings_changed = true;
         }
@@ -809,9 +980,17 @@ impl SettingsScreen {
 
     /// Sets the typed text, if it is valid and differs.
     fn commit(&mut self, env: &mut Env<'_>) {
-        let Some((label, text)) = self.editing.take() else { return };
-        let row = Category::ALL.iter().flat_map(|c| rows(*c)).find(|r| r.label == label);
-        if let Some(Row { control: Control::Text(get, set), .. }) = row
+        let Some((label, text)) = self.editing.take() else {
+            return;
+        };
+        let row = Category::ALL
+            .iter()
+            .flat_map(|c| rows(*c))
+            .find(|r| r.label == label);
+        if let Some(Row {
+            control: Control::Text(get, set),
+            ..
+        }) = row
             && get(env.settings) != text
             && set(env.settings, &text)
         {
@@ -914,16 +1093,32 @@ mod tests {
             .iter()
             .map(|o| o.label)
             // Folded into the "Icons" row.
-            .filter(|l| !["Mob Faces", "Faces While Tab Held", "Completed", "Layer opacity"].contains(l))
+            .filter(|l| {
+                ![
+                    "Mob Faces",
+                    "Faces While Tab Held",
+                    "Completed",
+                    "Layer opacity",
+                ]
+                .contains(l)
+            })
             // Structure kinds have their own rows.
             .filter(|l| !MARKERS.iter().any(|m| m.name == *l))
             .filter(|l| !shown.contains(l))
             .collect();
         assert!(missing.is_empty(), "options without a row: {missing:?}");
         for k in &shown {
-            assert!(options().iter().any(|o| o.label == *k), "row for unknown option {k}");
+            assert!(
+                options().iter().any(|o| o.label == *k),
+                "row for unknown option {k}"
+            );
         }
-        assert!(Category::ALL.iter().flat_map(|c| rows(*c)).all(|r| !r.desc.is_empty() || matches!(r.control, Control::Marker(_))));
+        assert!(
+            Category::ALL
+                .iter()
+                .flat_map(|c| rows(*c))
+                .all(|r| !r.desc.is_empty() || matches!(r.control, Control::Marker(_)))
+        );
     }
 
     #[test]
@@ -932,11 +1127,17 @@ mod tests {
         let mut e = env(&mut w, &mut s, [854.0, 480.0]);
         let mut sc = SettingsScreen::default();
         // Sidebar: switch to the radar.
-        let radar = Category::ALL.iter().position(|c| *c == Category::Radar).unwrap();
+        let radar = Category::ALL
+            .iter()
+            .position(|c| *c == Category::Radar)
+            .unwrap();
         sc.click(Some(&format!("cat:{radar}")), [0.0, 0.0], false, &mut e);
         assert_eq!(sc.category, Category::Radar);
         // The icons row cycles Never -> Tab -> Always.
-        let icons = rows(Category::Radar).iter().position(|r| r.label == "Icons").unwrap();
+        let icons = rows(Category::Radar)
+            .iter()
+            .position(|r| r.label == "Icons")
+            .unwrap();
         assert_eq!(icons_label(e.settings), "While Tab Held");
         sc.click(Some(&format!("row:{icons}")), [0.0, 0.0], false, &mut e);
         assert_eq!(icons_label(e.settings), "Always");
@@ -944,7 +1145,10 @@ mod tests {
         assert_eq!(icons_label(e.settings), "Never");
         assert!(e.settings_changed);
         // A catalogue option toggles.
-        let first = rows(Category::Radar).iter().position(|r| r.label == "Entity Radar").unwrap();
+        let first = rows(Category::Radar)
+            .iter()
+            .position(|r| r.label == "Entity Radar")
+            .unwrap();
         let before = e.settings.radar.enabled;
         sc.click(Some(&format!("row:{first}")), [0.0, 0.0], false, &mut e);
         assert_ne!(e.settings.radar.enabled, before);
@@ -952,7 +1156,10 @@ mod tests {
         for c in Category::ALL {
             sc.category = c;
             for wd in sc.widgets(&e) {
-                assert!(wd.rect[0] >= 0.0 && wd.rect[0] + wd.rect[2] <= 854.0 + 0.5, "{c:?} {wd:?}");
+                assert!(
+                    wd.rect[0] >= 0.0 && wd.rect[0] + wd.rect[2] <= 854.0 + 0.5,
+                    "{c:?} {wd:?}"
+                );
             }
         }
     }
@@ -969,13 +1176,24 @@ mod tests {
         sc.scroll(100.0, &e);
         assert_eq!(sc.scroll, 0.0);
         // The completed slider sets the value under the cursor.
-        let i = rows(Category::Structures).iter().position(|r| r.label == "Completed").unwrap();
+        let i = rows(Category::Structures)
+            .iter()
+            .position(|r| r.label == "Completed")
+            .unwrap();
         let rect = sc.control_rect(&e, i).unwrap();
-        sc.click(Some(&format!("row:{i}")), [rect[0] + 4.0, rect[1]], false, &mut e);
+        sc.click(
+            Some(&format!("row:{i}")),
+            [rect[0] + 4.0, rect[1]],
+            false,
+            &mut e,
+        );
         assert_eq!(e.settings.seed_atlas.completed_opacity_pct(), 0);
         sc.drag([rect[0] + rect[2] - 4.0, rect[1]], &mut e);
         assert_eq!(e.settings.seed_atlas.completed_opacity_pct(), 100);
-        assert!(sc.dragging.is_some(), "the host writes the file only on release");
+        assert!(
+            sc.dragging.is_some(),
+            "the host writes the file only on release"
+        );
         sc.release();
         assert!(sc.dragging.is_none());
         // A search looks through every category.
@@ -987,10 +1205,16 @@ mod tests {
         assert!(found.iter().any(|l| l == "Slime Chunks"), "{found:?}");
         // A structure kind switches off.
         sc.search.clear();
-        let camp = rows(Category::Structures).iter().position(|r| matches!(r.control, Control::Marker("camp"))).unwrap();
+        let camp = rows(Category::Structures)
+            .iter()
+            .position(|r| matches!(r.control, Control::Marker("camp")))
+            .unwrap();
         let on = crate::seedatlas::marker_enabled(&e.settings.seed_atlas, "camp");
         sc.click(Some(&format!("row:{camp}")), [0.0, 0.0], false, &mut e);
-        assert_ne!(crate::seedatlas::marker_enabled(&e.settings.seed_atlas, "camp"), on);
+        assert_ne!(
+            crate::seedatlas::marker_enabled(&e.settings.seed_atlas, "camp"),
+            on
+        );
     }
 
     #[test]
@@ -998,7 +1222,10 @@ mod tests {
         let (mut w, mut s) = (DimensionWaypoints::default(), Settings::default());
         let mut e = env(&mut w, &mut s, [854.0, 480.0]);
         let mut sc = SettingsScreen::at(Category::Radar);
-        let i = rows(Category::Radar).iter().position(|r| r.label == "Max Entities").unwrap();
+        let i = rows(Category::Radar)
+            .iter()
+            .position(|r| r.label == "Max Entities")
+            .unwrap();
         let field = format!("row:{i}");
         let type_in = |sc: &mut SettingsScreen, e: &mut Env<'_>, text: &str| {
             sc.click(Some(&field), [0.0, 0.0], false, e);
@@ -1025,17 +1252,31 @@ mod tests {
         assert_eq!(e.settings.radar.max_entities, 40);
         // Commands stay commands; dimension lists take short names.
         assert!(command("tp @s {x} {y} {z}").is_none());
-        assert_eq!(command(" /tp {x} {y} {z} ").as_deref(), Some("/tp {x} {y} {z}"));
+        assert_eq!(
+            command(" /tp {x} {y} {z} ").as_deref(),
+            Some("/tp {x} {y} {z}")
+        );
         let dims = parse_dimensions("overworld, the_nether mymod:deep").unwrap();
-        assert_eq!(dims, ["minecraft:overworld", "minecraft:the_nether", "mymod:deep"]);
+        assert_eq!(
+            dims,
+            ["minecraft:overworld", "minecraft:the_nether", "mymod:deep"]
+        );
         assert_eq!(dimension_list(&dims), "overworld, the_nether, mymod:deep");
-        assert_eq!(parse_dimensions(" ").unwrap(), Vec::<String>::new(), "empty means all");
+        assert_eq!(
+            parse_dimensions(" ").unwrap(),
+            Vec::<String>::new(),
+            "empty means all"
+        );
         assert!(parse_dimensions("Over World!").is_none());
     }
 
     #[test]
     fn rows_have_unique_labels() {
-        let labels: Vec<String> = Category::ALL.iter().flat_map(|c| rows(*c)).map(|r| r.label).collect();
+        let labels: Vec<String> = Category::ALL
+            .iter()
+            .flat_map(|c| rows(*c))
+            .map(|r| r.label)
+            .collect();
         for (i, l) in labels.iter().enumerate() {
             assert!(!labels[i + 1..].contains(l), "{l} twice");
         }
@@ -1046,12 +1287,27 @@ mod tests {
         let (mut w, mut s) = (DimensionWaypoints::default(), Settings::default());
         let mut e = env(&mut w, &mut s, [854.0, 480.0]);
         let mut sc = SettingsScreen::default();
-        let i = |label: &str| rows(Category::General).iter().position(|r| r.label == label).unwrap();
+        let i = |label: &str| {
+            rows(Category::General)
+                .iter()
+                .position(|r| r.label == label)
+                .unwrap()
+        };
         assert_eq!(
-            sc.click(Some(&format!("row:{}", i("Profile"))), [0.0, 0.0], false, &mut e),
+            sc.click(
+                Some(&format!("row:{}", i("Profile"))),
+                [0.0, 0.0],
+                false,
+                &mut e
+            ),
             Action::Profile(ProfileOp::Select("pvp".into()))
         );
-        sc.click(Some(&format!("row:{}", i("Rename Profile"))), [0.0, 0.0], false, &mut e);
+        sc.click(
+            Some(&format!("row:{}", i("Rename Profile"))),
+            [0.0, 0.0],
+            false,
+            &mut e,
+        );
         for ch in "x".chars() {
             sc.typed(ch);
         }
