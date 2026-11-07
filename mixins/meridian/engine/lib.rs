@@ -2262,9 +2262,15 @@ impl Meridian {
                     let units = floor.max(with_map).clamp(floor, ceiling);
                     let px = units / icons::DISPLAY_SIZE;
                     let completed_alpha = sa_settings.completed_opacity_pct() as f32 / 100.0;
-                    for pos in order.iter().filter(|r| (r.x - mid.x).abs() <= MAP_REQUEST_RADIUS && (r.z - mid.z).abs() <= MAP_REQUEST_RADIUS) {
-                        let Some(hits) = s.seed_svc.markers(dim, *pos) else { continue };
-                        for h in hits.iter() {
+                    // The whole view at once, as the Fabric version scans it:
+                    // dense kinds only when zoomed in far enough.
+                    let per_block = s.map.scale(u).max(1e-9);
+                    let (bbox, radius) = sa::view_box(s.map.center, [gui[0] as f64 / per_block, gui[1] as f64 / per_block]);
+                    let zoom = s.map.zoom;
+                    let shows = |k: i32| sa::marker_for(k).is_some_and(|m| sa::visible_at_zoom(m.id, zoom, radius));
+                    let hits = s.seed_svc.view_markers(dim, bbox, shows, Instant::now());
+                    {
+                        for h in hits.iter().filter(|h| shows(h.kind)) {
                             let Some(m) = sa::marker_for(h.kind) else { continue };
                             let special = h.kind == meridian_seedatlas::structures::kind::ABANDONED_CAMP
                                 && h.detail >= 0

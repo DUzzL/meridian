@@ -333,3 +333,33 @@ Gemessen im Spiel bei 0,1x:
 - Der Bildschirm ist nach rund 2 s gefüllt, von der Mitte nach außen.
 - Danach liegt die CPU-Last auf dem Niveau des Spiels ohne Karte.
 - Zurückschieben zeigt die Kacheln sofort aus dem Cache.
+
+## D-031: Strukturmarker für die ganze Sicht, wie in der Fabric-Version
+
+Bisher fragte Meridian Marker je Region (512 Blöcke) an, nur im Umkreis von 7 Regionen um die Kartenmitte. Herausgezoomt standen die Marker deshalb in einem Quadrat. Meridian folgt jetzt `SeedAtlasStructureMarkerSource` der Fabric-Version 2.0 (`seedatlas.rs`: `view_box`, `visible_at_zoom`, `SeedService::view_markers`):
+
+- **Ein Scan je Strukturart** für ein Quadrat um die Kartenmitte:
+  - Radius: halbe Sicht plus 1024 Blöcke, mindestens 1024, höchstens 65536, aufgerundet auf ein Raster.
+  - Raster: die höchste Zweierpotenz von `Radius / 4`, begrenzt auf 1024 bis 16384.
+  - Die Mitte rastet auf dieses Raster ein, kleine Bewegungen behalten den Scan.
+  - Die Sicht in Blöcken ist die tatsächlich sichtbare Fläche; die Fabric-Version rechnet mit Fensterpixeln und dem Maßstab von Xaero.
+- **Ergebnisgrenzen der Glue-Schicht:** 1024 je Art, 4096 Schleimchunks (`scan_structures_capped`, `scan_slime_chunks_capped`, wie `append_result`).
+  - Der Scan endet bei der Grenze, also in Zeilen von Nord nach Süd.
+  - Weit herausgezoomt zeigen dichte Arten (z. B. Ozeanmonumente) deshalb nur im Norden des Scans Marker, wie in der Fabric-Version.
+- **Zoomfilter (`visibleAtZoom`)** mit dem Zoom der Karte (wie Xaeros Anzeige, z. B. „0.1x“):
+
+  | Arten | sichtbar ab Zoom | höchstens bis Radius |
+  |---|---|---|
+  | Schleimchunks | 0,5 | 2048 |
+  | Erzadern, Geoden, Brunnen, Schätze | 0,25 | 8192 |
+  | Minenschächte | 0,25 | 12288 |
+  | Lager, Dörfer, Schiffswracks, Ruinen, Portale, Pfade, Kammern, Außenposten, Tempel, Hütten, Iglus | 0,125 | 24576 |
+  | Spawn, Festungen, Anwesen, Monumente, antike Städte, Netherfestungen, Bastionen, End-Städte, Gateways | immer | – |
+  | Übrige | 0,03125 | – |
+
+- **Caching:**
+  - Scans werden erst nach 150 ms Stillstand gestartet.
+  - Die Ergebnisse der letzten 8 Sichten bleiben.
+  - Bis ein neuer Scan fertig ist, bleiben die alten Marker sichtbar.
+  - Vom Zoom ausgeblendete Arten bleiben im Speicher (`mergeWithSkipped`).
+  - Scans kommen in der Warteschlange vor den Kacheln.

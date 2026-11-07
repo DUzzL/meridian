@@ -462,3 +462,14 @@ Neue Tests:
 - `tile_cost` (ignoriert): misst die Kosten je Kachel.
 
 **Build und Tests**: 185 Kern-Tests und der Paritätstest grün; Clippy sauber, Adapter-Check grün; Launcher-Build `native-66f3981-ce15819d4afb`.
+
+### Phase 6: Strukturmarker wie in der Fabric-Version (D-031)
+
+- Herausgezoomt standen die Marker in einem Quadrat um die Mitte. Jetzt gibt es einen Scan je Strukturart für die ganze Sicht, mit Zoomfilter und Ergebnisgrenzen der Fabric-Version 2.0.
+- **Im Spiel geprüft:**
+  - Bei 3x bis 0,2x füllen die Marker die ganze Karte.
+  - Bei 0,018x zeigen sich nur noch Festungen, Anwesen, Monumente und antike Städte.
+  - Nach dem Scan liegt die CPU-Last bei rund 39 %, so viel wie im Spiel ohne Karte.
+- **Neue Tests:** `view_boxes_like_the_fabric_version`, `dense_markers_only_up_close`; der Servicetest nutzt jetzt den Sicht-Scan.
+
+**Build und Tests**: 187 Kern-Tests, die Engine-Tests und der Paritätstest grün; Clippy sauber, Adapter-Check grün; Launcher-Build `native-66f3981-85c46d528fc6`.

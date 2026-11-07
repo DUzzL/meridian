@@ -459,11 +459,78 @@ pub enum Job {
         y: i32,
         refine: bool,
     },
-    /// A region's markers of the enabled kinds.
-    Markers {
+    /// One structure kind's markers in a view's scan box (`[min_x, min_z,
+    /// max_x, max_z]`, see [`view_box`]).
+    Scan {
         dimension: Dimension,
-        region: RegionPos,
+        bbox: [i32; 4],
+        kind: i32,
     },
+}
+
+// ------------------------------------------------- markers of the view --
+//
+// The Fabric version 2.0 scans structures for the whole view at once
+// (`SeedAtlasStructureMarkerSource`): a square around the map's centre, half
+// the view plus 1024 blocks, snapped to a grid so small moves reuse the
+// scan; one scan per structure kind, at most 1024 results each (slime chunks
+// 4096); kinds too dense for the zoom are left out but kept in memory.
+
+const MIN_GRID: i32 = 1024;
+const MAX_GRID: i32 = 16384;
+const MAX_RADIUS: i32 = 65536;
+/// Results per kind and scan (`NORMAL_RESULTS_PER_TYPE`).
+pub const RESULTS_PER_KIND: usize = 1024;
+/// Slime chunk results per scan (`NORMAL_SLIME_RESULTS`).
+pub const SLIME_RESULTS: usize = 4096;
+/// A view must stay this long before it is scanned (`SCAN_DEBOUNCE_MILLIS`).
+pub const SCAN_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(150);
+/// Scans kept: 8 views of all kinds (`scanCache`).
+const MAX_SCANS: usize = 8 * 28;
+
+/// The scan box for a view centred on `center` that shows `view_blocks`
+/// (width, height in blocks), and its radius (`request`: radius, grid).
+pub fn view_box(center: [f64; 2], view_blocks: [f64; 2]) -> ([i32; 4], i32) {
+    let estimated = (view_blocks[0].max(view_blocks[1]) / 2.0 + MIN_GRID as f64).ceil();
+    let radius = (estimated.min(MAX_RADIUS as f64) as i32).max(MIN_GRID);
+    let grid = scan_grid(radius);
+    let radius = MAX_RADIUS.min((radius + grid - 1) / grid * grid);
+    let cx = (center[0].floor() as i32).div_euclid(grid) * grid;
+    let cz = (center[1].floor() as i32).div_euclid(grid) * grid;
+    ([cx - radius, cz - radius, cx + radius, cz + radius], radius)
+}
+
+fn scan_grid(radius: i32) -> i32 {
+    let target = (radius / 4).clamp(MIN_GRID, MAX_GRID);
+    1 << (31 - target.leading_zeros())
+}
+
+/// Whether a marker shows at this zoom (`visibleAtZoom`): dense kinds only
+/// up close, landmarks always. `scale` is the map's zoom, `radius` the scan
+/// radius in blocks.
+pub fn visible_at_zoom(marker_id: &str, scale: f64, radius: i32) -> bool {
+    match marker_id {
+        "slime" => scale >= 0.5 && radius <= 2048,
+        "orevein" | "geode" | "well" | "treasure" => scale >= 0.25 && radius <= 8192,
+        "mineshaft" => scale >= 0.25 && radius <= 12288,
+        "camp" | "village" | "shipwreck" | "ruins" | "portal" | "trails" | "chambers"
+        | "outpost" | "desert" | "jungle" | "hut" | "igloo" => scale >= 0.125 && radius <= 24576,
+        "spawn" | "stronghold" | "mansion" | "monument" | "ancient_city" | "fortress"
+        | "bastion" | "endcity" | "gateway" => true,
+        _ => scale >= 0.03125,
+    }
+}
+
+/// The markers of the view as last scanned, and what the scan is waiting
+/// for.
+#[derive(Default)]
+struct ViewMarkers {
+    /// Dimension and the kinds switched on: when they change, the shown
+    /// markers go (`hasSameMarkerIdentity`).
+    identity: Option<(Dimension, Vec<i32>)>,
+    /// The box and kinds asked for, and since when.
+    requested: Option<(Dimension, [i32; 4], Vec<i32>, std::time::Instant)>,
+    shown: Arc<Vec<Hit>>,
 }
 
 enum Done {
@@ -552,7 +619,9 @@ pub struct SeedService {
     generation: u64,
     kinds: Vec<i32>,
     tiles: HashMap<Job, (Tile, u64)>,
-    markers: HashMap<Job, Arc<Vec<Hit>>>,
+    /// Scan results by job, with the clock when last used.
+    markers: HashMap<Job, (Arc<Vec<Hit>>, u64)>,
+    view: ViewMarkers,
     pending: HashSet<Job>,
     /// What was asked for since the last poll, in order.
     wanted: Vec<Job>,
@@ -588,6 +657,7 @@ impl Default for SeedService {
             kinds: Vec::new(),
             tiles: HashMap::new(),
             markers: HashMap::new(),
+            view: ViewMarkers::default(),
             pending: HashSet::new(),
             wanted: Vec::new(),
             wanted_set: HashSet::new(),
@@ -698,12 +768,16 @@ fn tile_pixels(atlas: &Atlas, look: &TileLook, job: Job) -> Vec<u32> {
 fn run(atlas: &Atlas, kinds: &[i32], look: &TileLook, job: Job, globals: &Globals) -> Done {
     match job {
         Job::Tile { .. } => Done::Tile(job, Arc::new(tile_pixels(atlas, look, job))),
-        Job::Markers { dimension, region } => {
-            let (x0, z0) = region.min_block();
-            let b = [x0, z0, x0 + 511, z0 + 511];
-            let mut hits = Vec::new();
-            for &k in kinds.iter().filter(|&&k| dimension_of_kind(k) == dimension) {
-                let found = match k {
+        Job::Scan {
+            dimension,
+            bbox: b,
+            kind: k,
+        } => {
+            let in_box = |h: &Hit| h.x >= b[0] && h.x <= b[2] && h.z >= b[1] && h.z <= b[3];
+            let found = if dimension_of_kind(k) != dimension || !kinds.contains(&k) {
+                Ok(Vec::new())
+            } else {
+                match k {
                     marker::STRONGHOLD => {
                         let all = globals.strongholds.get_or_init(|| {
                             atlas
@@ -712,31 +786,32 @@ fn run(atlas: &Atlas, kinds: &[i32], look: &TileLook, job: Job, globals: &Global
                         });
                         Ok(all
                             .iter()
-                            .filter(|h| h.x >= b[0] && h.x <= b[2] && h.z >= b[1] && h.z <= b[3])
+                            .filter(|h| in_box(h))
+                            .take(RESULTS_PER_KIND)
                             .copied()
                             .collect())
                     }
-                    marker::SLIME_CHUNK => atlas.scan_slime_chunks(b),
+                    marker::SLIME_CHUNK => atlas.scan_slime_chunks_capped(b, SLIME_RESULTS),
                     marker::SPAWN => {
                         let (x, z) = *globals.spawn.get_or_init(|| atlas.spawn(true));
-                        Ok(if x >= b[0] && x <= b[2] && z >= b[1] && z <= b[3] {
-                            vec![Hit {
-                                kind: marker::SPAWN,
-                                x,
-                                y: None,
-                                z,
-                                flags: 0,
-                                detail: 0,
-                            }]
+                        let spawn = Hit {
+                            kind: marker::SPAWN,
+                            x,
+                            y: None,
+                            z,
+                            flags: 0,
+                            detail: 0,
+                        };
+                        Ok(if in_box(&spawn) {
+                            vec![spawn]
                         } else {
                             Vec::new()
                         })
                     }
-                    k => atlas.scan_structures(k, b, true),
-                };
-                hits.extend(found.unwrap_or_default());
-            }
-            Done::Markers(job, Arc::new(hits))
+                    k => atlas.scan_structures_capped(k, b, true, RESULTS_PER_KIND),
+                }
+            };
+            Done::Markers(job, Arc::new(found.unwrap_or_default()))
         }
     }
 }
@@ -951,8 +1026,17 @@ impl SeedService {
                 }
                 Done::Markers(job, hits) => {
                     self.pending.remove(&job);
-                    self.markers.insert(job, hits);
+                    self.clock += 1;
+                    self.markers.insert(job, (hits, self.clock));
                 }
+            }
+        }
+        if self.markers.len() > MAX_SCANS {
+            let mut by_age: Vec<(u64, Job)> =
+                self.markers.iter().map(|(j, (_, t))| (*t, *j)).collect();
+            by_age.sort_unstable_by_key(|(t, _)| *t);
+            for (_, job) in by_age.into_iter().take(self.markers.len() - MAX_SCANS) {
+                self.markers.remove(&job);
             }
         }
         if self.tiles.len() > MAX_TILES {
@@ -994,7 +1078,10 @@ impl SeedService {
     /// and the middle of the view comes first. Jobs a worker is already on
     /// are left to finish.
     fn commit(&mut self) {
-        let wanted = std::mem::take(&mut self.wanted);
+        let mut wanted = std::mem::take(&mut self.wanted);
+        // Structure scans before tiles: few, and the markers are what one
+        // looks for (the Fabric version gives them their own workers).
+        wanted.sort_by_key(|j| !matches!(j, Job::Scan { .. }));
         self.wanted_set.clear();
         let Some(queue) = self.jobs.clone() else {
             return;
@@ -1125,17 +1212,87 @@ impl SeedService {
         })
     }
 
-    /// A region's markers, asking for them when missing.
-    pub fn markers(&mut self, dimension: Dimension, region: RegionPos) -> Option<Arc<Vec<Hit>>> {
-        if self.kinds.is_empty() {
-            return None;
+    /// The structure markers of a view: the last complete scan of `bbox`
+    /// (see [`view_box`]) for the switched-on kinds that `visible` lets
+    /// through at this zoom. Until a new scan is complete the previous
+    /// markers stay; markers of kinds the zoom hides are kept from the last
+    /// snapshot so zooming back in shows them at once (`mergeWithSkipped`).
+    /// The caller still filters by [`visible_at_zoom`].
+    pub fn view_markers(
+        &mut self,
+        dimension: Dimension,
+        bbox: [i32; 4],
+        visible: impl Fn(i32) -> bool,
+        now: std::time::Instant,
+    ) -> Arc<Vec<Hit>> {
+        let configured: Vec<i32> = self
+            .kinds
+            .iter()
+            .copied()
+            .filter(|&k| dimension_of_kind(k) == dimension)
+            .collect();
+        let identity = Some((dimension, configured.clone()));
+        if self.view.identity != identity {
+            self.view.identity = identity;
+            self.view.shown = Arc::new(Vec::new());
+            self.view.requested = None;
         }
-        let job = Job::Markers { dimension, region };
-        if let Some(hits) = self.markers.get(&job) {
-            return Some(hits.clone());
+        let enabled: Vec<i32> = configured.into_iter().filter(|&k| visible(k)).collect();
+        if enabled.is_empty() {
+            return self.view.shown.clone();
         }
-        self.submit(job);
-        None
+        let same = self
+            .view
+            .requested
+            .as_ref()
+            .is_some_and(|(d, b, e, _)| *d == dimension && *b == bbox && *e == enabled);
+        if !same {
+            self.view.requested = Some((dimension, bbox, enabled.clone(), now));
+        }
+        let since = self.view.requested.as_ref().map_or(now, |r| r.3);
+        let job = |kind| Job::Scan {
+            dimension,
+            bbox,
+            kind,
+        };
+        self.clock += 1;
+        let clock = self.clock;
+        let mut complete = true;
+        let mut scanned: Vec<Hit> = Vec::new();
+        for &k in &enabled {
+            match self.markers.get_mut(&job(k)) {
+                Some((hits, used)) => {
+                    *used = clock;
+                    scanned.extend(hits.iter().copied());
+                }
+                None => complete = false,
+            }
+        }
+        if complete {
+            // The kinds this scan skipped keep their last markers.
+            let kept = self
+                .view
+                .shown
+                .iter()
+                .filter(|h| !enabled.contains(&h.kind))
+                .copied();
+            let merged: Vec<Hit> = scanned.into_iter().chain(kept).collect();
+            if merged.len() != self.view.shown.len()
+                || merged
+                    .iter()
+                    .zip(self.view.shown.iter())
+                    .any(|(a, b)| a != b)
+            {
+                self.view.shown = Arc::new(merged);
+            }
+        } else if now.duration_since(since) >= SCAN_DEBOUNCE {
+            for &k in &enabled {
+                if !self.markers.contains_key(&job(k)) {
+                    self.submit(job(k));
+                }
+            }
+        }
+        self.view.shown.clone()
     }
 
     /// The biome at a block, computed now (for the hover tooltip).
@@ -1151,7 +1308,7 @@ impl SeedService {
 
 fn job_dimension(job: &Job) -> Dimension {
     match job {
-        Job::Tile { dimension, .. } | Job::Markers { dimension, .. } => *dimension,
+        Job::Tile { dimension, .. } | Job::Scan { dimension, .. } => *dimension,
     }
 }
 
@@ -1217,17 +1374,33 @@ mod tests {
             refine: false,
         };
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-        let (mut tile, mut marks) = (None, None);
-        while (tile.is_none() || marks.is_none()) && std::time::Instant::now() < deadline {
+        let (bbox, _) = view_box([0.0, 0.0], [2000.0, 1200.0]);
+        let t0 = std::time::Instant::now();
+        let (mut tile, mut marks) = (None, Arc::new(Vec::new()));
+        let mut first = true;
+        while (tile.is_none() || marks.is_empty()) && std::time::Instant::now() < deadline {
             svc.poll();
             tile = tile.or_else(|| svc.tile(job));
-            marks = marks.or_else(|| svc.markers(Dimension::Overworld, RegionPos::new(0, 0)));
+            // The first frame waits out the debounce; later frames are past it.
+            let now = if first { t0 } else { t0 + SCAN_DEBOUNCE };
+            first = false;
+            marks = svc.view_markers(Dimension::Overworld, bbox, |_| true, now);
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         let tile = tile.expect("a tile");
         assert_eq!(tile.size, TILE_SAMPLES as u32);
         assert!(tile.pixels.iter().all(|p| p >> 24 == 0xFF));
-        assert!(marks.is_some());
+        assert!(
+            marks
+                .iter()
+                .any(|h| h.kind == meridian_seedatlas::structures::kind::VILLAGE),
+            "villages within 2000 blocks of 0, 0"
+        );
+        assert!(
+            marks
+                .iter()
+                .all(|h| dimension_of_kind(h.kind) == Dimension::Overworld)
+        );
         assert_eq!(step_for(1200.0, 1), 1);
         assert_eq!(step_for(600.0, 1), 1);
         assert_eq!(step_for(400.0, 1), 2);
@@ -1287,6 +1460,35 @@ mod tests {
         // Not drawn any more: nothing waits.
         svc.poll();
         assert_eq!(svc.pending(), 0);
+    }
+
+    #[test]
+    fn view_boxes_like_the_fabric_version() {
+        // Close up: 200 + 1024 blocks, rounded up to the 1024 grid.
+        let (b, r) = view_box([100.0, -50.0], [400.0, 300.0]);
+        assert_eq!((b, r), ([-2048, -3072, 2048, 1024], 2048));
+        // Half the view plus 1024, rounded up to the grid.
+        let (b, r) = view_box([0.0, 0.0], [20000.0, 10000.0]);
+        assert_eq!(r, 12288);
+        assert_eq!(b, [-12288, -12288, 12288, 12288]);
+        // Far out: at most 65536.
+        assert_eq!(view_box([0.0, 0.0], [1e7, 1e7]).1, 65536);
+        // Small moves stay on the same box.
+        assert_eq!(
+            view_box([10.0, 10.0], [400.0, 300.0]).0,
+            view_box([900.0, 900.0], [400.0, 300.0]).0
+        );
+    }
+
+    #[test]
+    fn dense_markers_only_up_close() {
+        assert!(visible_at_zoom("village", 0.2, 10000));
+        assert!(!visible_at_zoom("village", 0.1, 10000));
+        assert!(!visible_at_zoom("village", 0.2, 30000), "too large a scan");
+        assert!(visible_at_zoom("mansion", 0.001, 65536), "landmarks always");
+        assert!(!visible_at_zoom("slime", 0.4, 1024));
+        assert!(visible_at_zoom("end_ship", 0.04, 65536));
+        assert!(!visible_at_zoom("end_ship", 0.02, 65536));
     }
 
     /// The cost of one tile by step (run by hand:

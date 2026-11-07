@@ -373,7 +373,12 @@ impl OreNoise {
 }
 
 impl Atlas {
-    fn scan_ore_veins(&self, requested: i32, b: [i32; 4]) -> Result<Vec<Hit>, AtlasError> {
+    fn scan_ore_veins(
+        &self,
+        requested: i32,
+        b: [i32; 4],
+        cap: usize,
+    ) -> Result<Vec<Hit>, AtlasError> {
         const SIZE: i32 = 128;
         let (mx0, mz0, mx1, mz1) = (
             floordiv(b[0], SIZE),
@@ -416,6 +421,9 @@ impl Atlas {
                             }
                             found = true;
                             if in_box(x, z, b) {
+                                if out.len() >= cap {
+                                    return Ok(out);
+                                }
                                 out.push(Hit {
                                     kind: t,
                                     x,
@@ -437,7 +445,12 @@ impl Atlas {
         Ok(out)
     }
 
-    fn scan_end_islands(&self, b: [i32; 4], check_biome: bool) -> Result<Vec<Hit>, AtlasError> {
+    fn scan_end_islands(
+        &self,
+        b: [i32; 4],
+        check_biome: bool,
+        cap: usize,
+    ) -> Result<Vec<Hit>, AtlasError> {
         let (x0, z0, x1, z1) = (
             floordiv(b[0], 16),
             floordiv(b[1], 16),
@@ -463,6 +476,9 @@ impl Atlas {
                 }
                 for i in end_islands(self.mc, self.seed as u64, cx, cz) {
                     if in_box(i.x, i.z, b) {
+                        if out.len() >= cap {
+                            return Ok(out);
+                        }
                         out.push(Hit {
                             kind: kind::END_ISLAND,
                             x: i.x,
@@ -486,6 +502,18 @@ impl Atlas {
         b: [i32; 4],
         check_biome: bool,
     ) -> Result<Vec<Hit>, AtlasError> {
+        self.scan_structures_capped(structure, b, check_biome, usize::MAX)
+    }
+
+    /// [`Atlas::scan_structures`] with the glue's `capacity`: the scan stops
+    /// at `cap` results, the first ones in scan order (`append_result`).
+    pub fn scan_structures_capped(
+        &self,
+        structure: i32,
+        b: [i32; 4],
+        check_biome: bool,
+        cap: usize,
+    ) -> Result<Vec<Hit>, AtlasError> {
         if b[0] > b[2] || b[1] > b[3] {
             return Err(AtlasError::Argument);
         }
@@ -496,10 +524,10 @@ impl Atlas {
         ]
         .contains(&structure)
         {
-            return self.scan_ore_veins(structure, b);
+            return self.scan_ore_veins(structure, b, cap);
         }
         if structure == kind::END_ISLAND {
-            return self.scan_end_islands(b, check_biome);
+            return self.scan_end_islands(b, check_biome, cap);
         }
         let engine = if structure == marker::END_SHIP {
             kind::END_CITY
@@ -535,6 +563,9 @@ impl Atlas {
         if structure == kind::END_GATEWAY {
             for (i, (x, z)) in fixed_end_gateways(self.mc, seed).into_iter().enumerate() {
                 if in_box(x, z, b) {
+                    if out.len() >= cap {
+                        return Ok(out);
+                    }
                     out.push(Hit {
                         kind: structure,
                         x,
@@ -592,6 +623,9 @@ impl Atlas {
                 }
                 if needs_unavailable_terrain(engine) {
                     flags |= RESULT_APPROXIMATE;
+                }
+                if out.len() >= cap {
+                    return Ok(out);
                 }
                 out.push(Hit {
                     kind: structure,
@@ -655,6 +689,15 @@ impl Atlas {
     /// `sax_scan_slime_chunks`: slime chunks (their north-west block) in
     /// the box.
     pub fn scan_slime_chunks(&self, b: [i32; 4]) -> Result<Vec<Hit>, AtlasError> {
+        self.scan_slime_chunks_capped(b, usize::MAX)
+    }
+
+    /// [`Atlas::scan_slime_chunks`], stopping at `cap` results.
+    pub fn scan_slime_chunks_capped(
+        &self,
+        b: [i32; 4],
+        cap: usize,
+    ) -> Result<Vec<Hit>, AtlasError> {
         if b[0] > b[2] || b[1] > b[3] {
             return Err(AtlasError::Argument);
         }
@@ -671,6 +714,9 @@ impl Atlas {
         for cz in z0..=z1 {
             for cx in x0..=x1 {
                 if is_slime_chunk(self.seed as u64, cx, cz) {
+                    if out.len() >= cap {
+                        return Ok(out);
+                    }
                     out.push(Hit {
                         kind: marker::SLIME_CHUNK,
                         x: cx.wrapping_mul(16),
