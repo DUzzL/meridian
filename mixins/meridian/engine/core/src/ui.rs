@@ -416,6 +416,21 @@ pub fn draw(widgets: &[Widget], mouse: [f32; 2]) -> Vec<DrawOp> {
     ops
 }
 
+/// The width of `text` in the game's default font, font pixels: each
+/// glyph's advance (its width plus one), narrow glyphs as the font has them.
+pub fn text_width(text: &str) -> f32 {
+    text.chars()
+        .map(|c| match c {
+            'i' | '!' | '.' | ',' | ':' | ';' | '\'' | '|' => 2.0,
+            'l' | '`' => 3.0,
+            'I' | 't' | ' ' | '[' | ']' | '"' | '(' | ')' | '*' => 4.0,
+            'f' | 'k' | '<' | '>' | '{' | '}' => 5.0,
+            '@' | '~' => 7.0,
+            _ => 6.0,
+        })
+        .sum()
+}
+
 /// What typing does to a text field: a character is appended (when it
 /// fits `accept`), backspace removes the last one.
 pub fn type_char(text: &mut String, c: char, max: usize, accept: impl Fn(char) -> bool) -> bool {

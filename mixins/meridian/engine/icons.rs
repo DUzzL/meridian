@@ -20,14 +20,26 @@ pub struct Icon {
     pub height: u32,
     pub rgba: Vec<u8>,
     pub block: bool,
+    /// The longer side on the map in icon pixels (`DISPLAY_SIZE`, more for
+    /// icons whose motif reads small, such as the warden's head).
+    pub size: f32,
+}
+
+/// Icons drawn larger than `DISPLAY_SIZE` on the map: the warden's head is
+/// wide and dark, so it looked small next to the block icons.
+fn display_size(id: &str) -> f32 {
+    match id {
+        "ancient_city" => 24.0,
+        _ => DISPLAY_SIZE,
+    }
 }
 
 impl Icon {
-    /// Display size in icon pixels, the longer side `DISPLAY_SIZE`.
+    /// Display size in icon pixels, the longer side [`Icon::size`].
     pub fn display(&self) -> (f32, f32) {
         let m = self.width.max(self.height).max(1) as f32;
-        let w = ((self.width as f32 * DISPLAY_SIZE / m).round()).max(1.0);
-        let h = ((self.height as f32 * DISPLAY_SIZE / m).round()).max(1.0);
+        let w = ((self.width as f32 * self.size / m).round()).max(1.0);
+        let h = ((self.height as f32 * self.size / m).round()).max(1.0);
         (w, h)
     }
 }
@@ -232,10 +244,10 @@ pub fn load(root: Option<&Path>) -> HashMap<&'static str, Icon> {
             Source::Composed(f) => (root.and_then(f), false),
         };
         let img = img.map(|i| crop(&i)).unwrap_or_else(|| Image::new(1, 1));
-        out.insert(id, Icon { width: img.w, height: img.h, rgba: img.px, block });
+        out.insert(id, Icon { width: img.w, height: img.h, rgba: img.px, block, size: display_size(id) });
     }
     let done = decode(include_bytes!("assets/seedatlas/completed.png")).map(|i| crop(&i)).unwrap_or_else(|| Image::new(1, 1));
-    out.insert("completed", Icon { width: done.w, height: done.h, rgba: done.px, block: false });
-    out.insert("frame", Icon { width: 1, height: 1, rgba: vec![0x14, 0x14, 0x14, 0xC0], block: false });
+    out.insert("completed", Icon { width: done.w, height: done.h, rgba: done.px, block: false, size: DISPLAY_SIZE });
+    out.insert("frame", Icon { width: 1, height: 1, rgba: vec![0x14, 0x14, 0x14, 0xC0], block: false, size: DISPLAY_SIZE });
     out
 }

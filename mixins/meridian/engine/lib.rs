@@ -47,7 +47,7 @@ use parking_lot::Mutex;
 pub const MOD_ID: &str = "meridian";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The bridge shape this adapter was written for.
-const BRIDGE_VERSION: u32 = 6;
+const BRIDGE_VERSION: u32 = 7;
 
 /// The singleplayer world's folder name, set by the integrated server's
 /// thread (the window's client only knows the world's display name).
@@ -1096,12 +1096,26 @@ impl Hooks for Meridian {
                 return Flow::Cancel;
             }
             self.map_input(host, |s, view, map_data| {
-                if right {
+                if right && let Some(m) = s.hovered_marker.clone() {
+                    // A structure: its own menu, as the Fabric version's
+                    // marker element offers it (`getRightClickOptions`).
+                    let done = m.key.as_ref().is_some_and(|k| s.completed.is_completed(k));
+                    let mut entries = Vec::new();
+                    if m.key.is_some() {
+                        entries.push((MENU_COMPLETE, if done { "Mark as incomplete" } else { "Mark as completed" }.to_owned()));
+                    }
+                    entries.push((MENU_COPY_COORDINATES, "Copy coordinates".to_owned()));
+                    entries.push((MENU_STRUCTURE_WAYPOINT, "Create waypoint".to_owned()));
+                    entries.push((MENU_TEMPORARY_WAYPOINT, "Create temporary waypoint".to_owned()));
+                    s.map.element_menu(at, view.unit, m.name, entries);
+                    s.menu_marker = Some(m);
+                    s.menu_player = None;
+                } else if right {
                     let w = s.map.to_world(at, view.gui, view.unit);
                     let height = s.engine.sampler().column(w[0].floor() as i32, w[1].floor() as i32).map(|c| c.height);
                     let waypoints = map_data.waypoints.iter().collect::<Vec<_>>();
                     s.map.right_click(at, view.gui, view.unit, height, &waypoints);
-                    s.menu_marker = s.hovered_marker.clone();
+                    s.menu_marker = None;
                     // Another player under the cursor (the map of the player's own dimension).
                     s.menu_player = None;
                     if s.viewer.is_none() {
@@ -1119,16 +1133,6 @@ impl Hooks for Meridian {
                         if let (Some(name), Some(menu)) = (&s.menu_player, &mut s.map.menu) {
                             let at = menu.items.len() - 1;
                             menu.items.insert(at, MenuItem::Extra(MENU_TELEPORT_PLAYER, format!("Teleport To {name}")));
-                        }
-                    }
-                    if let (Some(m), Some(menu)) = (&s.menu_marker, &mut s.map.menu) {
-                        let done = m.key.as_ref().is_some_and(|k| s.completed.is_completed(k));
-                        let at = menu.items.len() - 1;
-                        menu.items.insert(at, MenuItem::Extra(MENU_TEMPORARY_WAYPOINT, "Create temporary waypoint".into()));
-                        menu.items.insert(at, MenuItem::Extra(MENU_STRUCTURE_WAYPOINT, "Create waypoint".into()));
-                        if m.key.is_some() {
-                            let label = if done { "Mark as incomplete" } else { "Mark as completed" };
-                            menu.items.insert(at, MenuItem::Extra(MENU_COMPLETE, label.into()));
                         }
                     }
                 } else {
@@ -2485,7 +2489,9 @@ impl Meridian {
                         tooltip(&mut ops, mouse, gui, &[tip]);
                     }
                 }
-                if let Some(h) = &marker_hover {
+                if let Some(h) = &marker_hover
+                    && s.map.menu.is_none()
+                {
                     tooltip(&mut ops, mouse, gui, &h.lines);
                 } else if sa_settings.biome_layer
                     && let Some(dim) = sa_dim
@@ -2742,6 +2748,7 @@ const MENU_COMPLETE: u32 = 1;
 const MENU_STRUCTURE_WAYPOINT: u32 = 2;
 const MENU_TEMPORARY_WAYPOINT: u32 = 3;
 const MENU_TELEPORT_PLAYER: u32 = 4;
+const MENU_COPY_COORDINATES: u32 = 5;
 
 /// The game's biome tints for Seed Atlas's terrain look, by biome name.
 struct GameLooks {
@@ -2778,6 +2785,10 @@ impl State {
                 {
                     self.completed.mark(k);
                 }
+            }
+            MENU_COPY_COORDINATES => {
+                bridge::copy_to_clipboard(&format!("X: {}, Z: {}", m.x, m.z));
+                self.pending.push(Pending::Notice("Coordinates copied".into()));
             }
             MENU_STRUCTURE_WAYPOINT | MENU_TEMPORARY_WAYPOINT => {
                 let Some((book, dim)) = self.book_here() else { return };

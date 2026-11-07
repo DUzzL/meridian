@@ -358,7 +358,8 @@ Bisher fragte Meridian Marker je Region (512 Blöcke) an, nur im Umkreis von 7 R
   | Erzadern, Geoden, Brunnen, Schätze | 0,25 | 8192 |
   | Minenschächte | 0,25 | 12288 |
   | Lager, Dörfer, Schiffswracks, Ruinen, Portale, Pfade, Kammern, Außenposten, Tempel, Hütten, Iglus | 0,125 | 24576 |
-  | Spawn, Festungen, Anwesen, Monumente, antike Städte, Netherfestungen, Bastionen, End-Städte, Gateways | immer | – |
+  | Ozeanmonumente (auf Wunsch, auch in der Java-Mod) | 0,0625 | – |
+  | Spawn, Festungen, Anwesen, antike Städte, Netherfestungen, Bastionen, End-Städte, Gateways | immer | – |
   | Übrige | 0,03125 | – |
 
 - **Caching:**
@@ -388,3 +389,15 @@ Die Seed-Atlas-Einstellungen waren bisher eine Gruppe im Raster der Minimap-Eins
   - Struktur-Icons in Menüs (pixelgenau unter skalierter Pose);
   - umbrochener Text, Tooltips (umbrochen auf 170 px).
 - Die HUD-Schnittstelle von Horizon kennt kein Clipping (Scissor). Zeilen am Listenrand zeigen deshalb nur ihren Hintergrund, bis sie ganz sichtbar sind.
+
+## D-033: Strukturmenü, Monumente, Icongröße der antiken Städte
+
+- **Rechtsklick auf eine Struktur** öffnet wie in der Fabric-Version ein eigenes Menü (`getRightClickOptions`): der Name grau als Kopf, dann „Mark as completed/incomplete“, „Copy coordinates“, „Create waypoint“, „Create temporary waypoint“.
+  - Bisher hingen diese Einträge am allgemeinen Kartenmenü, und das Feld war für „Create temporary waypoint“ zu schmal.
+  - Menüs sind jetzt so breit wie ihr längster Eintrag, gemessen mit den Zeichenbreiten der Spielschrift (`ui::text_width`).
+  - „Copy coordinates“ geht über die Bridge (Version 7) in die Zwischenablage des Spiels.
+  - Tooltips verschwinden, solange ein Menü offen ist.
+- **Auf Wunsch, in Meridian und in der Java-Mod gleich** (Branch `marker-zoom-and-ancient-city-size` in DUzzL/seed-atlas-xaero):
+  - Ozeanmonumente erst ab Zoom 0,0625 statt immer, weil sie in Ozeanen dicht stehen.
+  - Antike Städte auf der Karte 24 statt 18 Pixel: Der Wardenkopf ist breit und dunkel und wirkte neben den Block-Icons klein.
+  - Die Markerliste in den Einstellungen behält 18 Pixel.

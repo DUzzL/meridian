@@ -79,7 +79,14 @@ impl Menu {
     }
 
     fn rect(&self, gui: [f32; 2]) -> [f32; 4] {
-        let width = 104.0 * self.scale;
+        // Wide enough for the longest entry, at least the usual width.
+        let longest = self
+            .items
+            .iter()
+            .map(|i| crate::ui::text_width(&i.label()))
+            .max_by(f32::total_cmp)
+            .unwrap_or(0.0);
+        let width = 104f32.max(longest + 6.0) * self.scale;
         let h = self.items.len() as f32 * self.row() + 2.0;
         let x = self.at[0].min(gui[0] - width - 2.0).max(0.0);
         let y = self.at[1].min(gui[1] - h - 2.0).max(0.0);
@@ -335,6 +342,28 @@ impl WorldMap {
             ]);
         }
         items.push(MenuItem::ExportPng);
+        self.menu = Some(Menu {
+            at: p,
+            items,
+            scale: 1.6 * unit,
+        });
+    }
+
+    /// The menu of a map element (a Seed Atlas structure): its name as the
+    /// header, then the element's own entries (host ids and labels).
+    pub fn element_menu(
+        &mut self,
+        p: [f32; 2],
+        unit: f32,
+        title: &str,
+        entries: Vec<(u32, String)>,
+    ) {
+        let mut items = vec![MenuItem::Header(title.to_owned())];
+        items.extend(
+            entries
+                .into_iter()
+                .map(|(id, label)| MenuItem::Extra(id, label)),
+        );
         self.menu = Some(Menu {
             at: p,
             items,
@@ -844,6 +873,31 @@ mod tests {
             MapAction::Menu(MenuItem::CreateWaypoint([10, 71, _]))
         ));
         assert!(m.menu.is_none());
+    }
+
+    #[test]
+    fn menus_fit_their_longest_entry() {
+        let mut m = WorldMap::new([0.0; 3]);
+        m.element_menu(
+            [10.0, 10.0],
+            1.0,
+            "Ancient City",
+            vec![(1, "Create temporary waypoint".into())],
+        );
+        let menu = m.menu.clone().unwrap();
+        assert_eq!(menu.items[0], MenuItem::Header("Ancient City".into()));
+        let [_, _, w, _] = menu.rect(GUI);
+        assert!(
+            w >= (crate::ui::text_width("Create temporary waypoint") + 6.0) * menu.scale,
+            "the entry fits ({w})"
+        );
+        assert!(w > 104.0 * menu.scale);
+        m.element_menu([10.0, 10.0], 1.0, "Igloo", vec![(1, "Copy".into())]);
+        assert_eq!(
+            m.menu.unwrap().rect(GUI)[2],
+            104.0 * 1.6,
+            "short entries keep the usual width"
+        );
     }
 
     #[test]

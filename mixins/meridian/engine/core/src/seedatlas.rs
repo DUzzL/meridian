@@ -515,8 +515,10 @@ pub fn visible_at_zoom(marker_id: &str, scale: f64, radius: i32) -> bool {
         "mineshaft" => scale >= 0.25 && radius <= 12288,
         "camp" | "village" | "shipwreck" | "ruins" | "portal" | "trails" | "chambers"
         | "outpost" | "desert" | "jungle" | "hut" | "igloo" => scale >= 0.125 && radius <= 24576,
-        "spawn" | "stronghold" | "mansion" | "monument" | "ancient_city" | "fortress"
-        | "bastion" | "endcity" | "gateway" => true,
+        // Monuments are frequent in oceans: hidden before the true landmarks.
+        "monument" => scale >= 0.0625,
+        "spawn" | "stronghold" | "mansion" | "ancient_city" | "fortress" | "bastion"
+        | "endcity" | "gateway" => true,
         _ => scale >= 0.03125,
     }
 }
@@ -1518,6 +1520,11 @@ mod tests {
         assert!(!visible_at_zoom("village", 0.1, 10000));
         assert!(!visible_at_zoom("village", 0.2, 30000), "too large a scan");
         assert!(visible_at_zoom("mansion", 0.001, 65536), "landmarks always");
+        assert!(visible_at_zoom("monument", 0.07, 65536));
+        assert!(
+            !visible_at_zoom("monument", 0.04, 65536),
+            "monuments go before the landmarks"
+        );
         assert!(!visible_at_zoom("slime", 0.4, 1024));
         assert!(visible_at_zoom("end_ship", 0.04, 65536));
         assert!(!visible_at_zoom("end_ship", 0.02, 65536));

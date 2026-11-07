@@ -489,3 +489,10 @@ Neue Tests:
 - **Neue Tests:** Layout des Hauptscreens in Pixeln, Y-Felder werden beim Verlassen übernommen, Schieberegler, Markerliste (Umschalten, Scrollen, Markergröße), Leistungsoptionen.
 
 **Build und Tests**: 193 Kern-Tests grün; Clippy sauber, Adapter-Check grün; Launcher-Build `native-66f3981-3d1bb3829116`.
+
+### Phase 6: Strukturmenü, Monumente, antike Städte (D-033)
+
+- Rechtsklick auf eine Struktur öffnet ihr eigenes Menü wie in der Fabric-Version; Menüs passen sich der Textbreite an.
+- Monumente verschwinden unter 0,0625x; antike Städte sind auf der Karte größer. Beides auch in der Java-Mod (lokaler Commit `007f94f`, `./gradlew check` grün).
+- **Im Spiel geprüft:** Strukturmenü auf einem Ruinenportal mit passender Breite.
+- **Nicht geprüft:** „Copy coordinates“, weil der Test sonst die Zwischenablage überschrieben hätte; die Java-Mod im Spiel.
