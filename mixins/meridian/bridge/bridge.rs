@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 /// Bumped when the shapes below change, so a trait mod can refuse a bridge
 /// it doesn't understand.
-pub const VERSION: u32 = 4;
+pub const VERSION: u32 = 5;
 /// Main-thread time per frame for chunk reads.
 const READ_BUDGET: Duration = Duration::from_micros(1500);
 
@@ -115,6 +115,8 @@ struct Shared {
     player_biome: Option<String>,
     /// The window in physical pixels, refreshed each frame.
     window: Option<[u32; 2]>,
+    /// The debug overlay (F3) is open.
+    debug_shown: bool,
     /// The prepared game resources (`assets/minecraft/textures/...`).
     resources: Option<std::path::PathBuf>,
     /// Entities are copied each frame only while someone wants them.
@@ -124,6 +126,43 @@ struct Shared {
     /// none when nobody asks.
     roof_radius: Option<u8>,
     under_roof: bool,
+    /// Blocks the map looks through: flowers, redstone parts.
+    hide: Hide,
+}
+
+/// Small blocks the map can look through to the ground under them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Hide {
+    pub flowers: bool,
+    pub redstone: bool,
+}
+
+impl Hide {
+    fn any(self) -> bool {
+        self.flowers || self.redstone
+    }
+
+    /// Whether the map looks through this block (by its id).
+    pub fn hides(self, name: &str) -> bool {
+        let name = name.strip_prefix("minecraft:").unwrap_or(name);
+        const FLOWERS: &[&str] = &[
+            "dandelion", "poppy", "blue_orchid", "allium", "azure_bluet", "oxeye_daisy",
+            "cornflower", "lily_of_the_valley", "wither_rose", "torchflower", "sunflower",
+            "lilac", "rose_bush", "peony", "pitcher_plant", "pink_petals", "wildflowers",
+            "open_eyeblossom", "closed_eyeblossom", "spore_blossom", "flowering_azalea",
+        ];
+        const REDSTONE: &[&str] = &[
+            "redstone_wire", "repeater", "comparator", "redstone_torch", "redstone_wall_torch",
+            "lever", "tripwire", "tripwire_hook",
+        ];
+        (self.flowers && (name.ends_with("_tulip") || FLOWERS.contains(&name)))
+            || (self.redstone && (REDSTONE.contains(&name) || name.ends_with("_pressure_plate") || name.ends_with("_button")))
+    }
+}
+
+/// Which small blocks chunk reads look through from now on.
+pub fn set_hidden(hide: Hide) {
+    with(|s| s.hide = hide);
 }
 
 static SHARED: Mutex<Option<Shared>> = Mutex::new(None);
@@ -206,6 +245,11 @@ pub fn under_roof() -> bool {
     with(|s| s.under_roof)
 }
 
+/// Whether the debug overlay (F3) is open.
+pub fn debug_shown() -> bool {
+    with(|s| s.debug_shown)
+}
+
 /// The window's size in physical pixels.
 pub fn window_size() -> Option<[u32; 2]> {
     with(|s| s.window)
@@ -244,6 +288,7 @@ pub(super) fn frame(game: &mut super::Game<'_>) {
     }
     answer_requests(game, s);
     s.window = game.native_physical_window_size();
+    s.debug_shown = game.debug;
     if s.want_entities {
         s.entities = snapshot_entities(game);
     }
@@ -307,7 +352,7 @@ fn answer_requests(game: &super::Game<'_>, s: &mut Shared) {
         let Some(chunk) = game.world.chunks.get(&(pos[0], pos[1])) else {
             continue;
         };
-        let snapshot = read_chunk(chunk, facts, biomes, &dimension, pos, cave_from, &mut s.blocks, &mut s.biomes);
+        let snapshot = read_chunk(chunk, facts, biomes, &dimension, pos, cave_from, s.hide, &mut s.blocks, &mut s.biomes);
         s.results.push(snapshot);
         if started.elapsed() >= READ_BUDGET {
             break;
@@ -324,6 +369,7 @@ fn read_chunk(
     dimension: &str,
     pos: [i32; 2],
     cave_from: Option<i32>,
+    hide: Hide,
     block_looks: &mut HashMap<String, BlockLook>,
     biome_looks: &mut HashMap<String, BiomeLook>,
 ) -> Snapshot {
@@ -372,9 +418,16 @@ fn read_chunk(
         .rev()
         .find(|&i| chunk.sections.get(i).is_some_and(|s| !s.is_uniform(air)))
         .map_or(bottom, |i| bottom + i as i32 * 16 + 15);
+    let hidden: std::cell::RefCell<HashMap<u32, bool>> = Default::default();
     let shows = |state: u32| {
         let f = facts.get(BlockStateId(state));
-        f.map_color != 0 || f.fluid != Fluid::None
+        let visible = f.map_color != 0 || f.fluid != Fluid::None;
+        visible
+            && !(hide.any()
+                && *hidden
+                    .borrow_mut()
+                    .entry(state)
+                    .or_insert_with(|| hide.hides(&f.name.to_string())))
     };
     let is_fluid = |state: u32| facts.get(BlockStateId(state)).fluid != Fluid::None;
 

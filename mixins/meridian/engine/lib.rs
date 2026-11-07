@@ -47,7 +47,7 @@ use parking_lot::Mutex;
 pub const MOD_ID: &str = "meridian";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The bridge shape this adapter was written for.
-const BRIDGE_VERSION: u32 = 4;
+const BRIDGE_VERSION: u32 = 5;
 
 /// The singleplayer world's folder name, set by the integrated server's
 /// thread (the window's client only knows the world's display name).
@@ -143,6 +143,8 @@ struct State {
     /// The waypoints of the open world, and which world they are.
     book: Option<(WorldSource, WaypointBook)>,
     last_book_save: Instant,
+    /// The world map's last frame, for its animation.
+    map_frame: Instant,
     /// Colour for the next quick waypoint, cycling.
     next_color: u8,
     /// Feedback to show on the action bar when a hook can.
@@ -188,6 +190,8 @@ struct State {
     looks_ready: bool,
     /// The marker the open map menu is for.
     menu_marker: Option<HoveredMarker>,
+    /// The other player the map menu was opened on.
+    menu_player: Option<String>,
     /// The nearest search's options, kept for the session.
     nearest_opts: meridian_core::nearest::NearestOptions,
 }
@@ -249,6 +253,8 @@ struct MapImageKey {
     size: u32,
     revisions: u64,
     overlay: Option<[u8; 2]>,
+    /// The seed slime chunks are marked from (Overworld, seed known).
+    slime: Option<i64>,
 }
 
 struct Meridian {
@@ -489,6 +495,7 @@ impl Meridian {
                 dimension: None,
                 book: None,
                 last_book_save: Instant::now(),
+                map_frame: Instant::now(),
                 next_color: 12,
                 notice: None,
                 map_image: None,
@@ -511,6 +518,7 @@ impl Meridian {
                 hovered_marker: None,
                 looks_ready: false,
                 menu_marker: None,
+                menu_player: None,
                 nearest_opts: Default::default(),
             }
         });
@@ -611,12 +619,14 @@ impl Meridian {
                         }
                         "waypoint.menu" => s.open_screen = Some(Screen::List(List::default())),
                         "worldmap.open" if s.config.current().world_map.enabled => {
+                            let animate = s.config.current().world_map.opening_animation;
                             if let Some(p) = &player {
-                                s.map.recenter(p.position);
+                                s.map.open(p.position, animate);
                             }
                             s.map.menu = None;
                             s.open_map = true;
                         }
+                        "worldmap.settings" => s.open_screen = Some(Screen::Settings(SettingsScreen::world_map())),
                         "settings" => s.open_screen = Some(Screen::Settings(SettingsScreen::default())),
                         "waypoint.next_set" => {
                             if let Some((book, dim)) = s.book_here() {
@@ -649,6 +659,17 @@ impl Meridian {
                         "waypoint.toggle_world" => {
                             let w = &mut s.config.current_mut().waypoints;
                             w.in_world = !w.in_world;
+                            changed = true;
+                        }
+                        "overlay.grid" | "overlay.slime" | "overlay.light" => {
+                            let m = &mut s.config.current_mut().minimap;
+                            let (flag, name) = match *id {
+                                "overlay.grid" => (&mut m.chunk_grid, "Chunk grid"),
+                                "overlay.slime" => (&mut m.slime_chunks, "Slime chunks"),
+                                _ => (&mut m.light_overlay, "Light overlay"),
+                            };
+                            *flag = !*flag;
+                            s.notice = Some(format!("{name}: {}", if *flag { "on" } else { "off" }));
                             changed = true;
                         }
                         "waypoint.toggle_minimap" => {
@@ -801,7 +822,7 @@ impl Hooks for Meridian {
                 return Flow::Cancel;
             }
             if on && !right && inside(map_settings_button, at) {
-                self.with_state(host, |s| s.open_from_map(Screen::Settings(SettingsScreen::default())));
+                self.with_state(host, |s| s.open_from_map(Screen::Settings(SettingsScreen::world_map())));
                 return Flow::Cancel;
             }
             self.map_input(host, |s, view, map_data| {
@@ -811,6 +832,25 @@ impl Hooks for Meridian {
                     let waypoints = map_data.waypoints.iter().collect::<Vec<_>>();
                     s.map.right_click(at, view.gui, view.unit, height, &waypoints);
                     s.menu_marker = s.hovered_marker.clone();
+                    // Another player under the cursor (the map of the player's own dimension).
+                    s.menu_player = None;
+                    if s.viewer.is_none() {
+                        let reach = 6.0 * view.unit;
+                        s.menu_player = bridge::entities()
+                            .into_iter()
+                            .filter(|e| e.class == bridge::EntityClass::Player)
+                            .filter_map(|e| {
+                                let p = s.map.to_screen([e.pos[0], e.pos[2]], view.gui, view.unit);
+                                let d = (p[0] - at[0]).hypot(p[1] - at[1]);
+                                (d <= reach).then_some((d, e.name?))
+                            })
+                            .min_by(|a, b| a.0.total_cmp(&b.0))
+                            .map(|(_, name)| name);
+                        if let (Some(name), Some(menu)) = (&s.menu_player, &mut s.map.menu) {
+                            let at = menu.items.len() - 1;
+                            menu.items.insert(at, MenuItem::Extra(MENU_TELEPORT_PLAYER, format!("Teleport To {name}")));
+                        }
+                    }
                     if let (Some(m), Some(menu)) = (&s.menu_marker, &mut s.map.menu) {
                         let done = m.key.as_ref().is_some_and(|k| s.completed.is_completed(k));
                         let at = menu.items.len() - 1;
@@ -1186,6 +1226,8 @@ impl Hooks for Meridian {
             // Cave mode: the roof check runs in the bridge, the decision here.
             let cave = s.config.current().minimap.cave.clone();
             bridge::set_roof_probe(meridian_core::cave::roof_radius(cave.auto));
+            let terrain = &s.config.current().world_map.terrain;
+            bridge::set_hidden(bridge::Hide { flowers: !terrain.show_flowers, redstone: !terrain.show_redstone });
             if let Some(p) = &player {
                 let dim = s.dimension.as_deref().unwrap_or("");
                 let allowed = cave.allowed_dimensions.is_empty() || cave.allowed_dimensions.iter().any(|d| d == dim);
@@ -1272,7 +1314,8 @@ impl Hooks for Meridian {
             let mut ops = Vec::new();
             world_waypoints(host, s, gui, gui_scale, &mut ops);
             let settings = &s.config.current().minimap;
-            if settings.enabled && !(settings.hide_under_screens && !host.playing()) {
+            let under_debug = settings.hide_under_debug && bridge::debug_shown();
+            if settings.enabled && !under_debug && !(settings.hide_under_screens && !host.playing()) {
                 minimap_ops(host, s, &player, gui, gui_scale, &mut ops);
             } else {
                 gpu::set_frame(None);
@@ -1424,7 +1467,12 @@ fn compose_map(s: &mut State, layout: &minimap::Layout, player: &PlayerState) {
     }
     let minimap = &s.config.current().minimap;
     let overlay = minimap.light_overlay.then_some(minimap.light_overlay_range);
-    let key = MapImageKey { origin, size, revisions, overlay };
+    let slime = if minimap.slime_chunks && s.dimension.as_deref() == Some("minecraft:overworld") {
+        s.seed_svc.atlas().map(|a| a.seed)
+    } else {
+        None
+    };
+    let key = MapImageKey { origin, size, revisions, overlay, slime };
     if s.map_image.as_ref().is_some_and(|(k, _)| *k == key) {
         return;
     }
@@ -1442,6 +1490,16 @@ fn compose_map(s: &mut State, layout: &minimap::Layout, player: &PlayerState) {
             {
                 // Spawnable ground: tinted light purple, as the reference's overlay.
                 p = 0xFF00_0000 | meridian_core::color::blend(p & 0x00FF_FFFF, 0xFF55FF, 0.45);
+            }
+            if let Some(seed) = slime
+                && meridian_seedatlas::structures::is_slime_chunk(seed as u64, bx >> 4, bz >> 4)
+            {
+                // Slime chunks: tinted green; unexplored ones half see-through.
+                p = if p >> 24 == 0 {
+                    0x8022_DD22
+                } else {
+                    0xFF00_0000 | meridian_core::color::blend(p & 0x00FF_FFFF, 0x22DD22, 0.4)
+                };
             }
             pixels.push(p);
         }
@@ -1684,6 +1742,7 @@ impl Meridian {
                 match *id {
                     "worldmap.open" => s.pending.push(Pending::CloseScreen),
                     "worldmap.toggle_dimension" => s.next_map_dimension(host),
+                    "worldmap.settings" => s.open_from_map(Screen::Settings(SettingsScreen::world_map())),
                     "worldmap.zoom_in" | "minimap.zoom_in" => s.map.scroll(1.0, center, view.gui, view.unit),
                     "worldmap.zoom_out" | "minimap.zoom_out" => s.map.scroll(-1.0, center, view.gui, view.unit),
                     "waypoint.new" => {
@@ -1728,6 +1787,12 @@ impl Meridian {
         let ops = self.with_state(host, |s| {
             let Some(player) = player else { return Vec::new() };
             let (gui, u) = (view.gui, view.unit);
+            let now = Instant::now();
+            let dt = now.duration_since(s.map_frame).as_secs_f32().min(0.05);
+            s.map_frame = now;
+            let wm = &s.config.current().world_map;
+            s.map.set_unlimited(wm.unlimited_zoom_in, wm.unlimited_zoom_out);
+            s.map.tick(dt);
             let here = s.dimension.clone().unwrap_or_default();
             let (shown, engine) = match &mut s.viewer {
                 Some((dim, engine)) => (dim.clone(), engine),
@@ -1944,6 +2009,7 @@ impl Meridian {
                 show_zoom: wm.show_zoom,
                 show_biome: wm.show_hovered_biome,
                 show_footsteps: wm.footsteps,
+                player_as_arrow: wm.player_as_arrow,
                 cave_layer,
                 other_dimension: (shown != here).then(|| shown.rsplit(':').next().unwrap_or(&shown).to_owned()),
             });
@@ -2001,6 +2067,14 @@ impl State {
             return;
         }
         if let MenuItem::Extra(id, _) = item {
+            if id == MENU_TELEPORT_PLAYER {
+                if let Some(name) = self.menu_player.take() {
+                    let format = &self.config.current().world_map.player_teleport_format;
+                    self.pending.push(Pending::CloseScreen);
+                    self.pending.push(Pending::Chat(format.replace("{name}", &name)));
+                }
+                return;
+            }
             self.marker_action(id);
             return;
         }
@@ -2213,6 +2287,7 @@ struct HoveredMarker {
 const MENU_COMPLETE: u32 = 1;
 const MENU_STRUCTURE_WAYPOINT: u32 = 2;
 const MENU_TEMPORARY_WAYPOINT: u32 = 3;
+const MENU_TELEPORT_PLAYER: u32 = 4;
 
 /// The game's biome tints for Seed Atlas's terrain look, by biome name.
 struct GameLooks {

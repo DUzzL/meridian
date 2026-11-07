@@ -16,6 +16,14 @@ use crate::waypoint::Waypoint;
 pub const DEFAULT_ZOOM: f64 = 3.0;
 pub const MIN_ZOOM: f64 = 0.0625;
 pub const MAX_ZOOM: f64 = 50.0;
+/// The limits with "unlimited zoom" on (the draw radius still caps how much
+/// is drawn when zoomed far out).
+pub const MIN_ZOOM_UNLIMITED: f64 = 1.0 / 64.0;
+pub const MAX_ZOOM_UNLIMITED: f64 = 1000.0;
+/// How long the opening animation runs, seconds.
+const OPENING_SECONDS: f32 = 0.25;
+/// The zoom the opening animation starts from, relative to the target.
+const OPENING_FROM: f64 = 0.5;
 /// Physical pixels per block per zoom step, in minimap units (a unit is
 /// about three physical pixels on a 1080p-class screen): 3.0x is about 1.9
 /// units per block, as measured on the reference.
@@ -113,6 +121,8 @@ pub struct Overlay<'a> {
     pub show_zoom: bool,
     pub show_biome: bool,
     pub show_footsteps: bool,
+    /// The player as a red arrow; otherwise a white dot.
+    pub player_as_arrow: bool,
     pub cave_layer: Option<i32>,
     /// The dimension shown, when it isn't the player's.
     pub other_dimension: Option<String>,
@@ -128,6 +138,10 @@ pub struct WorldMap {
     pub press: Option<[f32; 2]>,
     pub dragged: bool,
     pub footsteps: Vec<[i32; 2]>,
+    /// The zoom range (see [`WorldMap::set_unlimited`]).
+    pub limits: (f64, f64),
+    /// The opening animation: its target zoom and seconds run so far.
+    pub opening: Option<(f64, f32)>,
 }
 
 impl WorldMap {
@@ -139,7 +153,61 @@ impl WorldMap {
             press: None,
             dragged: false,
             footsteps: Vec::new(),
+            limits: (MIN_ZOOM, MAX_ZOOM),
+            opening: None,
         }
+    }
+
+    /// Lifts the zoom limits in either direction (the world map settings).
+    pub fn set_unlimited(&mut self, zoom_in: bool, zoom_out: bool) {
+        self.limits = (
+            if zoom_out {
+                MIN_ZOOM_UNLIMITED
+            } else {
+                MIN_ZOOM
+            },
+            if zoom_in {
+                MAX_ZOOM_UNLIMITED
+            } else {
+                MAX_ZOOM
+            },
+        );
+        if self.opening.is_none() {
+            self.zoom = self.zoom.clamp(self.limits.0, self.limits.1);
+        }
+    }
+
+    /// The map opens on the player; with `animate` it zooms in from further
+    /// out over a quarter second.
+    pub fn open(&mut self, player: [f64; 3], animate: bool) {
+        self.recenter(player);
+        self.menu = None;
+        self.press = None;
+        if let Some((target, _)) = self.opening.take() {
+            self.zoom = target;
+        }
+        if animate {
+            self.opening = Some((self.zoom, 0.0));
+            self.zoom = (self.zoom * OPENING_FROM).clamp(self.limits.0, self.limits.1);
+        }
+    }
+
+    /// Advances the opening animation by `dt` seconds.
+    pub fn tick(&mut self, dt: f32) {
+        let Some((target, t)) = self.opening else {
+            return;
+        };
+        let t = t + dt.max(0.0);
+        if t >= OPENING_SECONDS {
+            self.zoom = target;
+            self.opening = None;
+            return;
+        }
+        // Ease out, in log space so the zoom feels even.
+        let k = 1.0 - (1.0 - t / OPENING_SECONDS).powi(3);
+        let from = (target * OPENING_FROM).ln();
+        self.zoom = (from + (target.ln() - from) * k as f64).exp();
+        self.opening = Some((target, t));
     }
 
     /// GUI pixels per block.
@@ -165,8 +233,11 @@ impl WorldMap {
 
     /// Zooms by `notches` (positive in) keeping the point under `cursor`.
     pub fn scroll(&mut self, notches: f64, cursor: [f32; 2], gui: [f32; 2], unit: f32) {
+        if let Some((target, _)) = self.opening.take() {
+            self.zoom = target;
+        }
         let before = self.to_world(cursor, gui, unit);
-        self.zoom = (self.zoom * ZOOM_STEP.powf(notches)).clamp(MIN_ZOOM, MAX_ZOOM);
+        self.zoom = (self.zoom * ZOOM_STEP.powf(notches)).clamp(self.limits.0, self.limits.1);
         let after = self.to_world(cursor, gui, unit);
         self.center[0] += before[0] - after[0];
         self.center[1] += before[1] - after[1];
@@ -293,7 +364,7 @@ impl WorldMap {
         match button_at(p, gui, unit) {
             Some(Button::ZoomIn) => self.scroll(1.0, [gui[0] / 2.0, gui[1] / 2.0], gui, unit),
             Some(Button::ZoomOut) => self.scroll(-1.0, [gui[0] / 2.0, gui[1] / 2.0], gui, unit),
-            None => {}
+            Some(Button::Help) | None => {}
         }
         MapAction::None
     }
@@ -336,9 +407,21 @@ impl WorldMap {
             let [x, y] = self.to_screen([w.pos[0] as f64 + 0.5, w.pos[2] as f64 + 0.5], gui, u);
             ops.extend(pin([x, y], u, 0xFF00_0000 | w.rgb(), &w.initials));
         }
-        // The player: a red arrow along their facing.
+        // The player: a red arrow along their facing, or a white dot.
         let [px, py] = self.to_screen([o.player[0], o.player[2]], gui, u);
-        ops.extend(arrow([px, py], o.yaw, 6.5 * u));
+        if o.player_as_arrow {
+            ops.extend(arrow([px, py], o.yaw, 6.5 * u));
+        } else {
+            let diamond = |r: f32| [[px, py - r], [px + r, py], [px, py + r], [px - r, py]];
+            ops.push(DrawOp::Quad {
+                points: diamond(3.6 * u),
+                argb: 0xFF00_0000,
+            });
+            ops.push(DrawOp::Quad {
+                points: diamond(2.6 * u),
+                argb: 0xFFFF_FFFF,
+            });
+        }
         // Top: the hovered block and its biome, on dark plates.
         let hovered = self.to_world(o.mouse, gui, u);
         let mut top = Vec::new();
@@ -409,12 +492,23 @@ impl WorldMap {
         }
         ops.extend(compass(gui, u));
         // Side buttons.
-        for b in [Button::ZoomIn, Button::ZoomOut] {
+        for b in [Button::ZoomIn, Button::ZoomOut, Button::Help] {
             let [x, y, w, h] = button_rect(b, gui, u);
             let hover =
                 o.mouse[0] >= x && o.mouse[0] < x + w && o.mouse[1] >= y && o.mouse[1] < y + h;
             let color = if hover { 0xFFFF_FFA0 } else { 0xFFFF_FFFF };
             let (cx, cy, t) = (x + w / 2.0, y + h / 2.0, 1.5 * u);
+            if b == Button::Help {
+                ops.push(DrawOp::Text {
+                    x: cx + 0.5 * u,
+                    y: cy - 3.5 * TEXT_SCALE * u,
+                    text: "?".into(),
+                    argb: color,
+                    align: Align::Center,
+                    scale: TEXT_SCALE * u,
+                });
+                continue;
+            }
             ops.push(DrawOp::Fill {
                 rect: [cx - w * 0.4, cy - t / 2.0, w * 0.8, t],
                 argb: color,
@@ -423,6 +517,36 @@ impl WorldMap {
                 ops.push(DrawOp::Fill {
                     rect: [cx - t / 2.0, cy - h * 0.4, t, h * 0.8],
                     argb: color,
+                });
+            }
+        }
+        // The controls, while the help button is hovered.
+        if self.menu.is_none() && button_at(o.mouse, gui, u) == Some(Button::Help) {
+            let ts = 1.0f32.max(1.2 * u);
+            let row = 10.0 * ts;
+            let width = CONTROLS
+                .iter()
+                .map(|l| l.chars().count())
+                .max()
+                .unwrap_or(0) as f32
+                * 6.0
+                * ts;
+            let h = CONTROLS.len() as f32 * row + 4.0 * ts;
+            let [bx, by, _, _] = button_rect(Button::Help, gui, u);
+            let x = (bx - width - 10.0 * ts).max(2.0);
+            let y = by.min(gui[1] - h - 2.0).max(2.0);
+            ops.push(DrawOp::Fill {
+                rect: [x - 3.0 * ts, y - 2.0 * ts, width + 6.0 * ts, h],
+                argb: 0xE010_0010,
+            });
+            for (i, line) in CONTROLS.iter().enumerate() {
+                ops.push(DrawOp::Text {
+                    x,
+                    y: y + i as f32 * row,
+                    text: (*line).to_owned(),
+                    argb: if i == 0 { 0xFFFF_FF55 } else { 0xFFFF_FFFF },
+                    align: Align::Left,
+                    scale: ts,
                 });
             }
         }
@@ -594,16 +718,31 @@ fn compass(gui: [f32; 2], u: f32) -> Vec<DrawOp> {
     ops
 }
 
+/// The controls the help button lists.
+pub const CONTROLS: &[&str] = &[
+    "Controls",
+    "Drag: move the map",
+    "Mouse wheel: zoom",
+    "Arrow keys / WASD: move",
+    "Space: centre on you",
+    "Right click: menu (waypoints, teleport, share, export)",
+    "B: new waypoint at the cursor",
+    "M or Esc: close the map",
+    "Switch map dimension key: Overworld, Nether, End",
+];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Button {
     ZoomIn,
     ZoomOut,
+    Help,
 }
 
 fn button_rect(b: Button, gui: [f32; 2], u: f32) -> [f32; 4] {
     let fraction = match b {
         Button::ZoomIn => 0.31,
         Button::ZoomOut => 0.39,
+        Button::Help => 0.47,
     };
     let s = 14.0 * u;
     [
@@ -616,10 +755,12 @@ fn button_rect(b: Button, gui: [f32; 2], u: f32) -> [f32; 4] {
 
 /// The side button under `p`.
 pub fn button_at(p: [f32; 2], gui: [f32; 2], u: f32) -> Option<Button> {
-    [Button::ZoomIn, Button::ZoomOut].into_iter().find(|b| {
-        let [x, y, w, h] = button_rect(*b, gui, u);
-        p[0] >= x && p[0] < x + w && p[1] >= y && p[1] < y + h
-    })
+    [Button::ZoomIn, Button::ZoomOut, Button::Help]
+        .into_iter()
+        .find(|b| {
+            let [x, y, w, h] = button_rect(*b, gui, u);
+            p[0] >= x && p[0] < x + w && p[1] >= y && p[1] < y + h
+        })
 }
 
 #[cfg(test)]
@@ -716,6 +857,49 @@ mod tests {
         m.press(p);
         m.release(p, GUI, 1.0);
         assert!(m.zoom > DEFAULT_ZOOM);
+    }
+
+    #[test]
+    fn unlimited_zoom_lifts_the_limits() {
+        let mut m = WorldMap::new([0.0; 3]);
+        for _ in 0..100 {
+            m.scroll(-5.0, [500.0, 300.0], GUI, 1.0);
+        }
+        assert_eq!(m.zoom, MIN_ZOOM);
+        m.set_unlimited(true, true);
+        for _ in 0..100 {
+            m.scroll(-5.0, [500.0, 300.0], GUI, 1.0);
+        }
+        assert_eq!(m.zoom, MIN_ZOOM_UNLIMITED);
+        for _ in 0..200 {
+            m.scroll(5.0, [500.0, 300.0], GUI, 1.0);
+        }
+        assert_eq!(m.zoom, MAX_ZOOM_UNLIMITED);
+        m.set_unlimited(false, false);
+        assert_eq!(m.zoom, MAX_ZOOM, "back within the limits");
+    }
+
+    #[test]
+    fn opening_animation_zooms_in_to_the_target() {
+        let mut m = WorldMap::new([0.0; 3]);
+        m.open([10.0, 64.0, 20.0], true);
+        assert!(m.zoom < DEFAULT_ZOOM);
+        assert_eq!(m.center, [10.0, 20.0]);
+        let mut last = m.zoom;
+        for _ in 0..10 {
+            m.tick(0.02);
+            assert!(m.zoom >= last);
+            last = m.zoom;
+        }
+        m.tick(1.0);
+        assert_eq!(m.zoom, DEFAULT_ZOOM);
+        assert!(m.opening.is_none());
+        // Scrolling during the animation starts from the target.
+        m.open([0.0; 3], true);
+        m.scroll(1.0, [500.0, 300.0], GUI, 1.0);
+        assert!((m.zoom - DEFAULT_ZOOM * ZOOM_STEP).abs() < 1e-9);
+        m.open([0.0; 3], false);
+        assert!((m.zoom - DEFAULT_ZOOM * ZOOM_STEP).abs() < 1e-9);
     }
 
     #[test]

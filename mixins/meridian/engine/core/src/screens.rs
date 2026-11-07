@@ -757,6 +757,7 @@ pub enum Group {
     Overlay,
     Waypoints,
     SeedAtlas,
+    WorldMap,
 }
 
 impl Group {
@@ -770,6 +771,7 @@ impl Group {
             Group::Overlay => "Overlay Settings",
             Group::Waypoints => "Waypoint Settings",
             Group::SeedAtlas => "Seed Atlas Settings",
+            Group::WorldMap => "World Map Settings",
         }
     }
 }
@@ -1015,6 +1017,26 @@ pub fn options() -> Vec<Opt> {
             BlockMap,
             world_map.terrain.block_transparency
         ),
+        Opt {
+            label: "Display Flowers",
+            group: BlockMap,
+            value: |s| on_off(s.world_map.terrain.show_flowers),
+            step: |s, _| {
+                let on = !s.world_map.terrain.show_flowers;
+                s.world_map.terrain.show_flowers = on;
+                s.minimap.terrain.show_flowers = on;
+            },
+        },
+        Opt {
+            label: "Display Redstone",
+            group: BlockMap,
+            value: |s| on_off(s.world_map.terrain.show_redstone),
+            step: |s, _| {
+                let on = !s.world_map.terrain.show_redstone;
+                s.world_map.terrain.show_redstone = on;
+                s.minimap.terrain.show_redstone = on;
+            },
+        },
         toggle!("Chunk Grid", Overlay, minimap.chunk_grid),
         toggle!("Slime Chunks", Overlay, minimap.slime_chunks),
         toggle!("Light Overlay", Overlay, minimap.light_overlay),
@@ -1058,8 +1080,46 @@ pub fn options() -> Vec<Opt> {
             },
         },
     ];
+    all.extend(world_map_options());
     all.extend(seed_atlas_options());
     all
+}
+
+/// The world map's own options (its settings key, `]`).
+fn world_map_options() -> Vec<Opt> {
+    use Group::WorldMap;
+    vec![
+        toggle!("World Map", WorldMap, world_map.enabled),
+        toggle!("Load New Chunks", WorldMap, world_map.load_new_chunks),
+        toggle!("Update Chunks", WorldMap, world_map.update_chunks),
+        toggle!("Footsteps", WorldMap, world_map.footsteps),
+        toggle!("Display Coordinates", WorldMap, world_map.show_coordinates),
+        toggle!("Display Zoom", WorldMap, world_map.show_zoom),
+        toggle!(
+            "Display Hovered Biome",
+            WorldMap,
+            world_map.show_hovered_biome
+        ),
+        toggle!("Player As Arrow", WorldMap, world_map.player_as_arrow),
+        toggle!("Opening Animation", WorldMap, world_map.opening_animation),
+        toggle!("Unlimited Zoom In", WorldMap, world_map.unlimited_zoom_in),
+        toggle!("Unlimited Zoom Out", WorldMap, world_map.unlimited_zoom_out),
+        Opt {
+            label: "Max Loaded Regions",
+            group: WorldMap,
+            value: |s| format!("{}", s.world_map.max_loaded_regions),
+            step: |s, b| {
+                const STEPS: [usize; 7] = [100, 200, 300, 500, 800, 1200, 2000];
+                s.world_map.max_loaded_regions = cycle(&STEPS, s.world_map.max_loaded_regions, b);
+            },
+        },
+        Opt {
+            label: "Map Lighting",
+            group: WorldMap,
+            value: |s| on_off(s.world_map.terrain.lighting),
+            step: |s, _| s.world_map.terrain.lighting = !s.world_map.terrain.lighting,
+        },
+    ]
 }
 
 #[derive(Debug, PartialEq)]
@@ -1074,6 +1134,9 @@ pub struct SettingsScreen {
     pub page: SettingsPage,
     pub search: String,
     pub search_focused: bool,
+    /// Opened straight on a group (the world map key, the map's buttons):
+    /// Back closes instead of returning to the main page.
+    pub direct: bool,
 }
 
 impl Default for SettingsScreen {
@@ -1082,6 +1145,7 @@ impl Default for SettingsScreen {
             page: SettingsPage::Main { page: 0 },
             search: String::new(),
             search_focused: false,
+            direct: false,
         }
     }
 }
@@ -1098,7 +1162,18 @@ impl SettingsScreen {
 
     /// The Seed Atlas settings page.
     pub fn seed_atlas() -> Self {
-        Self::group(Group::SeedAtlas)
+        Self {
+            direct: true,
+            ..Self::group(Group::SeedAtlas)
+        }
+    }
+
+    /// The world map settings, as the world map settings key opens them.
+    pub fn world_map() -> Self {
+        Self {
+            direct: true,
+            ..Self::group(Group::WorldMap)
+        }
     }
 
     /// The buttons that open screens, before a group's options: id, label
@@ -1231,6 +1306,12 @@ impl SettingsScreen {
                     "Seed Atlas Settings",
                     true,
                 ));
+                ws.push(Widget::button(
+                    "g:worldmap",
+                    Self::grid(env, 1),
+                    "World Map Settings",
+                    true,
+                ));
             }
             SettingsPage::Main { .. } => {}
             _ => {
@@ -1290,6 +1371,7 @@ impl SettingsScreen {
             Some("g:waypoints") => self.page = group(Group::Waypoints),
             Some("g:misc") => self.page = group(Group::Misc),
             Some("g:seedatlas") => self.page = group(Group::SeedAtlas),
+            Some("g:worldmap") => self.page = group(Group::WorldMap),
             Some("waypoints") => return Action::Open(Screen::List(List::default())),
             Some("sa:biome") => return Action::Open(Screen::Nearest(NearestScreen::biome(env))),
             Some("sa:structure") => {
@@ -1318,6 +1400,7 @@ impl SettingsScreen {
             Some("next") => self.turn(1),
             Some("back") => match self.page {
                 SettingsPage::Main { .. } => return Action::Close,
+                SettingsPage::Group { .. } if self.direct => return Action::Close,
                 _ => {
                     self.page = SettingsPage::Main { page: 0 };
                     self.search.clear();
