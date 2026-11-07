@@ -323,6 +323,7 @@ pub(crate) mod tests {
         ChunkSnapshot {
             dimension: DimensionId::new(DimensionId::OVERWORLD),
             pos,
+            mode: meridian_host::ReadMode::Surface,
             blocks: vec![
                 "minecraft:grass_block".into(),
                 "minecraft:water".into(),

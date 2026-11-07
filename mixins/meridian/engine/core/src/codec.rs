@@ -51,6 +51,16 @@ pub enum CodecError {
     Corrupt(String),
 }
 
+impl From<CodecError> for crate::persist::LoadError {
+    /// A file from a newer Meridian is kept; anything else is broken.
+    fn from(e: CodecError) -> Self {
+        match e {
+            CodecError::UnsupportedVersion(v) if v > VERSION => Self::Newer(e.to_string()),
+            e => Self::Broken(e.to_string()),
+        }
+    }
+}
+
 /// The data a save needs, copied out of a region so a worker can encode it
 /// while the region stays in use.
 #[derive(Clone, Debug)]

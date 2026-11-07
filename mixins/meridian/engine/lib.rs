@@ -47,7 +47,9 @@ use parking_lot::Mutex;
 pub const MOD_ID: &str = "meridian";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The bridge shape this adapter was written for.
-const BRIDGE_VERSION: u32 = 10;
+const BRIDGE_VERSION: u32 = 11;
+/// How long leaving a world or quitting waits for region saves.
+const SAVE_WAIT: Duration = Duration::from_secs(5);
 
 /// The singleplayer world's folder name, set by the integrated server's
 /// thread (the window's client only knows the world's display name).
@@ -145,6 +147,8 @@ struct State {
     book: Option<((WorldSource, String), WaypointBook)>,
     /// The maps of the server played on (several worlds behind one address).
     server_maps: Option<(WorldSource, meridian_core::subworld::ServerMaps)>,
+    /// Whether the world spawn reported is the current level's yet.
+    spawn_watch: meridian_core::subworld::SpawnWatch,
     last_book_save: Instant,
     /// The world map's last frame, for its animation.
     map_frame: Instant,
@@ -311,6 +315,7 @@ fn snapshot(s: bridge::Snapshot) -> ChunkSnapshot {
     ChunkSnapshot {
         dimension: DimensionId::new(s.dimension),
         pos: ChunkPos::new(s.pos[0], s.pos[1]),
+        mode: s.cave_from.map_or(ReadMode::Surface, ReadMode::CaveFrom),
         blocks: s.blocks,
         biomes: s.biomes,
         columns: s
@@ -452,13 +457,33 @@ impl State {
     /// and switches the map and its waypoints when it changed.
     fn update_map(&mut self, data_dir: &std::path::Path) {
         let Some(context) = self.engine.context().cloned() else { return };
-        let name = self.map_for(data_dir, &context.source, bridge::world_spawn());
+        let spawn = self.spawn_watch.spawn(bridge::world_spawn(), Instant::now());
+        // Nothing is saved until it is known which map the chunks belong to.
+        let by_spawn = self.config.current().world_map.multiplayer_maps == meridian_core::config::MapSelection::WorldSpawn;
+        if spawn.is_err() && by_spawn && matches!(context.source, WorldSource::Multiplayer { .. }) {
+            self.engine.hold_saves(true);
+            return;
+        }
+        let name = self.map_for(data_dir, &context.source, spawn.unwrap_or(None));
         if self.engine.map() != name {
             log::info!("meridian: showing map {name}");
             self.pending.push(Pending::Notice(format!("Meridian: map {name}")));
+            // Still held: what the other map got meanwhile is dropped.
             self.engine.set_map(&name);
-            self.viewer = None;
+            gpu_map::forget_regions();
+            self.close_viewer();
             self.open_book(data_dir, &context);
+        }
+        self.engine.hold_saves(false);
+    }
+
+    /// Drops the map of another dimension the world map showed. Its workers
+    /// finish their queued loads first, so it goes on a thread of its own.
+    fn close_viewer(&mut self) {
+        if let Some((_, engine)) = self.viewer.take() {
+            let _ = std::thread::Builder::new()
+                .name("meridian-viewer-drop".into())
+                .spawn(move || drop(engine));
         }
     }
 
@@ -516,29 +541,38 @@ impl State {
                 let Some((old, new)) = name.split_once(' ').map(|(a, b)| (a.trim().to_owned(), b.trim().to_owned())) else {
                     return "/meridian map rename <old> <new>".to_owned();
                 };
-                if old == DEFAULT_MAP || !maps.maps.contains_key(&old) || maps.maps.contains_key(&new) || new.is_empty() || new.contains(' ') {
-                    return format!("Cannot rename {old} to {new}");
-                }
-                let shown = self.engine.map() == old;
-                if shown {
+                if maps.find(&old).is_some_and(|m| m == self.engine.map()) {
                     return "Switch to another map first (/meridian map use <name>)".to_owned();
                 }
+                let Some(context) = self.engine.context().cloned() else { return "No world open".to_owned() };
+                let Some(data_dir) = self.export_dir.parent().map(std::path::Path::to_path_buf) else {
+                    return "No data folder".to_owned();
+                };
+                let mut renamed = maps.clone();
+                let (old, new) = match renamed.rename(&old, &new) {
+                    Ok(names) => names,
+                    Err(e) => return e,
+                };
                 // The files move with the name: maps live in one folder each.
-                let Some(context) = self.engine.context() else { return "No world open".to_owned() };
-                let Some(data_dir) = self.export_dir.parent() else { return "No data folder".to_owned() };
-                let dir = meridian_core::persist::server_dir(data_dir, &context.source);
+                let dir = meridian_core::persist::server_dir(&data_dir, &context.source);
                 let from = dir.join(meridian_core::persist::escape_component(&old));
                 let to = dir.join(meridian_core::persist::escape_component(&new));
-                if from.exists() && let Err(e) = std::fs::rename(&from, &to) {
+                if from != to && from.exists() && let Err(e) = std::fs::rename(&from, &to) {
                     return format!("Renaming the map's folder failed: {e}");
                 }
-                let entry = maps.maps.remove(&old).unwrap_or_default();
-                maps.maps.insert(new.clone(), entry);
-                if maps.current == old {
-                    maps.current = new.clone();
-                }
+                *maps = renamed;
                 if let Err(e) = maps.save() {
                     log::warn!("meridian: saving the server's map list failed: {e}");
+                }
+                // So do its seeds, completed structures and game version.
+                let key = |map: &str| meridian_core::seedatlas_state::SeedContext::of_map(&context.source, map).key;
+                let (old_key, new_key) = (key(&old), key(&new));
+                self.seeds.rename_context(&old_key, &new_key);
+                self.completed.rename_world(&old_key, &new_key);
+                let versions = &mut self.config.current_mut().seed_atlas.game_versions;
+                if let Some(v) = versions.remove(&old_key) {
+                    versions.insert(new_key, v);
+                    self.save_config();
                 }
                 format!("Renamed map {old} to {new}")
             }
@@ -642,6 +676,9 @@ impl Meridian {
                 let _ = meridian_core::seedatlas::WORKER_START.set(|| {
                     bridge::lower_current_thread();
                 });
+                let _ = meridian_core::worker::THREAD_START.set(|| {
+                    bridge::lower_current_thread();
+                });
             } else {
                 log::error!(
                     "meridian: bridge version {} (expected {BRIDGE_VERSION}): no map data",
@@ -649,6 +686,7 @@ impl Meridian {
                 );
             }
             log::info!("meridian {VERSION}: settings in {}", store.path().display());
+            let engine_read_only = engine.read_only();
             load_icons();
             State {
                 config,
@@ -658,6 +696,7 @@ impl Meridian {
                 dimension: None,
                 book: None,
                 server_maps: None,
+                spawn_watch: Default::default(),
                 last_book_save: Instant::now(),
                 map_frame: Instant::now(),
                 next_color: 12,
@@ -665,7 +704,11 @@ impl Meridian {
                 map_image: None,
                 screen: None,
                 open_screen: None,
-                pending: Vec::new(),
+                pending: if engine_read_only {
+                    vec![Pending::Notice("Meridian: another game uses this map folder; map changes are not saved".to_owned())]
+                } else {
+                    Vec::new()
+                },
                 cave: Default::default(),
                 death_recorded: false,
                 map: WorldMap::new([0.0; 3]),
@@ -1428,7 +1471,9 @@ impl Hooks for Meridian {
         self.with_state(host, |s| {
             let dimension = event.dimension.to_owned();
             s.levels += 1;
-            s.viewer = None;
+            s.close_viewer();
+            // The spawn reported now may be the last level's or server's.
+            s.spawn_watch.level_loaded(bridge::world_spawn(), Instant::now());
             s.dimension = Some(dimension.clone());
             let map_host = HorizonHost {
                 host,
@@ -1437,7 +1482,8 @@ impl Hooks for Meridian {
             match map_host.context() {
                 Some(context) => {
                     // The spawn may still be the last server's: the frame
-                    // corrects the map once the new one is announced.
+                    // picks the map once the new one is announced, and
+                    // nothing is saved before.
                     let map = s.map_for(&data_dir(host), &context.source, None);
                     s.engine.prepare_map(&map);
                     s.open_book(&data_dir(host), &context);
@@ -1467,14 +1513,17 @@ impl Hooks for Meridian {
         self.with_state(host, |s| {
             s.close_book();
             s.levels = 0;
-            s.viewer = None;
+            s.close_viewer();
         });
         self.send(host, HostEvent::Disconnected);
+        // The world's regions reach the disk before the next one opens.
+        self.with_state(host, |s| s.engine.flush_and_wait(SAVE_WAIT));
+        gpu_map::forget_regions();
     }
 
     fn client_stopping(&self, host: &dyn Host, _event: &mut ClientStoppingEvent) {
         self.with_state(host, |s| {
-            s.engine.flush();
+            s.engine.flush_and_wait(SAVE_WAIT);
             s.save_config();
             s.save_book();
         });
@@ -1553,7 +1602,7 @@ impl Hooks for Meridian {
             if let Some(p) = &player {
                 s.map.step(p.position);
                 // Keep the regions around the player in memory.
-                let here = RegionPos::of_block(p.position[0] as i32, p.position[2] as i32);
+                let here = RegionPos::of_block(p.position[0].floor() as i32, p.position[2].floor() as i32);
                 s.engine
                     .request_area(here.offset(-1, -1), here.offset(1, 1));
             }
@@ -1574,7 +1623,11 @@ impl Hooks for Meridian {
                 let dim = s.dimension.as_deref().unwrap_or("");
                 let allowed = cave.allowed_dimensions.is_empty() || cave.allowed_dimensions.iter().any(|d| d == dim);
                 let layer = s.cave.update(&cave, allowed, bridge::under_roof(), p.position[1] + 1.62, Instant::now());
-                s.engine.set_layer(layer);
+                if layer != s.engine.layer() {
+                    // Reads asked for the old layer are not wanted any more.
+                    bridge::clear_requests();
+                    s.engine.set_layer(layer);
+                }
             }
             let budget =
                 Duration::from_micros(s.config.current().performance.frame_budget_us as u64);
@@ -2349,6 +2402,10 @@ impl Meridian {
             let whole_radius = if region_px < MAP_OVERVIEW_BELOW { MAP_REQUEST_RADIUS_FAR } else { MAP_REQUEST_RADIUS };
             let near = (clamp(min, whole_radius), clamp(max, whole_radius));
             engine.request_area(near.0, near.1);
+            if region_px < MAP_OVERVIEW_BELOW {
+                // Far out only the middle stays whole in memory (D-027).
+                engine.keep_whole_only(near.0, near.1);
+            }
             let (dmin, dmax) = (clamp(min, MAP_DRAW_RADIUS), clamp(max, MAP_DRAW_RADIUS));
             engine.request_overviews(dmin, dmax, near);
             let mut regions = Vec::new();
@@ -2383,6 +2440,9 @@ impl Meridian {
                 use std::hash::{Hash, Hasher};
                 let mut h = std::collections::hash_map::DefaultHasher::new();
                 format!("{:?}", engine.context()).hash(&mut h);
+                // Maps of one server share a context: textures of one are
+                // never another's.
+                engine.map().hash(&mut h);
                 engine.layer().hash(&mut h);
                 h.finish()
             };
@@ -2726,11 +2786,14 @@ impl State {
         let next = order[(i + 1) % order.len()].clone();
         let factor = dimension_scale(&shown) / dimension_scale(&next);
         self.map.center = [self.map.center[0] * factor, self.map.center[1] * factor];
+        self.close_viewer();
         if next == here {
-            self.viewer = None;
             return;
         }
-        let mut engine = MapEngine::new(self.config.current().clone(), data_dir(host));
+        // It only loads saved regions: a smaller pool than the player's map.
+        let mut settings = self.config.current().clone();
+        settings.performance.worker_threads = settings.performance.effective_workers().min(2);
+        let mut engine = MapEngine::new(settings, data_dir(host));
         engine.prepare_map(self.engine.map());
         let viewer_host = ViewerHost(HorizonHost { host, dimension: None });
         let context = WorldContext { source: context.source, dimension: DimensionId::new(&next) };
@@ -2761,6 +2824,7 @@ impl State {
         self.notice = Some("Exporting the map...".to_owned());
         *EXPORT_NOTICE.lock() = Some("Exporting the map...".to_owned());
         std::thread::spawn(move || {
+            bridge::lower_current_thread();
             // Let the region saves just started land first.
             std::thread::sleep(Duration::from_millis(500));
             let text = match meridian_core::export::export_png(&regions, &out, &shading, 16384) {
@@ -3092,6 +3156,7 @@ impl State {
             _ => Vec::new(),
         };
         std::thread::spawn(move || {
+            bridge::lower_current_thread();
             let tolerance = meridian_core::seedatlas_state::COMPLETED_TOLERANCE;
             let (found, name) = match kind {
                 NearestKind::Biome { id, name } => (meridian_core::nearest::nearest_biome(&atlas, dim, id, y, from[0], from[2]), name),

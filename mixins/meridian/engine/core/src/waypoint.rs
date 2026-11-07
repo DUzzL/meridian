@@ -327,20 +327,21 @@ impl Default for WaypointBook {
 
 impl WaypointBook {
     /// Reads the book in a map folder (empty when there is none yet). A
-    /// broken file is moved aside, never overwritten silently.
+    /// broken file is moved aside; one from a newer Meridian, or one that
+    /// cannot be read, is kept and the book is not saved
+    /// ([`persist::load_or_set_aside`]).
     pub fn load(map_dir: &Path) -> Self {
+        const NEWEST: u32 = 1;
         let path = map_dir.join(FILE);
-        let mut book = match std::fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice::<WaypointBook>(&bytes).unwrap_or_else(|e| {
-                log::warn!(
-                    "meridian: {} is not valid ({e}); keeping it as .broken",
-                    path.display()
-                );
-                let _ = std::fs::rename(&path, path.with_extension("json.broken"));
-                WaypointBook::default()
-            }),
-            Err(_) => WaypointBook::default(),
-        };
+        let (book, writable) = persist::load_or_set_aside(&path, "waypoints", |bytes| {
+            if let Some(v) = persist::json_version(bytes).filter(|&v| v > NEWEST) {
+                return Err(persist::LoadError::Newer(format!("version {v}")));
+            }
+            serde_json::from_slice::<WaypointBook>(bytes)
+                .map_err(|e| persist::LoadError::Broken(e.to_string()))
+        })
+        .split();
+        let mut book = book.unwrap_or_default();
         // Temporary waypoints never outlive a session.
         for dim in book.dimensions.values_mut() {
             for list in dim.sets.values_mut() {
@@ -354,7 +355,8 @@ impl WaypointBook {
             .map(|w| w.id)
             .max();
         book.next_id = book.next_id.max(max.unwrap_or(0) + 1);
-        book.path = Some(path);
+        // Without a path the book is never saved over the kept file.
+        book.path = writable.then_some(path);
         book
     }
 
@@ -646,9 +648,39 @@ mod tests {
     fn broken_file_is_kept_aside() {
         let dir = test_dir("waypoints_broken");
         std::fs::write(dir.join(FILE), b"{ nope").unwrap();
-        let book = WaypointBook::load(&dir);
+        let mut book = WaypointBook::load(&dir);
         assert!(book.dimensions.is_empty());
-        assert!(dir.join("waypoints.json.broken").exists());
+        let aside: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("waypoints.json.broken.")
+            })
+            .collect();
+        assert_eq!(aside.len(), 1);
+        // The fresh book saves.
+        book.dirty = true;
+        book.save().unwrap();
+        assert!(dir.join(FILE).exists());
+    }
+
+    #[test]
+    fn newer_or_unreadable_file_is_never_overwritten() {
+        let dir = test_dir("waypoints_newer");
+        let newer = br#"{"version": 2, "dimensions": {"x": "a shape this one does not know"}}"#;
+        std::fs::write(dir.join(FILE), newer).unwrap();
+        let mut book = WaypointBook::load(&dir);
+        book.dirty = true;
+        book.save().unwrap();
+        assert_eq!(std::fs::read(dir.join(FILE)).unwrap(), newer);
+        let blocked = test_dir("waypoints_blocked");
+        std::fs::create_dir_all(blocked.join(FILE)).unwrap();
+        let mut book = WaypointBook::load(&blocked);
+        book.dirty = true;
+        book.save().unwrap();
+        assert!(blocked.join(FILE).is_dir());
     }
 }
 

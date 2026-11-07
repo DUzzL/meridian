@@ -290,6 +290,8 @@ pub struct WorldMapSettings {
     pub unlimited_zoom_out: bool,
     /// Regions kept in memory before the least recently used are dropped.
     pub max_loaded_regions: usize,
+    /// Memory for regions kept whole (MiB), whatever their number.
+    pub max_region_mib: usize,
     pub map_teleport_format: String,
     pub map_teleport_dimension_format: String,
     pub player_teleport_format: String,
@@ -314,6 +316,7 @@ impl Default for WorldMapSettings {
             unlimited_zoom_in: false,
             unlimited_zoom_out: false,
             max_loaded_regions: 300,
+            max_region_mib: 512,
             map_teleport_format: "/tp @s {x} {y} {z}".into(),
             map_teleport_dimension_format: "/execute as @s in {d} run tp {x} {y} {z}".into(),
             player_teleport_format: "/tp @s {name}".into(),
@@ -690,12 +693,16 @@ impl ConfigFile {
 #[derive(Debug, Clone)]
 pub struct ConfigStore {
     path: PathBuf,
+    /// The file could not be read at load: it is kept and never written
+    /// over (shared by clones).
+    read_only: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ConfigStore {
     pub fn new(config_dir: &Path) -> Self {
         Self {
             path: config_dir.join(CONFIG_FILE),
+            read_only: Default::default(),
         }
     }
 
@@ -704,37 +711,29 @@ impl ConfigStore {
     }
 
     /// Reads the file. A missing file gives the defaults; a broken one is
-    /// moved aside to `meridian.toml.broken` and also gives the defaults, so
-    /// a typo never stops the game.
+    /// moved aside to `meridian.toml.broken.<time>` and also gives the
+    /// defaults, so a typo never stops the game. A file that cannot be read
+    /// gives the defaults for this session and is never saved over.
     pub fn load(&self) -> ConfigFile {
-        let text = match std::fs::read_to_string(&self.path) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return ConfigFile::default(),
-            Err(e) => {
-                log::warn!("meridian: cannot read {}: {e}", self.path.display());
-                return ConfigFile::default();
-            }
-        };
-        match toml::from_str::<ConfigFile>(&text) {
-            Ok(mut file) => {
-                file.repair();
-                file
-            }
-            Err(e) => {
-                log::warn!(
-                    "meridian: {} is not valid, using defaults: {e}",
-                    self.path.display()
-                );
-                let aside = self.path.with_extension("toml.broken");
-                if let Err(e) = std::fs::rename(&self.path, &aside) {
-                    log::warn!("meridian: cannot move it aside: {e}");
-                }
-                ConfigFile::default()
-            }
-        }
+        let (file, writable) = persist::load_or_set_aside(&self.path, "settings", |bytes| {
+            std::str::from_utf8(bytes)
+                .map_err(|e| e.to_string())
+                .and_then(|t| toml::from_str::<ConfigFile>(t).map_err(|e| e.to_string()))
+                .map_err(persist::LoadError::Broken)
+        })
+        .split();
+        self.read_only
+            .store(!writable, std::sync::atomic::Ordering::Relaxed);
+        let mut file = file.unwrap_or_default();
+        file.repair();
+        file
     }
 
+    /// Writes the file (not when it could not be read at load).
     pub fn save(&self, file: &ConfigFile) -> Result<(), PersistError> {
+        if self.read_only.load(std::sync::atomic::Ordering::Relaxed) {
+            return Ok(());
+        }
         let text = toml::to_string_pretty(file).map_err(|e| PersistError::Encode(e.to_string()))?;
         persist::write_atomic(&self.path, text.as_bytes())
     }
@@ -804,8 +803,32 @@ mod tests {
         let store = ConfigStore::new(&dir);
         std::fs::write(store.path(), "this is = = not toml").unwrap();
         assert_eq!(store.load(), ConfigFile::default());
-        assert!(dir.join("meridian.toml.broken").exists());
+        let aside = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("meridian.toml.broken.")
+            })
+            .count();
+        assert_eq!(aside, 1);
         assert!(!store.path().exists());
+        // Invalid UTF-8 is broken too, not a reason to stop saving.
+        std::fs::write(store.path(), b"zoom = \"\xFF\"").unwrap();
+        assert_eq!(store.load(), ConfigFile::default());
+        store.save(&ConfigFile::default()).unwrap();
+        assert!(store.load() == ConfigFile::default());
+    }
+
+    #[test]
+    fn unreadable_file_is_never_saved_over() {
+        let dir = test_dir("config_unreadable");
+        let store = ConfigStore::new(&dir);
+        std::fs::create_dir_all(store.path()).unwrap();
+        assert_eq!(store.load(), ConfigFile::default());
+        store.save(&ConfigFile::default()).unwrap();
+        assert!(store.path().is_dir());
     }
 
     #[test]

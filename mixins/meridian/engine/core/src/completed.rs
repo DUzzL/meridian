@@ -68,6 +68,9 @@ impl StructureKey {
     }
 }
 
+/// The newest `completed.json` this Meridian reads and writes.
+const FILE_VERSION: u32 = 1;
+
 /// Everything that identifies a completed structure except its position.
 type Group = (String, i64, bool, String, String);
 
@@ -87,6 +90,8 @@ pub struct CompletedStore {
     order: Vec<StructureKey>,
     set: HashSet<StructureKey>,
     groups: HashMap<Group, Vec<StructureKey>>,
+    /// The file could not be read: it is kept and never written over.
+    read_only: bool,
 }
 
 impl CompletedStore {
@@ -97,14 +102,20 @@ impl CompletedStore {
 
     pub fn load(data_dir: &Path) -> Self {
         let path = data_dir.join("completed.json");
-        let file = std::fs::read(&path)
-            .ok()
-            .and_then(|b| serde_json::from_slice::<CompletedFile>(&b).ok())
-            .unwrap_or_default();
+        let (file, writable) = persist::load_or_set_aside(&path, "completed structures", |bytes| {
+            if let Some(v) = persist::json_version(bytes).filter(|&v| v > FILE_VERSION) {
+                return Err(persist::LoadError::Newer(format!("version {v}")));
+            }
+            serde_json::from_slice::<CompletedFile>(bytes)
+                .map_err(|e| persist::LoadError::Broken(e.to_string()))
+        })
+        .split();
         let mut store = Self {
             path,
+            read_only: !writable,
             ..Self::default()
         };
+        let file = file.unwrap_or_default();
         for key in file.completed {
             store.insert(key);
         }
@@ -239,14 +250,36 @@ impl CompletedStore {
         self.reset(&prompt.world, prompt.kind.as_deref())
     }
 
+    /// Moves the completed structures of a world or server to another key
+    /// (a renamed map); how many moved.
+    pub fn rename_world(&mut self, old: &str, new: &str) -> usize {
+        let moved = self.order.iter().filter(|k| k.world == old).count();
+        if moved == 0 {
+            return 0;
+        }
+        self.set.clear();
+        self.groups.clear();
+        for mut key in std::mem::take(&mut self.order) {
+            if key.world == old {
+                key.world = new.to_owned();
+            }
+            self.insert(key);
+        }
+        self.save();
+        moved
+    }
+
     /// Every completed structure, oldest first.
     pub fn all(&self) -> &[StructureKey] {
         &self.order
     }
 
     fn save(&self) {
+        if self.read_only {
+            return;
+        }
         let file = CompletedFile {
-            version: 1,
+            version: FILE_VERSION,
             completed: self.order.clone(),
         };
         match serde_json::to_vec_pretty(&file) {
@@ -319,6 +352,48 @@ mod tests {
         assert!(StructureKey::new("", 1, false, "minecraft:overworld", "village", 0, 0).is_none());
         assert!(StructureKey::new("w", 1, false, " ", "village", 0, 0).is_none());
         assert!(StructureKey::new("w", 1, false, "minecraft:overworld", "", 0, 0).is_none());
+    }
+
+    #[test]
+    fn unreadable_files_are_kept() {
+        let dir = temp_dir("kept");
+        // From a newer Meridian: left as it is, never saved over.
+        let newer = br#"{"version": 2, "completed": "another shape"}"#;
+        std::fs::write(dir.join("completed.json"), newer).unwrap();
+        let mut s = CompletedStore::load(&dir);
+        assert!(s.mark(&key("sp-a", "village", 0, 0)));
+        assert_eq!(std::fs::read(dir.join("completed.json")).unwrap(), newer);
+        // Broken: set aside, and the fresh store saves.
+        std::fs::write(dir.join("completed.json"), b"{ broken").unwrap();
+        let mut s = CompletedStore::load(&dir);
+        assert_eq!(s.all().len(), 0);
+        assert!(s.mark(&key("sp-a", "village", 0, 0)));
+        assert_eq!(CompletedStore::load(&dir).all().len(), 1);
+        let aside = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("completed.json.broken.")
+            })
+            .count();
+        assert_eq!(aside, 1);
+    }
+
+    #[test]
+    fn renaming_a_world_moves_its_structures() {
+        let dir = temp_dir("rename");
+        let mut s = CompletedStore::load(&dir);
+        s.mark(&key("mp-x/old", "village", 0, 0));
+        s.mark(&key("mp-x", "village", 0, 0));
+        s.mark(&key("mp-x/old", "igloo", 50, 50));
+        assert_eq!(s.rename_world("mp-x/old", "mp-x/new"), 2);
+        assert!(s.is_completed(&key("mp-x/new", "village", 3, 3)));
+        assert!(!s.is_completed(&key("mp-x/old", "village", 0, 0)));
+        let back = CompletedStore::load(&dir);
+        let worlds: Vec<&str> = back.all().iter().map(|k| k.world.as_str()).collect();
+        assert_eq!(worlds, ["mp-x/new", "mp-x", "mp-x/new"], "order kept");
     }
 
     #[test]

@@ -6,7 +6,8 @@
 //! texels a side, picked by how big the region is on screen), uploads a few
 //! per frame when they are missing or redrawn, and draws them as quads over
 //! a black background. Textures stay cached after their regions leave
-//! memory, so zooming out shows what was seen without loading it again.
+//! memory, so zooming out shows what was seen without loading it again;
+//! they are dropped when the world or the server's map changes.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -62,6 +63,15 @@ static FRAME: Mutex<Option<WorldMapFrame>> = Mutex::new(None);
 
 pub fn set_frame(frame: Option<WorldMapFrame>) {
     *FRAME.lock() = frame;
+}
+
+/// Set when the region textures belong to a world no longer shown.
+static FORGET_REGIONS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Drops every region texture at the next draw (the world or the server's
+/// map changed: nothing cached is shown again soon).
+pub fn forget_regions() {
+    FORGET_REGIONS.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
 const SHADER: &str = r#"
@@ -367,6 +377,17 @@ impl Gpu {
         self.has_seed = false;
     }
 
+    /// Drops the terrain textures (not the Seed Atlas tiles).
+    fn release_regions(&mut self) {
+        let bytes = &mut self.bytes;
+        self.entries.retain(|_, e| {
+            if !e.seed {
+                *bytes -= e.bytes;
+            }
+            e.seed
+        });
+    }
+
     fn evict(&mut self) {
         if self.bytes <= CACHE_BYTES {
             return;
@@ -387,6 +408,11 @@ impl Gpu {
 impl WorldMapRenderer {
     /// Draws the map when its screen is open; true if it drew.
     pub fn draw(&self, event: &mut WorldDrawnEvent<'_, '_>) -> bool {
+        if FORGET_REGIONS.swap(false, std::sync::atomic::Ordering::Relaxed)
+            && let Some(gpu) = self.gpu.lock().as_mut()
+        {
+            gpu.release_regions();
+        }
         let frame = FRAME.lock().clone();
         let age = frame.as_ref().map(|f| f.at.elapsed());
         let Some(frame) = frame.filter(|_| age.is_some_and(|a| a <= std::time::Duration::from_millis(200))) else {

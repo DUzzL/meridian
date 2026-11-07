@@ -84,6 +84,8 @@ pub struct SeedBook {
     /// Contexts whose world seed must not be picked up again after
     /// `clear`, until the context changes. Not stored.
     suppressed: HashSet<String>,
+    /// The file could not be read: it is kept and never written over.
+    read_only: bool,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -99,16 +101,21 @@ struct SeedFile {
 impl SeedBook {
     pub fn load(data_dir: &Path) -> Self {
         let path = data_dir.join("seeds.toml");
-        let file = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|t| toml::from_str::<SeedFile>(&t).ok())
-            .unwrap_or_default();
+        let (file, writable) = persist::load_or_set_aside(&path, "seeds", |bytes| {
+            std::str::from_utf8(bytes)
+                .map_err(|e| e.to_string())
+                .and_then(|t| toml::from_str::<SeedFile>(t).map_err(|e| e.to_string()))
+                .map_err(persist::LoadError::Broken)
+        })
+        .split();
+        let file = file.unwrap_or_default();
         Self {
             path,
             entries: file.seeds,
             nether: file.nether,
             end: file.end,
             suppressed: HashSet::new(),
+            read_only: !writable,
         }
     }
 
@@ -188,12 +195,35 @@ impl SeedBook {
         self.suppressed.contains(key)
     }
 
+    /// Moves the seeds of a context to another key (a renamed map); whether
+    /// there were any.
+    pub fn rename_context(&mut self, old: &str, new: &str) -> bool {
+        let mut moved = false;
+        if let Some(e) = self.entries.remove(old) {
+            self.entries.insert(new.to_owned(), e);
+            moved = true;
+        }
+        for map in [&mut self.nether, &mut self.end] {
+            if let Some(v) = map.remove(old) {
+                map.insert(new.to_owned(), v);
+                moved = true;
+            }
+        }
+        if moved {
+            self.save();
+        }
+        moved
+    }
+
     /// Forgets suppressions of other contexts when the open one changes.
     pub fn context_changed(&mut self, key: &str) {
         self.suppressed.retain(|k| k == key);
     }
 
     fn save(&self) {
+        if self.read_only {
+            return;
+        }
         let file = SeedFile {
             seeds: self.entries.clone(),
             nether: self.nether.clone(),
@@ -1528,6 +1558,47 @@ mod tests {
         // "hello".hashCode() in Java.
         assert_eq!(parse_seed("hello"), Some(99162322));
         assert_eq!(parse_seed("  "), None);
+    }
+
+    #[test]
+    fn seed_book_survives_a_broken_file_and_a_rename() {
+        let dir = crate::persist::test_dir("seeds_book");
+        std::fs::write(dir.join("seeds.toml"), "[seeds\nbroken").unwrap();
+        let mut book = SeedBook::load(&dir);
+        assert!(!book.has_any("mp-x/old"));
+        let entry = SeedEntry {
+            input: "1".into(),
+            seed: 1,
+            large_biomes: false,
+        };
+        book.set("mp-x/old", entry.clone());
+        book.set_dimension_seed(
+            "mp-x/old",
+            Dimension::Nether,
+            SeedValue {
+                input: "2".into(),
+                seed: 2,
+            },
+        );
+        assert!(book.rename_context("mp-x/old", "mp-x/new"));
+        let back = SeedBook::load(&dir);
+        assert_eq!(back.get("mp-x/new"), Some(&entry));
+        assert_eq!(
+            back.dimension_seed("mp-x/new", Dimension::Nether)
+                .map(|v| v.seed),
+            Some(2)
+        );
+        assert!(!back.has_any("mp-x/old"));
+        let aside = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("seeds.toml.broken.")
+            })
+            .count();
+        assert_eq!(aside, 1, "the broken file is kept beside");
     }
 
     #[test]

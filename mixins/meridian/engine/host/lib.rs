@@ -165,6 +165,9 @@ pub struct ColumnSample {
 pub struct ChunkSnapshot {
     pub dimension: DimensionId,
     pub pos: ChunkPos,
+    /// How it was read (the request's mode): a cave layer must never take a
+    /// surface read, nor the other way round.
+    pub mode: ReadMode,
     /// Block state names seen in this chunk (`minecraft:grass_block`).
     pub blocks: Vec<String>,
     /// Biome ids seen in this chunk (`minecraft:plains`).

@@ -14,6 +14,10 @@ use parking_lot::Mutex;
 
 type Job<T> = Box<dyn FnOnce() -> T + Send + 'static>;
 
+/// Run by each pool thread as it starts: the host lowers the thread's
+/// priority there (tiles, loads and saves are nothing a frame waits for).
+pub static THREAD_START: std::sync::OnceLock<fn()> = std::sync::OnceLock::new();
+
 pub struct WorkerPool<T: Send + 'static> {
     jobs: Option<Sender<Job<T>>>,
     results: Receiver<T>,
@@ -43,6 +47,9 @@ impl<T: Send + 'static> WorkerPool<T> {
                 std::thread::Builder::new()
                     .name(format!("{name}-{i}"))
                     .spawn(move || {
+                        if let Some(start) = THREAD_START.get() {
+                            start();
+                        }
                         loop {
                             // Hold the lock only while taking a job.
                             let job = job_rx.lock().recv();
@@ -119,6 +126,13 @@ impl<T: Send + 'static> WorkerPool<T> {
             }
         }
         None
+    }
+
+    /// The next result, waiting at most `timeout` for one.
+    pub fn wait_timeout(&self, timeout: std::time::Duration) -> Option<T> {
+        let r = self.results.recv_timeout(timeout).ok()?;
+        self.outstanding.fetch_sub(1, Ordering::SeqCst);
+        Some(r)
     }
 
     /// Jobs not yet polled.

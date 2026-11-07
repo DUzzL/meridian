@@ -2,10 +2,11 @@
 //!
 //! Pixels are redrawn per chunk, only for chunks marked dirty: a chunk is
 //! dirty when its tile changed or a neighbour it is shaded against (north
-//! or west) changed. Each redraw bumps [`Region::revision`] so the renderer
-//! knows to upload the texture again.
+//! or west) changed. Each redraw gives [`Region::revision`] a new number
+//! from one counter of the process, so the renderer knows to upload the
+//! texture again and never takes one region's image for another's.
 
-use meridian_host::{CHUNK_SIZE, ChunkPos};
+use meridian_host::{CHUNK_COLUMNS, CHUNK_SIZE, ChunkPos};
 
 use crate::color::{self, Shading};
 use crate::config::BlockColors;
@@ -17,6 +18,13 @@ use crate::tile::{ChunkTile, TileColumn};
 
 /// A transparent pixel: nothing explored there.
 pub const UNEXPLORED: u32 = 0;
+
+/// A revision no image had before: every region and overview of every map
+/// draws from this one counter (texture caches key by it).
+pub fn next_revision() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
 
 /// Heights just outside a region, which its north row and west column are
 /// shaded against. `None` entries (or `None` edges) are unknown.
@@ -37,8 +45,11 @@ pub struct Region {
     dirty: ChunkMask,
     /// Tiles changed since the region was last saved.
     pub unsaved: bool,
-    /// Bumped whenever pixels change.
+    /// New whenever pixels change ([`next_revision`]); 0 before the first
+    /// draw.
     pub revision: u64,
+    /// Its file must not be written (from a newer Meridian, or unreadable).
+    pub read_only: bool,
     /// The cache's clock when last used, for eviction.
     pub last_used: u64,
     /// Chunks with a tile.
@@ -60,6 +71,7 @@ impl Region {
             dirty: ChunkMask::default(),
             unsaved: false,
             revision: 0,
+            read_only: false,
             last_used: 0,
             count: 0,
         }
@@ -75,6 +87,18 @@ impl Region {
 
     pub fn tile_count(&self) -> usize {
         self.count
+    }
+
+    /// About the memory the region takes: its tiles (with a typical biome
+    /// list each) and its pixels.
+    pub fn approx_bytes(&self) -> usize {
+        const TILE: usize = std::mem::size_of::<ChunkTile>()
+            + std::mem::size_of::<[TileColumn; CHUNK_COLUMNS]>()
+            + 96;
+        std::mem::size_of::<Self>()
+            + REGION_CHUNK_COUNT * std::mem::size_of::<Option<Box<ChunkTile>>>()
+            + self.count * TILE
+            + self.pixels.len() * 4
     }
 
     /// Stores a tile and marks it and its south and east neighbours inside
@@ -186,7 +210,7 @@ impl Region {
             self.render_chunk(index, edges, shading);
             self.dirty.remove(index);
         }
-        self.revision += 1;
+        self.revision = next_revision();
         todo.len()
     }
 
@@ -315,7 +339,13 @@ mod tests {
         assert_eq!(r.dirty_count(), dirty - 2);
         r.render_dirty(&RegionEdges::default(), &noon(), usize::MAX);
         assert!(!r.has_dirty());
-        assert_eq!(r.revision, 2);
+        let mut other = Region::new(RegionPos::new(-1, -1));
+        other.set_tile(tile(-1, -1));
+        other.render_dirty(&RegionEdges::default(), &noon(), usize::MAX);
+        assert!(
+            other.revision > r.revision,
+            "revisions never repeat across regions"
+        );
         let (rx, rz) = r.pos.min_block();
         let (bx, bz) = ChunkPos::new(-1, -1).min_block();
         let p = r.pixels()[((bz - rz) * REGION_BLOCKS + (bx - rx)) as usize];

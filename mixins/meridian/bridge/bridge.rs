@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 /// Bumped when the shapes below change, so a trait mod can refuse a bridge
 /// it doesn't understand.
-pub const VERSION: u32 = 10;
+pub const VERSION: u32 = 11;
 /// Main-thread time per frame for chunk reads.
 const READ_BUDGET: Duration = Duration::from_micros(1500);
 
@@ -52,6 +52,9 @@ pub struct Column {
 pub struct Snapshot {
     pub dimension: String,
     pub pos: [i32; 2],
+    /// The request's cave ceiling (`None` = surface), so an answer is never
+    /// taken for another layer's.
+    pub cave_from: Option<i32>,
     pub blocks: Vec<String>,
     pub biomes: Vec<String>,
     /// 256 columns, x fastest.
@@ -209,10 +212,16 @@ pub fn enable() {
 /// when the chunk is not loaded then.
 pub fn request(pos: [i32; 2], cave_from: Option<i32>) {
     with(|s| {
-        if !s.requests.iter().any(|r| r.0 == pos) {
+        if !s.requests.contains(&(pos, cave_from)) {
             s.requests.push((pos, cave_from));
         }
     });
+}
+
+/// Forgets the chunks asked for and not read yet (the map switched layers:
+/// it asks again for the new one).
+pub fn clear_requests() {
+    with(|s| s.requests.clear());
 }
 
 pub fn take_results() -> Vec<Snapshot> {
@@ -529,7 +538,7 @@ fn read_chunk(
             });
         }
     }
-    Snapshot { dimension: dimension.to_owned(), pos, blocks, biomes, columns }
+    Snapshot { dimension: dimension.to_owned(), pos, cave_from, blocks, biomes, columns }
 }
 
 fn snapshot_entities(game: &super::Game<'_>) -> Vec<EntitySnap> {

@@ -11,9 +11,15 @@
 //! at first) and `<dimension>` is the dimension id. Every part is escaped so
 //! that any name maps to one safe folder name on Windows, macOS and Linux.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Condvar, OnceLock};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use parking_lot::Mutex;
 
 use meridian_host::{DimensionId, WorldSource};
 
@@ -43,12 +49,16 @@ impl PersistError {
 }
 
 /// Writes `bytes` to `path` so that readers see the old or the new file,
-/// never half of one: a temporary file beside it, flushed, then renamed.
+/// never half of one: a temporary file beside it (unique per write, so
+/// threads and processes never share one), flushed, then renamed; on Unix
+/// the folder is flushed too, so the rename survives a power cut.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), PersistError> {
+    static WRITES: AtomicU64 = AtomicU64::new(0);
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(dir).map_err(|e| PersistError::io(dir, e))?;
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
-    let tmp = dir.join(format!(".{name}.{}.tmp", std::process::id()));
+    let n = WRITES.fetch_add(1, Ordering::Relaxed);
+    let tmp = dir.join(format!(".{name}.{}-{n}.tmp", std::process::id()));
     let result = (|| {
         let mut f = fs::File::create(&tmp)?;
         f.write_all(bytes)?;
@@ -60,7 +70,240 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), PersistError> {
         let _ = fs::remove_file(&tmp);
         return Err(PersistError::io(path, e));
     }
+    #[cfg(unix)]
+    if let Ok(d) = fs::File::open(dir) {
+        // Some file systems cannot flush a folder; the file itself is safe.
+        let _ = d.sync_all();
+    }
     Ok(())
+}
+
+/// Why a stored file could not be used.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoadError {
+    /// Damaged or not ours: it is set aside and the store starts fresh.
+    Broken(String),
+    /// Written by a newer Meridian: it stays as it is and is never written
+    /// over by this one.
+    Newer(String),
+}
+
+/// What [`load_or_set_aside`] found.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Loaded<T> {
+    /// No file yet.
+    Missing,
+    Read(T),
+    /// The file was broken and is now beside it as `.broken.<time>`.
+    SetAside,
+    /// The file stays untouched and must not be saved over this session:
+    /// it is newer than this Meridian, could not be read, or could not be
+    /// moved aside.
+    ReadOnly,
+}
+
+impl<T> Loaded<T> {
+    /// The value read, if any, and whether the file may be written.
+    pub fn split(self) -> (Option<T>, bool) {
+        match self {
+            Loaded::Read(v) => (Some(v), true),
+            Loaded::Missing | Loaded::SetAside => (None, true),
+            Loaded::ReadOnly => (None, false),
+        }
+    }
+}
+
+/// Reads of a file that fail for other reasons than its absence.
+const READ_ATTEMPTS: u32 = 3;
+const READ_RETRY: Duration = Duration::from_millis(50);
+
+/// Reads and parses a stored file without ever losing it: a missing file is
+/// [`Loaded::Missing`]; a broken one is renamed to `<name>.broken.<unix
+/// time>`; a newer one, or one that stays unreadable after a few tries
+/// (a sharing violation on Windows, a permission), is left alone and
+/// reported [`Loaded::ReadOnly`]. Logs what it did once; `what` names the
+/// file for that ("waypoints").
+pub fn load_or_set_aside<T>(
+    path: &Path,
+    what: &str,
+    parse: impl FnOnce(&[u8]) -> Result<T, LoadError>,
+) -> Loaded<T> {
+    let mut attempt = 1;
+    let bytes = loop {
+        match fs::read(path) {
+            Ok(bytes) => break bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Loaded::Missing,
+            Err(e) if attempt >= READ_ATTEMPTS => {
+                log::warn!(
+                    "meridian: cannot read {what} {} ({e}); it is not saved this session",
+                    path.display()
+                );
+                return Loaded::ReadOnly;
+            }
+            Err(_) => {
+                attempt += 1;
+                std::thread::sleep(READ_RETRY);
+            }
+        }
+    };
+    match parse(&bytes) {
+        Ok(v) => Loaded::Read(v),
+        Err(LoadError::Newer(reason)) => {
+            log::warn!(
+                "meridian: {what} {} is from a newer Meridian ({reason}); kept as it is and not saved this session",
+                path.display()
+            );
+            Loaded::ReadOnly
+        }
+        Err(LoadError::Broken(reason)) => match set_aside(path) {
+            Ok(aside) => {
+                log::warn!(
+                    "meridian: {what} {} is unreadable ({reason}); moved to {} and started fresh",
+                    path.display(),
+                    aside.display()
+                );
+                Loaded::SetAside
+            }
+            Err(e) => {
+                log::warn!(
+                    "meridian: {what} {} is unreadable ({reason}) and cannot be moved aside ({e}); it is not saved this session",
+                    path.display()
+                );
+                Loaded::ReadOnly
+            }
+        },
+    }
+}
+
+/// The `version` field of a JSON store, so a file from a newer Meridian is
+/// told from a broken one before it is read whole.
+pub fn json_version(bytes: &[u8]) -> Option<u32> {
+    #[derive(serde::Deserialize)]
+    struct Version {
+        version: u32,
+    }
+    serde_json::from_slice::<Version>(bytes)
+        .ok()
+        .map(|v| v.version)
+}
+
+/// Renames a file to `<name>.broken.<unix time>` beside it (with a counter
+/// when that is taken); the new path.
+pub fn set_aside(path: &Path) -> std::io::Result<PathBuf> {
+    let name = path
+        .file_name()
+        .map_or_else(|| "file".into(), |n| n.to_string_lossy().into_owned());
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let aside = (0..1000)
+        .map(|i| match i {
+            0 => path.with_file_name(format!("{name}.broken.{now}")),
+            i => path.with_file_name(format!("{name}.broken.{now}-{i}")),
+        })
+        .find(|p| !p.exists())
+        .ok_or_else(|| std::io::Error::other("no free name to set it aside"))?;
+    fs::rename(path, &aside)?;
+    Ok(aside)
+}
+
+/// The order of background saves and loads per file: a save waits for the
+/// saves of the same file started before it, a load for all of them, so a
+/// region read right after it was saved (a world closed and opened again,
+/// another dimension's map) never sees the old file. Shared by every map
+/// engine of the process.
+#[derive(Debug, Default)]
+pub struct FileOrder {
+    /// Per file: saves started, saves finished.
+    files: std::sync::Mutex<HashMap<PathBuf, (u64, u64)>>,
+    changed: Condvar,
+}
+
+/// The longest a load or save waits for earlier saves (a stuck disk must not
+/// stop the map for good).
+const ORDER_WAIT: Duration = Duration::from_secs(30);
+
+impl FileOrder {
+    /// The process's one instance.
+    pub fn global() -> &'static FileOrder {
+        static ORDER: OnceLock<FileOrder> = OnceLock::new();
+        ORDER.get_or_init(FileOrder::default)
+    }
+
+    /// A save of `path` starts (on the thread that hands it to a worker):
+    /// its turn.
+    pub fn save_started(&self, path: &Path) -> u64 {
+        let mut files = self.files.lock().unwrap_or_else(|e| e.into_inner());
+        let entry = files.entry(path.to_owned()).or_default();
+        entry.0 += 1;
+        entry.0 - 1
+    }
+
+    /// Saves of `path` started so far: a load started now waits for them.
+    pub fn saves_started(&self, path: &Path) -> u64 {
+        let files = self.files.lock().unwrap_or_else(|e| e.into_inner());
+        files.get(path).map_or(0, |e| e.0)
+    }
+
+    /// Waits (on a worker) until `count` saves of `path` have finished.
+    pub fn wait_finished(&self, path: &Path, count: u64) {
+        let files = self.files.lock().unwrap_or_else(|e| e.into_inner());
+        let (files, timeout) = self
+            .changed
+            .wait_timeout_while(files, ORDER_WAIT, |files| {
+                files.get(path).is_some_and(|e| e.1 < count)
+            })
+            .unwrap_or_else(|e| e.into_inner());
+        drop(files);
+        if timeout.timed_out() {
+            log::warn!(
+                "meridian: earlier saves of {} take too long; going on",
+                path.display()
+            );
+        }
+    }
+
+    /// A save of `path` is done (written or failed).
+    pub fn save_finished(&self, path: &Path) {
+        let mut files = self.files.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(e) = files.get_mut(path) {
+            e.1 += 1;
+        }
+        self.changed.notify_all();
+    }
+}
+
+/// Marks this process as the one that writes maps under `data_dir`, with a
+/// lock on `meridian.lock` there that the system releases when the process
+/// ends (also after a crash). False when another process holds it (a second
+/// game on the same folder); asking again from this process gives the same
+/// answer.
+pub fn claim_data_dir(data_dir: &Path) -> bool {
+    /// Per folder: whether it is this process's, and the locked file.
+    type Claims = HashMap<PathBuf, (bool, Option<fs::File>)>;
+    static CLAIMS: OnceLock<Mutex<Claims>> = OnceLock::new();
+    let mut claims = CLAIMS.get_or_init(Default::default).lock();
+    let (claimed, _) = claims.entry(data_dir.to_owned()).or_insert_with(|| {
+        let path = data_dir.join("meridian.lock");
+        let file = fs::create_dir_all(data_dir).and_then(|_| {
+            fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .open(&path)
+        });
+        match file.map(|f| (f.try_lock(), f)) {
+            Ok((Ok(()), f)) => (true, Some(f)),
+            Ok((Err(fs::TryLockError::WouldBlock), _)) => (false, None),
+            // No lock to be had (a read-only folder, a file system without
+            // locks): nothing to coordinate with either.
+            Ok((Err(fs::TryLockError::Error(e)), _)) | Err(e) => {
+                log::warn!("meridian: cannot lock {}: {e}", path.display());
+                (true, None)
+            }
+        }
+    });
+    *claimed
 }
 
 /// Escapes a name into one folder name: `[a-z0-9._-]` stay (upper case is
@@ -256,5 +499,112 @@ mod tests {
         assert_eq!(fs::read(&file).unwrap(), b"two");
         let leftovers: Vec<_> = fs::read_dir(dir.join("sub")).unwrap().collect();
         assert_eq!(leftovers.len(), 1);
+    }
+
+    fn parse_number(bytes: &[u8]) -> Result<u32, LoadError> {
+        let text = std::str::from_utf8(bytes).map_err(|e| LoadError::Broken(e.to_string()))?;
+        match text.strip_prefix("v9:") {
+            Some(_) => Err(LoadError::Newer("version 9".into())),
+            None => text.parse().map_err(|_| LoadError::Broken(text.into())),
+        }
+    }
+
+    fn broken_copies(dir: &Path) -> Vec<String> {
+        fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains(".broken."))
+            .collect()
+    }
+
+    #[test]
+    fn loading_never_loses_a_file() {
+        let dir = test_dir("load_aside");
+        let file = dir.join("store.txt");
+        assert_eq!(
+            load_or_set_aside(&file, "test", parse_number),
+            Loaded::Missing
+        );
+        fs::write(&file, "42").unwrap();
+        assert_eq!(
+            load_or_set_aside(&file, "test", parse_number),
+            Loaded::Read(42)
+        );
+
+        // Broken: moved aside whole, the store starts fresh and may save.
+        fs::write(&file, "garbage").unwrap();
+        let loaded = load_or_set_aside(&file, "test", parse_number);
+        assert_eq!(loaded, Loaded::SetAside);
+        assert_eq!(loaded.split(), (None, true));
+        assert!(!file.exists());
+        let copies = broken_copies(&dir);
+        assert_eq!(copies.len(), 1, "{copies:?}");
+        assert!(copies[0].starts_with("store.txt.broken."));
+        assert_eq!(fs::read(dir.join(&copies[0])).unwrap(), b"garbage");
+        // A second broken file the same second keeps the first copy.
+        fs::write(&file, "more garbage").unwrap();
+        load_or_set_aside(&file, "test", parse_number);
+        assert_eq!(broken_copies(&dir).len(), 2);
+
+        // Newer: stays where it is, untouched, and must not be saved over.
+        fs::write(&file, "v9:data").unwrap();
+        let loaded = load_or_set_aside(&file, "test", parse_number);
+        assert_eq!(loaded.split(), (None, false));
+        assert_eq!(fs::read(&file).unwrap(), b"v9:data");
+
+        // Unreadable (a folder in its place): left alone, read-only.
+        let folder = dir.join("folder.txt");
+        fs::create_dir_all(&folder).unwrap();
+        assert_eq!(
+            load_or_set_aside(&folder, "test", parse_number),
+            Loaded::ReadOnly
+        );
+        assert!(folder.is_dir());
+    }
+
+    #[test]
+    fn saves_and_loads_of_one_file_keep_their_order() {
+        let order = FileOrder::default();
+        let path = Path::new("/x/1_1.mrg");
+        assert_eq!(order.saves_started(path), 0);
+        let first = order.save_started(path);
+        let second = order.save_started(path);
+        assert_eq!((first, second), (0, 1));
+        let wanted = order.saves_started(path);
+        let order = std::sync::Arc::new(order);
+        let done = std::sync::Arc::new(AtomicU64::new(0));
+        let loader = {
+            let (order, done) = (order.clone(), done.clone());
+            std::thread::spawn(move || {
+                order.wait_finished(Path::new("/x/1_1.mrg"), wanted);
+                done.load(Ordering::SeqCst)
+            })
+        };
+        // The second save waits for the first; the load for both.
+        order.wait_finished(path, first);
+        std::thread::sleep(Duration::from_millis(20));
+        done.fetch_add(1, Ordering::SeqCst);
+        order.save_finished(path);
+        order.wait_finished(path, second);
+        std::thread::sleep(Duration::from_millis(20));
+        done.fetch_add(1, Ordering::SeqCst);
+        order.save_finished(path);
+        assert_eq!(loader.join().unwrap(), 2, "the load ran after both saves");
+        // Other files never wait.
+        order.wait_finished(Path::new("/x/2_2.mrg"), 0);
+    }
+
+    #[test]
+    fn data_dir_claim_is_kept_for_the_process() {
+        let dir = test_dir("claim");
+        assert!(claim_data_dir(&dir));
+        assert!(claim_data_dir(&dir), "the same process asks again");
+        assert!(dir.join("meridian.lock").exists());
+        // Another holder of the lock (as a second game would be).
+        let other = test_dir("claim_other");
+        let lock = fs::File::create(other.join("meridian.lock")).unwrap();
+        lock.try_lock().unwrap();
+        assert!(!claim_data_dir(&other));
     }
 }

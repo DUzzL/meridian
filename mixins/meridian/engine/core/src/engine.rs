@@ -11,10 +11,13 @@
 //!    recently used regions over the limit (saving them first).
 //!
 //! Results from an earlier world are dropped by generation number, so a
-//! dimension change mid-flight never paints the wrong map.
+//! dimension change mid-flight never paints the wrong map. Loads and saves
+//! of one file keep their order ([`persist::FileOrder`]); a file that cannot
+//! be read is set aside or left alone, never written over
+//! ([`persist::load_or_set_aside`]).
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -24,7 +27,7 @@ use crate::codec::{self, RegionData};
 use crate::color::Shading;
 use crate::config::Settings;
 use crate::geom::{REGION_BLOCKS, REGION_CHUNKS, RegionPos};
-use crate::persist::{self, MapPaths};
+use crate::persist::{self, FileOrder, Loaded, MapPaths};
 use crate::region::{Region, RegionEdges};
 use crate::tile::{ChunkTile, ColorTable, build_tile};
 use crate::worker::WorkerPool;
@@ -44,8 +47,12 @@ const OVERVIEW_LOADS: usize = 4;
 const OVERVIEW_PROBES: usize = 32;
 /// Chunks redrawn per batch between deadline checks.
 const RENDER_BATCH: usize = 32;
-/// Ticks a chunk request may stay unanswered before it is asked again.
-const REQUEST_TIMEOUT: u64 = 200;
+/// How long a chunk request may stay unanswered before it is asked again
+/// (200 game ticks).
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+/// One game tick: `chunk_reads_per_tick` counts these, whatever the frame
+/// rate.
+const TICK: Duration = Duration::from_millis(50);
 /// Unanswered requests before a chunk waits for its next load or change.
 const MAX_ATTEMPTS: u8 = 3;
 
@@ -58,10 +65,12 @@ enum WorkResult {
     RegionLoaded {
         generation: u64,
         pos: RegionPos,
-        region: Result<Option<Region>, String>,
+        region: Loaded<Region>,
     },
     RegionSaved {
+        generation: u64,
         pos: RegionPos,
+        path: PathBuf,
         result: Result<(), String>,
     },
 }
@@ -140,20 +149,34 @@ pub struct MapEngine {
     loading: HashSet<RegionPos>,
     waiting_tiles: HashMap<RegionPos, Vec<ChunkTile>>,
     pending_reads: HashSet<ChunkPos>,
-    /// Asked of the host and not answered yet, with the tick they were asked.
-    in_flight: HashMap<ChunkPos, u64>,
+    /// Asked of the host and not answered yet, with when they were asked.
+    in_flight: HashMap<ChunkPos, Instant>,
+    request_timeout: Duration,
+    /// Chunk reads that may be asked now: `chunk_reads_per_tick` per game
+    /// tick gone by, at most one tick's worth.
+    read_credit: f64,
+    last_tick: Option<Instant>,
+    /// Nothing is saved: it is not known yet which map of a server the
+    /// chunks read belong to.
+    hold_saves: bool,
     /// Requests that went unanswered, per chunk.
     failures: HashMap<ChunkPos, u8>,
     /// Chunks the client holds, whatever map is open.
     loaded_chunks: HashSet<ChunkPos>,
     /// The cave layer shown, `None` for the surface.
     layer: Option<i32>,
-    ticks: u64,
     colors: ColorTable,
     shading: Option<Shading>,
     workers: WorkerPool<WorkResult>,
     last_save: Instant,
     save_errors: usize,
+    /// Saves handed to workers and not answered yet.
+    saves_in_flight: usize,
+    /// Another process writes this data folder: nothing is saved.
+    read_only: bool,
+    /// The only regions to keep whole at the next eviction (besides the
+    /// player's), when the world map is zoomed out.
+    keep_whole: Option<(RegionPos, RegionPos)>,
     /// The cache clock when the last tick ended: regions used since are
     /// shown now and are not evicted.
     frame_start: u64,
@@ -214,6 +237,13 @@ pub fn overview_pixels(pixels: &[u32]) -> Vec<u32> {
 impl MapEngine {
     pub fn new(settings: Settings, data_dir: PathBuf) -> Self {
         let workers = WorkerPool::new(settings.performance.effective_workers(), "meridian-worker");
+        let read_only = !persist::claim_data_dir(&data_dir);
+        if read_only {
+            log::warn!(
+                "meridian: another game uses {}; map changes are not saved",
+                data_dir.display()
+            );
+        }
         Self {
             settings,
             data_dir,
@@ -226,15 +256,21 @@ impl MapEngine {
             waiting_tiles: HashMap::new(),
             pending_reads: HashSet::new(),
             in_flight: HashMap::new(),
+            request_timeout: REQUEST_TIMEOUT,
+            read_credit: 0.0,
+            last_tick: None,
+            hold_saves: false,
             failures: HashMap::new(),
             loaded_chunks: HashSet::new(),
             layer: None,
-            ticks: 0,
             colors: ColorTable::default(),
             shading: None,
             workers,
             last_save: Instant::now(),
             save_errors: 0,
+            saves_in_flight: 0,
+            read_only,
+            keep_whole: None,
             overviews: HashMap::new(),
             transient: HashMap::new(),
             no_file: HashSet::new(),
@@ -255,7 +291,9 @@ impl MapEngine {
     }
 
     /// Shows another map of the same world or server: saves this one and
-    /// opens that one for the current dimension.
+    /// opens that one for the current dimension. While saves are held
+    /// ([`MapEngine::hold_saves`]) what this one got is dropped instead; the
+    /// loaded chunks are read again into the other.
     pub fn set_map(&mut self, map: &str) {
         if self.map == map {
             return;
@@ -421,10 +459,11 @@ impl MapEngine {
         let pixels = Arc::new(overview_pixels(region.pixels()));
         self.overviews.insert(
             pos,
-            // Apart from region revisions, which share the GPU's texture keys.
+            // From the counter region revisions use: they share the GPU's
+            // texture keys.
             Overview {
                 pixels,
-                revision: 1 << 40 | self.overview_clock,
+                revision: crate::region::next_revision(),
                 shading,
                 last_used: self.overview_clock,
             },
@@ -590,13 +629,39 @@ impl MapEngine {
         let (Some(active), Some(region)) = (&self.active, self.regions.get_mut(&pos)) else {
             return;
         };
+        if self.hold_saves {
+            return;
+        }
         region.unsaved = false;
+        if region.read_only || self.read_only {
+            return;
+        }
         let data = RegionData::of(region);
         let path = active.paths.region_file(pos);
+        let order = FileOrder::global();
+        let turn = order.save_started(&path);
+        let generation = self.generation;
+        self.saves_in_flight += 1;
         self.workers.submit(move || {
+            /// Counts the save as finished even when encoding panics, so
+            /// later loads and saves of the file never wait for it.
+            struct Finished<'a>(&'a Path);
+            impl Drop for Finished<'_> {
+                fn drop(&mut self) {
+                    FileOrder::global().save_finished(self.0);
+                }
+            }
+            order.wait_finished(&path, turn);
+            let finished = Finished(&path);
             let bytes = codec::encode(&data);
             let result = persist::write_atomic(&path, &bytes).map_err(|e| e.to_string());
-            WorkResult::RegionSaved { pos, result }
+            drop(finished);
+            WorkResult::RegionSaved {
+                generation,
+                pos,
+                path,
+                result,
+            }
         });
     }
 
@@ -612,14 +677,14 @@ impl MapEngine {
         }
         let path = active.paths.region_file(pos);
         let generation = self.generation;
+        let order = FileOrder::global();
+        let saves = order.saves_started(&path);
         self.workers.submit(move || {
-            let region = match std::fs::read(&path) {
-                Ok(bytes) => codec::decode(&bytes, pos)
-                    .map(Some)
-                    .map_err(|e| format!("{}: {e}", path.display())),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-                Err(e) => Err(format!("{}: {e}", path.display())),
-            };
+            // Saves of this file started before are on disk first.
+            order.wait_finished(&path, saves);
+            let region = persist::load_or_set_aside(&path, "region", |bytes| {
+                codec::decode(bytes, pos).map_err(Into::into)
+            });
             WorkResult::RegionLoaded {
                 generation,
                 pos,
@@ -680,68 +745,147 @@ impl MapEngine {
         }
     }
 
+    /// Takes one finished background job's result.
+    fn take_result(&mut self, result: WorkResult, report: &mut TickReport) {
+        match result {
+            // Counted and reported whatever map is open now.
+            WorkResult::RegionSaved {
+                generation,
+                pos,
+                path,
+                result,
+            } => {
+                self.saves_in_flight = self.saves_in_flight.saturating_sub(1);
+                if let Err(e) = result {
+                    self.save_errors += 1;
+                    log::warn!("meridian: saving region {} failed: {e}", path.display());
+                    if generation == self.generation
+                        && let Some(r) = self.regions.get_mut(&pos)
+                    {
+                        r.unsaved = true;
+                    }
+                }
+            }
+            WorkResult::TileBuilt { generation, tile } if generation == self.generation => {
+                self.apply_tile(tile);
+                report.tiles_applied += 1;
+            }
+            WorkResult::RegionLoaded {
+                generation,
+                pos,
+                region,
+            } if generation == self.generation => {
+                self.loading.remove(&pos);
+                let region = match region {
+                    Loaded::Read(region) => region,
+                    Loaded::Missing | Loaded::SetAside => Region::new(pos),
+                    // Shown and drawn into this session, never saved.
+                    Loaded::ReadOnly => {
+                        let mut region = Region::new(pos);
+                        region.read_only = true;
+                        region
+                    }
+                };
+                self.insert_region(region);
+                if let Some(arrived) = self.transient.get_mut(&pos) {
+                    *arrived = self.regions.get(&pos).map(|r| r.last_used);
+                }
+                report.regions_loaded += 1;
+            }
+            _ => {}
+        }
+    }
+
+    /// How chunks are read for the layer shown.
+    fn read_mode(&self) -> ReadMode {
+        self.layer.map_or(ReadMode::Surface, ReadMode::CaveFrom)
+    }
+
+    /// Holds (or resumes) saving, while it is not known yet which map of a
+    /// server the chunks read belong to: switch maps with
+    /// [`MapEngine::set_map`] before resuming, so nothing read meanwhile
+    /// ends up in the wrong one.
+    pub fn hold_saves(&mut self, hold: bool) {
+        self.hold_saves = hold;
+    }
+
+    /// Keeps only the regions in a rectangle (inclusive) and around the
+    /// player whole at the next tick; the others become overviews and leave
+    /// memory (D-027). The world map calls this every frame it is zoomed
+    /// far out.
+    pub fn keep_whole_only(&mut self, min: RegionPos, max: RegionPos) {
+        self.keep_whole = Some((min, max));
+    }
+
+    /// Whether another game writes this data folder (nothing is saved).
+    pub fn read_only(&self) -> bool {
+        self.read_only
+    }
+
+    /// Saves every changed region and waits up to `timeout` for the saves
+    /// to reach the disk (quitting, disconnecting); whether they all did.
+    pub fn flush_and_wait(&mut self, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        let mut report = TickReport::default();
+        loop {
+            // Tiles that arrive meanwhile change regions again.
+            if self.regions.values().any(|r| r.unsaved) {
+                self.flush();
+            }
+            if self.saves_in_flight == 0 {
+                return true;
+            }
+            if self.workers.outstanding() == 0 {
+                // A save job panicked and never answered.
+                self.saves_in_flight = 0;
+                return true;
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                log::warn!(
+                    "meridian: {} region saves still running after {timeout:?}",
+                    self.saves_in_flight
+                );
+                return false;
+            }
+            if let Some(result) = self
+                .workers
+                .wait_timeout(left.min(Duration::from_millis(20)))
+            {
+                self.take_result(result, &mut report);
+            }
+        }
+    }
+
     /// Does this tick's share of the work, stopping after `budget`.
     pub fn tick(&mut self, host: &dyn MapHost, budget: Duration) -> TickReport {
         let deadline = Instant::now() + budget;
         let mut report = TickReport::default();
-        if self.active.is_none() {
-            while self.workers.poll().is_some() {}
-            return report;
-        }
-        let focus = host
-            .player()
-            .map(|p| ChunkPos::containing(p.position[0] as i32, p.position[2] as i32));
-
         // 1. Finished background work.
         while let Some(result) = self.workers.poll() {
-            match result {
-                WorkResult::TileBuilt { generation, tile } if generation == self.generation => {
-                    self.apply_tile(tile);
-                    report.tiles_applied += 1;
-                }
-                WorkResult::RegionLoaded {
-                    generation,
-                    pos,
-                    region,
-                } if generation == self.generation => {
-                    self.loading.remove(&pos);
-                    let region = region.unwrap_or_else(|e| {
-                        log::warn!("meridian: region unreadable, starting it fresh: {e}");
-                        None
-                    });
-                    self.insert_region(region.unwrap_or_else(|| Region::new(pos)));
-                    if let Some(arrived) = self.transient.get_mut(&pos) {
-                        *arrived = self.regions.get(&pos).map(|r| r.last_used);
-                    }
-                    report.regions_loaded += 1;
-                }
-                WorkResult::RegionSaved {
-                    pos,
-                    result: Err(e),
-                } => {
-                    self.save_errors += 1;
-                    log::warn!("meridian: saving region {pos:?} failed: {e}");
-                    if let Some(r) = self.regions.get_mut(&pos) {
-                        r.unsaved = true;
-                    }
-                }
-                _ => {}
-            }
+            self.take_result(result, &mut report);
         }
+        if self.active.is_none() {
+            return report;
+        }
+        let focus = host.player().map(|p| {
+            ChunkPos::containing(p.position[0].floor() as i32, p.position[2].floor() as i32)
+        });
 
         // 2. Chunks the host read since last tick become tiles on workers;
         //    then ask for the nearest changed ones.
-        self.ticks += 1;
         let generation = self.generation;
         let vanilla_biomes = self.settings.world_map.terrain.biome_colors_in_vanilla;
         let dimension = self.active.as_ref().map(|a| a.context.dimension.clone());
+        let mode = self.read_mode();
         for snapshot in host.take_chunks() {
-            self.in_flight.remove(&snapshot.pos);
-            self.failures.remove(&snapshot.pos);
-            if Some(&snapshot.dimension) != dimension.as_ref() {
-                // Read from a level the map no longer shows.
+            if Some(&snapshot.dimension) != dimension.as_ref() || snapshot.mode != mode {
+                // Read from a level or layer the map no longer shows: the
+                // chunk is asked again (or times out) for this one.
                 continue;
             }
+            self.in_flight.remove(&snapshot.pos);
+            self.failures.remove(&snapshot.pos);
             let chunk = snapshot.pos;
             let prepared = self.colors.prepare(host, snapshot, vanilla_biomes);
             self.ensure_region(RegionPos::of_chunk(chunk));
@@ -751,11 +895,11 @@ impl MapEngine {
             });
             report.chunks_read += 1;
         }
-        let ticks = self.ticks;
+        let now = Instant::now();
         let expired: Vec<ChunkPos> = self
             .in_flight
             .iter()
-            .filter(|(_, asked)| ticks - **asked > REQUEST_TIMEOUT)
+            .filter(|(_, asked)| now.duration_since(**asked) > self.request_timeout)
             .map(|(c, _)| *c)
             .collect();
         for chunk in expired {
@@ -766,18 +910,18 @@ impl MapEngine {
                 self.pending_reads.insert(chunk);
             }
         }
-        let budget = self
-            .settings
-            .performance
-            .chunk_reads_per_tick
-            .saturating_sub(self.in_flight.len());
+        let per_tick = self.settings.performance.chunk_reads_per_tick;
+        let ticks = self.last_tick.map_or(1.0, |t| {
+            now.duration_since(t).as_secs_f64() / TICK.as_secs_f64()
+        });
+        self.last_tick = Some(now);
+        self.read_credit = (self.read_credit + ticks * per_tick as f64).min(per_tick as f64);
+        let budget = (self.read_credit as usize).min(per_tick.saturating_sub(self.in_flight.len()));
         for chunk in self.next_reads(focus, budget) {
             self.pending_reads.remove(&chunk);
-            host.request_chunk(
-                chunk,
-                self.layer.map_or(ReadMode::Surface, ReadMode::CaveFrom),
-            );
-            self.in_flight.insert(chunk, ticks);
+            host.request_chunk(chunk, mode);
+            self.in_flight.insert(chunk, now);
+            self.read_credit -= 1.0;
             report.chunks_requested += 1;
         }
 
@@ -842,27 +986,46 @@ impl MapEngine {
         all
     }
 
+    /// Drops least recently used regions (saving them and keeping their
+    /// overviews) while over the region, chunk or memory limit, and those
+    /// outside the area to keep whole when the map is zoomed out.
     fn evict(&mut self, focus: RegionPos) -> usize {
         let limit = self.settings.world_map.max_loaded_regions.max(9);
+        let byte_limit = self.settings.world_map.max_region_mib.max(64) << 20;
+        let keep = self.keep_whole.take();
         let chunks: usize = self.regions.values().map(Region::tile_count).sum();
-        if self.regions.len() <= limit && chunks <= MAX_CACHED_CHUNKS {
+        let bytes: usize = self.regions.values().map(Region::approx_bytes).sum();
+        let over = |count: usize, chunks: usize, bytes: usize| {
+            count > limit || chunks > MAX_CACHED_CHUNKS || bytes > byte_limit
+        };
+        if keep.is_none() && !over(self.regions.len(), chunks, bytes) {
             self.frame_start = self.clock;
             return 0;
         }
-        let mut by_age: Vec<(u64, RegionPos)> = self
+        let outside = |p: RegionPos| {
+            keep.is_some_and(|(min, max)| {
+                !(min.x..=max.x).contains(&p.x) || !(min.z..=max.z).contains(&p.z)
+            })
+        };
+        // Outside the area to keep first (`false` sorts first), then oldest.
+        let mut by_age: Vec<(bool, u64, RegionPos)> = self
             .regions
             .values()
-            // Never drop the player's own neighbourhood, nor what is shown now.
+            // Never drop the player's own neighbourhood, nor what is shown
+            // now, nor what is on its way to becoming an overview.
             .filter(|r| (r.pos.x - focus.x).abs() > 1 || (r.pos.z - focus.z).abs() > 1)
             .filter(|r| r.last_used <= self.frame_start)
-            .map(|r| (r.last_used, r.pos))
+            .filter(|r| !self.transient.contains_key(&r.pos))
+            // Changes waiting for the map to be decided stay.
+            .filter(|r| !(self.hold_saves && r.unsaved))
+            .map(|r| (!outside(r.pos), r.last_used, r.pos))
             .collect();
         by_age.sort();
-        let (mut count, mut chunks) = (self.regions.len(), chunks);
+        let (mut count, mut chunks, mut bytes) = (self.regions.len(), chunks, bytes);
         self.frame_start = self.clock;
         let mut evicted = 0;
-        for (_, pos) in by_age {
-            if count <= limit && chunks <= MAX_CACHED_CHUNKS {
+        for (inside, _, pos) in by_age {
+            if inside && !over(count, chunks, bytes) {
                 break;
             }
             if self.regions[&pos].unsaved {
@@ -871,6 +1034,7 @@ impl MapEngine {
             self.keep_overview(pos);
             if let Some(r) = self.regions.remove(&pos) {
                 chunks -= r.tile_count();
+                bytes -= r.approx_bytes();
             }
             count -= 1;
             evicted += 1;
@@ -914,7 +1078,9 @@ mod tests {
         flat: FlatHost,
         player: RefCell<[f64; 3]>,
         reads: Cell<usize>,
-        requested: RefCell<Vec<ChunkPos>>,
+        requested: RefCell<Vec<(ChunkPos, ReadMode)>>,
+        /// The level the host reads from (and labels its snapshots with).
+        dimension: RefCell<DimensionId>,
         /// Chunks the host refuses to read.
         unreadable: RefCell<HashSet<ChunkPos>>,
     }
@@ -929,6 +1095,7 @@ mod tests {
                 player: RefCell::new([8.0, 64.0, 8.0]),
                 reads: Cell::new(0),
                 requested: RefCell::default(),
+                dimension: RefCell::new(DimensionId::new(DimensionId::OVERWORLD)),
                 unreadable: RefCell::default(),
             }
         }
@@ -936,27 +1103,33 @@ mod tests {
 
     impl MapHost for World {
         fn context(&self) -> Option<WorldContext> {
-            Some(overworld())
+            Some(WorldContext {
+                dimension: self.dimension.borrow().clone(),
+                ..overworld()
+            })
         }
         fn player(&self) -> Option<PlayerState> {
             Some(PlayerState {
                 position: *self.player.borrow(),
                 yaw: 0.0,
                 pitch: 0.0,
-                dimension: DimensionId::new(DimensionId::OVERWORLD),
+                dimension: self.dimension.borrow().clone(),
             })
         }
-        fn request_chunk(&self, chunk: ChunkPos, _mode: ReadMode) {
-            self.requested.borrow_mut().push(chunk);
+        fn request_chunk(&self, chunk: ChunkPos, mode: ReadMode) {
+            self.requested.borrow_mut().push((chunk, mode));
         }
         fn take_chunks(&self) -> Vec<ChunkSnapshot> {
-            let asked: Vec<ChunkPos> = self.requested.borrow_mut().drain(..).collect();
+            let asked: Vec<(ChunkPos, ReadMode)> = self.requested.borrow_mut().drain(..).collect();
             asked
                 .into_iter()
-                .filter(|c| !self.unreadable.borrow().contains(c))
-                .map(|c| {
+                .filter(|(c, _)| !self.unreadable.borrow().contains(c))
+                .map(|(c, mode)| {
                     self.reads.set(self.reads.get() + 1);
-                    flat_chunk(c)
+                    ChunkSnapshot {
+                        dimension: self.dimension.borrow().clone(),
+                        ..read_chunk(c, mode)
+                    }
                 })
                 .collect()
         }
@@ -977,6 +1150,44 @@ mod tests {
         }
     }
 
+    /// The test world's chunk as read in `mode`: a cave read finds the
+    /// floor of a cave at Y 20.
+    fn read_chunk(pos: ChunkPos, mode: ReadMode) -> ChunkSnapshot {
+        let mut chunk = flat_chunk(pos);
+        chunk.mode = mode;
+        if let ReadMode::CaveFrom(_) = mode {
+            for c in &mut chunk.columns {
+                c.height = 20;
+                c.fluid = None;
+            }
+        }
+        chunk
+    }
+
+    /// The tile a chunk read in `mode` becomes.
+    fn tile_of(pos: ChunkPos, mode: ReadMode) -> ChunkTile {
+        build_tile(&ColorTable::default().prepare(
+            &FlatHost::default(),
+            read_chunk(pos, mode),
+            false,
+        ))
+    }
+
+    fn paths(world: &World, map: &str) -> MapPaths {
+        MapPaths::new(
+            &world.data_dir(),
+            &overworld().source,
+            map,
+            &overworld().dimension,
+        )
+    }
+
+    /// A region's file, decoded.
+    fn saved(world: &World, layer: Option<i32>, pos: RegionPos) -> Option<Region> {
+        let file = paths(world, DEFAULT_MAP).with_layer(layer).region_file(pos);
+        Some(codec::decode(&std::fs::read(file).ok()?, pos).unwrap())
+    }
+
     fn overworld() -> WorldContext {
         WorldContext {
             source: WorldSource::Singleplayer {
@@ -989,7 +1200,14 @@ mod tests {
     fn engine(world: &World) -> MapEngine {
         let mut s = Settings::default();
         s.performance.worker_threads = 2;
-        MapEngine::new(s, world.data_dir())
+        engine_with(world, s)
+    }
+
+    /// An engine whose unanswered requests time out quickly.
+    fn engine_with(world: &World, settings: Settings) -> MapEngine {
+        let mut e = MapEngine::new(settings, world.data_dir());
+        e.request_timeout = Duration::from_millis(30);
+        e
     }
 
     fn settle(engine: &mut MapEngine, world: &World) {
@@ -1038,7 +1256,7 @@ mod tests {
         let world = World::new("engine_nearest");
         let mut s = Settings::default();
         s.performance.chunk_reads_per_tick = 5;
-        let mut e = MapEngine::new(s, world.data_dir());
+        let mut e = engine_with(&world, s);
         e.handle(&world, HostEvent::LevelLoaded(overworld()));
         for x in [40, -30, 1, 0, 2, 25, -1] {
             e.handle(&world, HostEvent::ChunkLoaded(ChunkPos::new(x, 0)));
@@ -1097,15 +1315,23 @@ mod tests {
         e.handle(&world, HostEvent::LevelLoaded(overworld()));
         load_square(&mut e, &world, 1);
         e.tick(&world, Duration::from_secs(1));
+        // The answers become tile jobs; their results are not taken yet.
+        e.tick(&world, Duration::from_secs(1));
+        assert_eq!(world.reads.get(), 9);
+        // Nothing is read for the nether: whatever reaches its map could only
+        // be overworld work still in flight.
+        let mut s = e.settings().clone();
+        s.world_map.load_new_chunks = false;
+        e.set_settings(s);
         let nether = WorldContext {
             dimension: DimensionId::new(DimensionId::NETHER),
             ..overworld()
         };
+        *world.dimension.borrow_mut() = nether.dimension.clone();
         e.handle(&world, HostEvent::LevelLoaded(nether.clone()));
         settle(&mut e, &world);
         assert_eq!(e.context(), Some(&nether));
-        // Overworld tiles still in flight when it closed are dropped: the
-        // nether map stays empty and writes no file.
+        assert_eq!(world.reads.get(), 9, "nothing read for the nether");
         assert_eq!(
             e.loaded_region_count(),
             0,
@@ -1120,6 +1346,36 @@ mod tests {
             &nether.dimension,
         );
         assert!(!nether_paths.regions_dir().exists());
+    }
+
+    #[test]
+    fn reads_for_another_level_or_layer_are_dropped() {
+        let world = World::new("engine_stale_reads");
+        let mut e = engine(&world);
+        e.handle(&world, HostEvent::LevelLoaded(overworld()));
+        load_square(&mut e, &world, 1);
+        assert_eq!(e.tick(&world, Duration::from_secs(1)).chunks_requested, 9);
+        // The cave layer opens before the surface reads come back.
+        e.set_layer(Some(32));
+        let r = e.tick(&world, Duration::from_secs(1));
+        assert_eq!(r.chunks_read, 0, "surface reads never reach a cave layer");
+        settle(&mut e, &world);
+        let cave = ReadMode::CaveFrom(32);
+        let tile = e
+            .region(RegionPos::new(0, 0))
+            .and_then(|r| r.tile(ChunkPos::new(0, 0)))
+            .cloned();
+        assert_eq!(tile, Some(tile_of(ChunkPos::new(0, 0), cave)));
+
+        // Reads answered from another level (the host switched first).
+        *world.dimension.borrow_mut() = DimensionId::new(DimensionId::NETHER);
+        e.handle(&world, HostEvent::ChunkChanged(ChunkPos::new(0, 0)));
+        e.tick(&world, Duration::from_secs(1));
+        let r = e.tick(&world, Duration::from_secs(1));
+        assert_eq!(
+            r.chunks_read, 0,
+            "nether reads never reach the overworld map"
+        );
     }
 
     #[test]
@@ -1144,7 +1400,7 @@ mod tests {
         let world = World::new("engine_settings");
         let mut s = Settings::default();
         s.world_map.load_new_chunks = false;
-        let mut e = MapEngine::new(s, world.data_dir());
+        let mut e = engine_with(&world, s);
         e.handle(&world, HostEvent::LevelLoaded(overworld()));
         load_square(&mut e, &world, 1);
         settle(&mut e, &world);
@@ -1192,19 +1448,21 @@ mod tests {
         );
         e.set_layer(None);
         settle(&mut e, &world);
-        let paths = MapPaths::new(
-            &world.data_dir(),
-            &overworld().source,
-            DEFAULT_MAP,
-            &overworld().dimension,
+        let chunk = ChunkPos::new(0, 0);
+        let surface = saved(&world, None, RegionPos::new(0, 0)).expect("surface file");
+        let cave = saved(&world, Some(32), RegionPos::new(0, 0)).expect("cave file");
+        assert_eq!(surface.tile_count(), 4);
+        assert_eq!(cave.tile_count(), 4);
+        assert_eq!(
+            surface.tile(chunk),
+            Some(&tile_of(chunk, ReadMode::Surface))
         );
-        assert!(
-            paths
-                .with_layer(Some(32))
-                .region_file(RegionPos::new(0, 0))
-                .exists()
+        assert_eq!(
+            cave.tile(chunk),
+            Some(&tile_of(chunk, ReadMode::CaveFrom(32))),
+            "the cave layer keeps what was read for it"
         );
-        assert!(paths.region_file(RegionPos::new(0, 0)).exists());
+        assert_ne!(surface.tile(chunk), cave.tile(chunk));
     }
 
     #[test]
@@ -1212,37 +1470,268 @@ mod tests {
         let world = World::new("engine_evict");
         let mut s = Settings::default();
         s.world_map.max_loaded_regions = 9;
-        let mut e = MapEngine::new(s, world.data_dir());
+        let mut e = engine_with(&world, s);
         e.handle(&world, HostEvent::LevelLoaded(overworld()));
         for x in 0..12 {
             e.handle(&world, HostEvent::ChunkLoaded(ChunkPos::new(x * 32, 0)));
         }
         settle(&mut e, &world);
         // Regions shown since the last tick stay one more tick.
-        e.tick(&world, std::time::Duration::from_millis(50));
+        e.tick(&world, Duration::from_millis(50));
         settle(&mut e, &world);
-        assert!(e.loaded_region_count() <= 9);
-        let paths = MapPaths::new(
-            &world.data_dir(),
-            &overworld().source,
-            DEFAULT_MAP,
-            &overworld().dimension,
-        );
+        assert_eq!(e.loaded_region_count(), 9);
+        let evicted: Vec<i32> = (0..12)
+            .filter(|&x| e.region(RegionPos::new(x, 0)).is_none())
+            .collect();
+        assert_eq!(evicted.len(), 3);
         assert!(
-            paths.region_file(RegionPos::new(11, 0)).exists()
-                || e.region(RegionPos::new(11, 0)).is_some()
+            evicted.iter().all(|&x| x > 1),
+            "the player's neighbourhood stays: {evicted:?}"
         );
-        let files = std::fs::read_dir(paths.regions_dir()).map_or(0, |d| d.count());
+        for x in evicted {
+            let pos = RegionPos::new(x, 0);
+            let file = saved(&world, None, pos).expect("an evicted region was saved");
+            let chunk = ChunkPos::new(x * 32, 0);
+            assert_eq!(file.tile(chunk), Some(&tile_of(chunk, ReadMode::Surface)));
+            assert!(e.overview(pos).is_some(), "region {x} left an overview");
+        }
+    }
+
+    #[test]
+    fn memory_budget_evicts_whatever_the_region_count() {
+        let world = World::new("engine_budget");
+        let mut s = Settings::default();
+        s.world_map.max_region_mib = 64;
+        let mut e = engine_with(&world, s);
+        e.handle(&world, HostEvent::LevelLoaded(overworld()));
+        for x in 0..80 {
+            e.handle(&world, HostEvent::ChunkLoaded(ChunkPos::new(x * 32, 0)));
+        }
+        settle(&mut e, &world);
+        e.tick(&world, Duration::from_millis(50));
+        settle(&mut e, &world);
+        let bytes: usize = (0..80)
+            .filter_map(|x| e.region(RegionPos::new(x, 0)))
+            .map(Region::approx_bytes)
+            .sum();
+        assert!(bytes <= 64 << 20, "{} MiB held", bytes >> 20);
+        assert!(e.loaded_region_count() > 40, "only what is over goes");
+    }
+
+    #[test]
+    fn zoomed_out_map_keeps_only_the_middle_whole() {
+        let world = World::new("engine_far");
+        let mut e = engine(&world);
+        e.handle(&world, HostEvent::LevelLoaded(overworld()));
+        for x in 0..10 {
+            e.handle(&world, HostEvent::ChunkLoaded(ChunkPos::new(x * 32, 0)));
+        }
+        settle(&mut e, &world);
+        assert_eq!(e.loaded_region_count(), 10);
+        let middle = (RegionPos::new(5, 0), RegionPos::new(7, 0));
+        e.request_area(middle.0, middle.1);
+        e.keep_whole_only(middle.0, middle.1);
+        e.tick(&world, Duration::from_millis(50));
+        settle(&mut e, &world);
+        let whole: Vec<i32> = (0..10)
+            .filter(|&x| e.region(RegionPos::new(x, 0)).is_some())
+            .collect();
+        assert_eq!(whole, [0, 1, 5, 6, 7], "the player's and the middle");
+        for x in [2, 3, 4, 8, 9] {
+            assert!(
+                e.overview(RegionPos::new(x, 0)).is_some(),
+                "overview of {x}"
+            );
+        }
+        // Up close again: nothing more leaves.
+        e.request_area(RegionPos::new(0, 0), RegionPos::new(9, 0));
+        settle(&mut e, &world);
+        e.tick(&world, Duration::from_millis(50));
+        assert_eq!(e.loaded_region_count(), 10);
+    }
+
+    #[test]
+    fn unreadable_region_files_are_set_aside() {
+        let world = World::new("engine_broken");
+        let file = paths(&world, DEFAULT_MAP).region_file(RegionPos::new(0, 0));
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, b"MRDN this is not a region").unwrap();
+        let mut e = engine(&world);
+        e.handle(&world, HostEvent::LevelLoaded(overworld()));
+        e.handle(&world, HostEvent::ChunkLoaded(ChunkPos::new(0, 0)));
+        settle(&mut e, &world);
+        assert!(e.flush_and_wait(Duration::from_secs(5)));
+        let aside: Vec<_> = std::fs::read_dir(file.parent().unwrap())
+            .unwrap()
+            .flatten()
+            .filter(|f| {
+                f.file_name()
+                    .to_string_lossy()
+                    .starts_with("0_0.mrg.broken.")
+            })
+            .collect();
+        assert_eq!(aside.len(), 1, "the broken file is kept beside");
+        assert_eq!(
+            std::fs::read(aside[0].path()).unwrap(),
+            b"MRDN this is not a region"
+        );
+        assert_eq!(
+            saved(&world, None, RegionPos::new(0, 0))
+                .unwrap()
+                .tile_count(),
+            1
+        );
+    }
+
+    #[test]
+    fn newer_or_unreadable_region_files_are_never_written() {
+        let world = World::new("engine_newer");
+        let regions = paths(&world, DEFAULT_MAP);
+        // A file from a newer Meridian: version 9.
+        let newer = regions.region_file(RegionPos::new(0, 0));
+        let mut bytes = codec::encode(&RegionData {
+            pos: RegionPos::new(0, 0),
+            tiles: vec![tile_of(ChunkPos::new(5, 5), ReadMode::Surface)],
+        });
+        bytes[4] = 9;
+        std::fs::create_dir_all(newer.parent().unwrap()).unwrap();
+        std::fs::write(&newer, &bytes).unwrap();
+        // A file that cannot be read (a folder in its place).
+        let blocked = regions.region_file(RegionPos::new(-1, 0));
+        std::fs::create_dir_all(&blocked).unwrap();
+
+        let mut e = engine(&world);
+        e.handle(&world, HostEvent::LevelLoaded(overworld()));
+        for chunk in [ChunkPos::new(0, 0), ChunkPos::new(-1, 0)] {
+            e.handle(&world, HostEvent::ChunkLoaded(chunk));
+        }
+        settle(&mut e, &world);
+        // Shown this session...
+        assert!(e.region(RegionPos::new(0, 0)).unwrap().read_only);
+        assert_eq!(e.region(RegionPos::new(-1, 0)).unwrap().tile_count(), 1);
+        // ...but never saved over the files.
+        assert!(e.flush_and_wait(Duration::from_secs(5)));
+        assert_eq!(std::fs::read(&newer).unwrap(), bytes);
+        assert!(blocked.is_dir());
+        assert_eq!(e.save_errors(), 0);
+    }
+
+    #[test]
+    fn flush_and_wait_puts_the_saves_on_disk() {
+        let world = World::new("engine_flush_wait");
+        let mut e = engine(&world);
+        e.handle(&world, HostEvent::LevelLoaded(overworld()));
+        load_square(&mut e, &world, 1);
+        settle(&mut e, &world);
         assert!(
-            files >= 12 - 9,
-            "evicted regions were saved ({files} files)"
+            saved(&world, None, RegionPos::new(0, 0)).is_none(),
+            "not saved yet"
         );
+        assert!(e.flush_and_wait(Duration::from_secs(5)));
+        assert_eq!(
+            saved(&world, None, RegionPos::new(0, 0))
+                .unwrap()
+                .tile_count(),
+            4
+        );
+        // After the world closed, too.
+        e.handle(&world, HostEvent::ChunkChanged(ChunkPos::new(-1, -1)));
+        let mut s = e.settings().clone();
+        s.world_map.terrain.biome_colors_in_vanilla = true;
+        e.set_settings(s);
+        settle(&mut e, &world);
+        e.handle(&world, HostEvent::Disconnected);
+        assert!(e.flush_and_wait(Duration::from_secs(5)));
+        assert!(e.is_idle());
+    }
+
+    #[test]
+    fn a_load_waits_for_the_save_before_it() {
+        let world = World::new("engine_order");
+        let mut e = engine(&world);
+        for _ in 0..5 {
+            e.handle(&world, HostEvent::LevelLoaded(overworld()));
+            load_square(&mut e, &world, 2);
+            settle(&mut e, &world);
+            // Closing queues the saves; opening again loads the same files
+            // at once.
+            e.handle(&world, HostEvent::Disconnected);
+            e.handle(&world, HostEvent::LevelLoaded(overworld()));
+            e.request_area(RegionPos::new(-1, -1), RegionPos::new(0, 0));
+            settle(&mut e, &world);
+            let tiles: usize = (-1..=0)
+                .flat_map(|x| (-1..=0).map(move |z| RegionPos::new(x, z)))
+                .map(|p| e.region(p).map_or(0, Region::tile_count))
+                .sum();
+            assert_eq!(tiles, 25, "the load saw the saved file");
+            e.handle(&world, HostEvent::Disconnected);
+        }
+    }
+
+    #[test]
+    fn held_saves_wait_for_the_map() {
+        let world = World::new("engine_hold");
+        let mut e = engine(&world);
+        e.hold_saves(true);
+        e.handle(&world, HostEvent::LevelLoaded(overworld()));
+        load_square(&mut e, &world, 1);
+        settle(&mut e, &world);
+        assert_eq!(world.reads.get(), 9, "reading goes on");
+        assert!(e.flush_and_wait(Duration::from_secs(5)));
+        assert!(!paths(&world, DEFAULT_MAP).regions_dir().exists());
+        // The spawn says it is another map: what the shown one got is dropped
+        // and read again into that one.
+        e.set_map("map-2");
+        e.hold_saves(false);
+        settle(&mut e, &world);
+        assert!(e.flush_and_wait(Duration::from_secs(5)));
+        assert!(!paths(&world, DEFAULT_MAP).regions_dir().exists());
+        assert_eq!(world.reads.get(), 18);
+        assert!(
+            paths(&world, "map-2")
+                .region_file(RegionPos::new(0, 0))
+                .exists()
+        );
+        // Released without a switch, the held changes are saved.
+        e.hold_saves(true);
+        e.handle(&world, HostEvent::ChunkLoaded(ChunkPos::new(40, 40)));
+        settle(&mut e, &world);
+        e.hold_saves(false);
+        assert!(e.flush_and_wait(Duration::from_secs(5)));
+        assert!(
+            paths(&world, "map-2")
+                .region_file(RegionPos::new(1, 1))
+                .exists()
+        );
+    }
+
+    #[test]
+    fn reads_follow_game_ticks_not_frames() {
+        let world = World::new("engine_rate");
+        let mut s = Settings::default();
+        s.performance.chunk_reads_per_tick = 4;
+        let mut e = engine_with(&world, s);
+        e.handle(&world, HostEvent::LevelLoaded(overworld()));
+        load_square(&mut e, &world, 4);
+        // Many frames within much less than a tick: one tick's reads.
+        let start = Instant::now();
+        let mut asked = 0;
+        for _ in 0..20 {
+            asked += e.tick(&world, Duration::from_millis(5)).chunks_requested;
+        }
+        let ticks = start.elapsed().as_secs_f64() / TICK.as_secs_f64();
+        assert!(
+            asked as f64 <= 4.0 + 4.0 * ticks + 1.0,
+            "{asked} reads in {ticks:.2} ticks"
+        );
+        std::thread::sleep(TICK * 2);
+        assert_eq!(e.tick(&world, Duration::from_millis(5)).chunks_requested, 4);
     }
 
     #[test]
     fn maps_of_one_server_keep_their_own_files() {
         let world = World::new("engine_maps");
-        let mut e = MapEngine::new(Settings::default(), world.data_dir());
+        let mut e = engine_with(&world, Settings::default());
         e.handle(&world, HostEvent::LevelLoaded(overworld()));
         e.handle(&world, HostEvent::ChunkLoaded(ChunkPos::new(0, 0)));
         settle(&mut e, &world);
@@ -1250,14 +1739,7 @@ mod tests {
         e.set_map("map-2");
         assert_eq!(e.map(), "map-2");
         settle(&mut e, &world);
-        let paths = |map: &str| {
-            MapPaths::new(
-                &world.data_dir(),
-                &overworld().source,
-                map,
-                &overworld().dimension,
-            )
-        };
+        let paths = |map: &str| paths(&world, map);
         assert!(
             paths(DEFAULT_MAP)
                 .region_file(RegionPos::new(0, 0))
@@ -1294,7 +1776,7 @@ mod tests {
     #[test]
     fn far_regions_become_overviews_and_leave() {
         let world = World::new("engine_overview");
-        let mut e = MapEngine::new(Settings::default(), world.data_dir());
+        let mut e = engine_with(&world, Settings::default());
         e.handle(&world, HostEvent::LevelLoaded(overworld()));
         for x in 0..6 {
             e.handle(&world, HostEvent::ChunkLoaded(ChunkPos::new(x * 32, 0)));
@@ -1303,7 +1785,7 @@ mod tests {
         e.flush();
         settle(&mut e, &world);
         // A fresh engine: nothing in memory, the files on disk.
-        let mut e = MapEngine::new(Settings::default(), world.data_dir());
+        let mut e = engine_with(&world, Settings::default());
         e.handle(&world, HostEvent::LevelLoaded(overworld()));
         e.tick(&world, std::time::Duration::from_millis(50));
         let near = (RegionPos::new(0, 0), RegionPos::new(0, 0));
