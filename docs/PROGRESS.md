@@ -508,3 +508,16 @@ Neue Tests:
 - **Neue Tests:** `coarse_surfaces_upsample_to_the_tile`, `lattice_columns_match_single_columns` (ignoriert, braucht die Horizon-Ressourcen).
 
 **Build und Tests**: 195 Kern-Tests und der Paritätstest grün; Clippy sauber, Adapter-Check grün; Launcher-Build `native-66f3981-57ea076f40cc`.
+
+### Phase 6: Detailstufen der Seed-Atlas-Karte (D-035)
+
+- Weit draußen rechnet die Karte mit weniger Proben pro Pixel und ohne detailliertes Gelände; nah dran (ab einem Pixel pro Block) mit vollem Detail.
+- Herauszoomen setzt grobe Kacheln aus den feinen im Speicher zusammen, statt sie zu rechnen.
+- Kacheln und ihre Texturen werden zwei Sekunden nach dem Schließen der Karte freigegeben; es gibt keinen Festplatten-Cache.
+- **Im Spiel geprüft:**
+  - Rechenphase bei 0,3x ~4 s (vorher ~18 s), bei 0,018x ~3 s; hinein auf 0,7x ~4 s.
+  - Zurück auf 0,018x ohne Rechenphase und sofort vollständig; Schließen und erneutes Öffnen.
+- **Nicht sichtbar:** Der Prozessspeicher sinkt nach dem Schließen nicht messbar, weil der Allokator freie Seiten zur Wiederverwendung behält. Beim erneuten Öffnen kamen 8 MB dazu.
+- **Neue Tests:** `zoomed_out_views_need_fewer_tiles`, `coarse_tiles_are_made_from_finer_ones_in_memory`.
+
+**Build und Tests**: 197 Kern-Tests grün; Clippy sauber, Adapter-Check grün; Launcher-Build `native-66f3981-74e6e37c960d`.

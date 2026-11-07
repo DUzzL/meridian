@@ -552,6 +552,20 @@ pub struct Tile {
 
 const MAX_TILES: usize = 1200;
 
+/// Tiles made from finer ones a frame at most (each a few hundred
+/// microseconds on the main thread).
+const COMPOSE_PER_FRAME: u32 = 48;
+/// Steps down [`SeedService::compose`] looks for finer tiles.
+const COMPOSE_DEPTH: u32 = 3;
+/// How long after the map last asked for a tile its tiles are dropped.
+pub const RELEASE_AFTER: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The mean of four ARGB colours, channel by channel.
+fn mean_argb(c: [u32; 4]) -> u32 {
+    let channel = |shift: u32| (c.iter().map(|p| (p >> shift) & 0xFF).sum::<u32>() + 2) / 4;
+    channel(24) << 24 | channel(16) << 16 | channel(8) << 8 | channel(0)
+}
+
 /// Samples a tile side, whatever the step.
 pub const TILE_SAMPLES: i32 = 128;
 
@@ -640,6 +654,11 @@ pub struct SeedService {
     done: mpsc::Receiver<(u64, Done)>,
     done_tx: mpsc::Sender<(u64, Done)>,
     workers: usize,
+    /// When the map last asked for a tile; the tiles are dropped once it has
+    /// not for [`RELEASE_AFTER`] (the map is closed).
+    last_use: Option<std::time::Instant>,
+    /// Tiles [`SeedService::compose`] may still make this frame.
+    compose_budget: u32,
 }
 
 impl std::fmt::Debug for SeedService {
@@ -680,6 +699,8 @@ impl Default for SeedService {
             done,
             done_tx,
             workers: 0,
+            last_use: None,
+            compose_budget: COMPOSE_PER_FRAME,
         }
     }
 }
@@ -1021,6 +1042,13 @@ impl SeedService {
 
     /// Collects finished work.
     pub fn poll(&mut self) {
+        self.compose_budget = COMPOSE_PER_FRAME;
+        if self
+            .last_use
+            .is_some_and(|t| t.elapsed() >= RELEASE_AFTER)
+        {
+            self.release_tiles();
+        }
         self.commit();
         while let Ok((generation, done)) = self.done.try_recv() {
             if generation != self.generation {
@@ -1151,7 +1179,13 @@ impl SeedService {
     /// A tile's best colours so far: refined when ready, else the preview.
     /// Asks for the preview, then for the refinement where the look needs
     /// one; `job` is the preview's (`refine: false`).
-    pub fn tile(&mut self, job: Job) -> Option<Tile> {
+    ///
+    /// `refine_allowed`: the view is zoomed in far enough for the detailed
+    /// terrain (see [`refine_allowed`]); further out the preview stays.
+    /// A tile not computed yet is put together from four finer ones already
+    /// in memory when it can be (see [`SeedService::compose`]).
+    pub fn tile(&mut self, job: Job, refine_allowed: bool) -> Option<Tile> {
+        self.last_use = Some(std::time::Instant::now());
         self.clock += 1;
         let clock = self.clock;
         let Job::Tile {
@@ -1182,14 +1216,23 @@ impl SeedService {
             *used = clock;
             return Some(tile.clone());
         }
-        let found = self.tiles.get_mut(&preview).map(|(tile, used)| {
+        let mut found = self.tiles.get_mut(&preview).map(|(tile, used)| {
             *used = clock;
             tile.clone()
         });
+        if found.is_none()
+            && let Some((tile, refined)) = self.compose(dimension, region, step, y, COMPOSE_DEPTH)
+        {
+            if refined {
+                return Some(tile);
+            }
+            found = Some(tile);
+        }
         match &found {
             Some(_) => {
                 let has_terrain = self.atlas_for(dimension).is_some_and(|a| a.has_terrain());
-                if seedatlas_look::needs_surface_refinement(
+                if refine_allowed
+                    && seedatlas_look::needs_surface_refinement(
                     dimension,
                     self.look.terrain && has_terrain,
                     !self.look.highlight.is_empty(),
@@ -1201,6 +1244,102 @@ impl SeedService {
             None => self.submit(preview),
         }
         found
+    }
+
+    /// A tile one step coarser than four tiles in memory, made from them
+    /// (each pixel the mean of the 2x2 it covers) instead of computed: the
+    /// map zoomed out again after zooming in. Finer tiles that are missing
+    /// are made the same way from theirs, `depth` steps down. Stored like a
+    /// computed tile (refined when all four were); true in the second place
+    /// then. At most [`COMPOSE_PER_FRAME`] a frame.
+    fn compose(
+        &mut self,
+        dimension: Dimension,
+        region: RegionPos,
+        step: i32,
+        y: i32,
+        depth: u32,
+    ) -> Option<(Tile, bool)> {
+        if step < 2 || depth == 0 || self.compose_budget == 0 {
+            return None;
+        }
+        let fine = step / 2;
+        let mut children = Vec::with_capacity(4);
+        for i in 0..4 {
+            let pos = RegionPos::new(region.x * 2 + i % 2, region.z * 2 + i / 2);
+            let job = |refine| Job::Tile {
+                dimension,
+                region: pos,
+                step: fine,
+                y,
+                refine,
+            };
+            let child = match (self.tiles.get(&job(true)), self.tiles.get(&job(false))) {
+                (Some((t, _)), _) => (t.pixels.clone(), true),
+                (None, Some((t, _))) => (t.pixels.clone(), false),
+                (None, None) => {
+                    let (t, refined) = self.compose(dimension, pos, fine, y, depth - 1)?;
+                    (t.pixels, refined)
+                }
+            };
+            children.push(child);
+        }
+        if self.compose_budget == 0 {
+            return None;
+        }
+        self.compose_budget -= 1;
+        let n = TILE_SAMPLES as usize;
+        if children.iter().any(|(p, _)| p.len() != n * n) {
+            return None;
+        }
+        let half = n / 2;
+        let mut pixels = vec![0u32; n * n];
+        for (i, (child, _)) in children.iter().enumerate() {
+            let (ox, oz) = ((i % 2) * half, (i / 2) * half);
+            for z in 0..half {
+                for x in 0..half {
+                    let at = |dx: usize, dz: usize| child[(2 * z + dz) * n + 2 * x + dx];
+                    pixels[(oz + z) * n + ox + x] =
+                        mean_argb([at(0, 0), at(1, 0), at(0, 1), at(1, 1)]);
+                }
+            }
+        }
+        let refined = children.iter().all(|(_, r)| *r);
+        self.clock += 1;
+        let tile = Tile {
+            size: n as u32,
+            pixels: Arc::new(pixels),
+            revision: self.clock,
+        };
+        let job = Job::Tile {
+            dimension,
+            region,
+            step,
+            y,
+            refine: refined,
+        };
+        self.tiles.insert(job, (tile.clone(), self.clock));
+        Some((tile, refined))
+    }
+
+    /// Drops every tile and the tile jobs still waiting: the map is closed,
+    /// and the memory goes back. Structure markers stay (they are small).
+    pub fn release_tiles(&mut self) {
+        self.tiles = HashMap::new();
+        self.last_use = None;
+        if let Some(q) = &self.jobs {
+            let mut q = q.0.lock();
+            q.preview.retain(|w| !matches!(w.4, Job::Tile { .. }));
+            q.refine.clear();
+        }
+        self.pending.retain(|j| !matches!(j, Job::Tile { .. }));
+        self.wanted.retain(|j| !matches!(j, Job::Tile { .. }));
+        self.wanted_set.retain(|j| !matches!(j, Job::Tile { .. }));
+    }
+
+    /// Tiles held in memory.
+    pub fn tile_count(&self) -> usize {
+        self.tiles.len()
     }
 
     /// A tile's colours if already computed (the coarser fallback under a
@@ -1329,20 +1468,43 @@ fn job_dimension(job: &Job) -> Dimension {
     }
 }
 
-/// Physical pixels per sample: two keeps biome edges crisp on high-density
-/// screens at a quarter of the work of one per pixel.
+/// Physical pixels per sample up close: two keeps biome edges crisp on
+/// high-density screens at a quarter of the work of one per pixel.
 const PIXELS_PER_SAMPLE: f32 = 2.0;
+/// Physical pixels per sample at most, far out.
+const PIXELS_PER_SAMPLE_FAR: f32 = 8.0;
+
+/// Physical pixels per sample for a view at `blocks_per_px` blocks a
+/// physical pixel: two up close, growing with the distance (about 4.6 at
+/// 16 blocks a pixel, eight from about 100). Far out the detail is not seen, and
+/// the tiles a screen needs fall with the square of it.
+pub fn pixels_per_sample(blocks_per_px: f32) -> f32 {
+    (PIXELS_PER_SAMPLE * blocks_per_px.max(1.0).powf(0.3))
+        .clamp(PIXELS_PER_SAMPLE, PIXELS_PER_SAMPLE_FAR)
+}
 
 /// The sample step for a region drawn `side_px` physical pixels wide: about
-/// one sample per [`PIXELS_PER_SAMPLE`] screen pixels (a power of two, 1 to
+/// one sample per [`pixels_per_sample`] screen pixels (a power of two, 1 to
 /// 1024), no finer than the configured resolution.
 pub fn step_for(side_px: f32, resolution: u8) -> i32 {
-    let blocks_per_sample = 512.0 * PIXELS_PER_SAMPLE / side_px.max(0.001);
+    let blocks_per_px = 512.0 / side_px.max(0.001);
+    let blocks_per_sample = blocks_per_px * pixels_per_sample(blocks_per_px);
     let mut step = 1;
     while step < 1024 && (step * 2) as f32 <= blocks_per_sample {
         step *= 2;
     }
     step.max(resolution.clamp(1, 16) as i32)
+}
+
+/// Blocks a physical pixel at most for the detailed terrain (the game's
+/// own surface): one, a block at least a pixel wide. Further out the
+/// preview's estimated relief is all one could tell apart.
+pub const REFINE_MAX_BLOCKS_PER_PX: f32 = 1.0;
+
+/// Whether a region drawn `side_px` physical pixels wide is close enough
+/// for the detailed terrain.
+pub fn refine_allowed(side_px: f32) -> bool {
+    512.0 / side_px.max(0.001) <= REFINE_MAX_BLOCKS_PER_PX
 }
 
 #[cfg(test)]
@@ -1397,7 +1559,7 @@ mod tests {
         let mut first = true;
         while (tile.is_none() || marks.is_empty()) && std::time::Instant::now() < deadline {
             svc.poll();
-            tile = tile.or_else(|| svc.tile(job));
+            tile = tile.or_else(|| svc.tile(job, true));
             // The first frame waits out the debounce; later frames are past it.
             let now = if first { t0 } else { t0 + SCAN_DEBOUNCE };
             first = false;
@@ -1422,8 +1584,60 @@ mod tests {
         assert_eq!(step_for(600.0, 1), 1);
         assert_eq!(step_for(400.0, 1), 2);
         assert_eq!(step_for(400.0, 4), 4);
-        assert_eq!(step_for(10.0, 1), 64);
+        assert_eq!(step_for(10.0, 1), 256, "far out, fewer pixels a sample");
         assert_eq!(step_for(0.1, 1), 1024);
+    }
+
+    #[test]
+    fn zoomed_out_views_need_fewer_tiles() {
+        assert_eq!(pixels_per_sample(0.5), 2.0);
+        assert_eq!(pixels_per_sample(1.0), 2.0);
+        assert!((4.0..5.0).contains(&pixels_per_sample(16.0)));
+        assert_eq!(pixels_per_sample(1000.0), 8.0);
+        // Samples a 3000 px wide view needs, at 2 and 32 blocks a pixel.
+        let samples = |bpp: f32| 3000.0 * bpp / step_for(512.0 / bpp, 1) as f32;
+        assert!(samples(32.0) * 2.0 <= samples(2.0), "a quarter of the samples or fewer");
+        assert!(refine_allowed(600.0));
+        assert!(!refine_allowed(400.0), "under a pixel a block: preview only");
+    }
+
+    #[test]
+    fn coarse_tiles_are_made_from_finer_ones_in_memory() {
+        let mut svc = SeedService::default();
+        let tile = |c: u32| Tile {
+            size: TILE_SAMPLES as u32,
+            pixels: Arc::new(vec![c; (TILE_SAMPLES * TILE_SAMPLES) as usize]),
+            revision: 1,
+        };
+        let job = |x, z, step, refine| Job::Tile {
+            dimension: Dimension::Overworld,
+            region: RegionPos::new(x, z),
+            step,
+            y: 64,
+            refine,
+        };
+        // Step 2 tiles 2..3 x 2..3 make step 4 tile (1, 1); one is refined.
+        for (i, c) in [0xFF00_0000u32, 0xFF00_0004, 0xFF00_0008, 0xFF00_000C].into_iter().enumerate() {
+            let (x, z) = (2 + i as i32 % 2, 2 + i as i32 / 2);
+            svc.tiles.insert(job(x, z, 2, i == 0), (tile(c), 1));
+        }
+        let made = svc.tile(job(1, 1, 4, false), false).expect("made from memory");
+        let n = TILE_SAMPLES as usize;
+        assert_eq!(made.pixels[0], 0xFF00_0000);
+        assert_eq!(made.pixels[n - 1], 0xFF00_0004);
+        assert_eq!(made.pixels[(n - 1) * n], 0xFF00_0008);
+        assert_eq!(made.pixels[n * n - 1], 0xFF00_000C);
+        assert!(svc.tiles.contains_key(&job(1, 1, 4, false)), "kept, not refined");
+        assert!(svc.wanted.is_empty(), "nothing computed");
+        // Two steps down: step 8 tile (0, 0) needs step 4 tiles 0..1, made
+        // from step 2 tiles 0..3 in turn; three of four missing here.
+        assert!(svc.tile(job(0, 0, 8, false), false).is_none());
+        assert!(svc.wanted.contains(&job(0, 0, 8, false)), "computed instead");
+        assert_eq!(mean_argb([0xFF00_0000, 0xFF00_0001, 0xFF00_0002, 0xFF00_0003]), 0xFF00_0002);
+        // Released when the map stops asking.
+        svc.last_use = Some(std::time::Instant::now() - RELEASE_AFTER);
+        svc.poll();
+        assert_eq!(svc.tile_count(), 0);
     }
 
     #[test]
@@ -1446,17 +1660,17 @@ mod tests {
         // Frame 1 asks for 0..40, frame 2 only for 100..103: what frame 1
         // wanted and nobody runs yet is dropped.
         for x in 0..40 {
-            svc.tile(job(x));
+            svc.tile(job(x), true);
         }
         svc.poll();
         for x in 100..103 {
-            svc.tile(job(x));
+            svc.tile(job(x), true);
         }
         svc.poll();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
         while svc.pending() > 0 && std::time::Instant::now() < deadline {
             for x in 100..103 {
-                svc.tile(job(x));
+                svc.tile(job(x), true);
             }
             svc.poll();
             std::thread::sleep(std::time::Duration::from_millis(5));

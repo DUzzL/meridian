@@ -2280,6 +2280,7 @@ impl Meridian {
             if let (Some(dim), true) = (sa_dim, sa_settings.enabled && s.seed_svc.active()) {
                 let region_side = (512.0 * s.map.scale(u) as f32) * gui_scale;
                 let step = sa::step_for(region_side, sa_settings.biome_resolution);
+                let refine = sa::refine_allowed(region_side);
                 let y = sa::sample_y(&sa_settings, dim);
                 let mut order: Vec<RegionPos> = (dmin.x..=dmax.x).flat_map(|x| (dmin.z..=dmax.z).map(move |z| RegionPos::new(x, z))).collect();
                 order.sort_by_key(|r| (r.x - mid.x).abs().max((r.z - mid.z).abs()));
@@ -2321,7 +2322,7 @@ impl Meridian {
                     let mut coarse: Vec<gpu_map::RegionQuad> = Vec::new();
                     for t in &tiles {
                         let job = sa::Job::Tile { dimension: dim, region: *t, step, y, refine: false };
-                        let tile = s.seed_svc.tile(job);
+                        let tile = s.seed_svc.tile(job, refine);
                         if tile.is_none() {
                             // Meanwhile what is already computed: the four
                             // tiles one step finer (zooming out), else a

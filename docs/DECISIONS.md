@@ -421,3 +421,27 @@ Die Seed-Atlas-Einstellungen waren bisher eine Gruppe im Raster der Minimap-Eins
 - **Niedrige Priorität:** Seed-Atlas-Worker senken sich beim Start wie die Fern-Gelände-Threads des Spiels: macOS-QoS „utility“, unter Windows „below normal“.
   - Über die Bridge, Version 8 (`lower_current_thread`, `seedatlas::WORKER_START`).
 - **Ergebnis im Spiel:** Nach starkem Herauszoomen rechnen die Worker ~18 s statt minutenlang. Danach liegt der Prozess wieder bei ~50 %, dem Wert beim Spielen.
+
+## D-035: Detailstufen der Seed-Atlas-Karte nach Zoom, Cache nur im Arbeitsspeicher
+
+Auf Wunsch, mit Vorrang für die Leistung: Weit draußen genügt ein ungefähres Bild, nah dran soll es stimmen.
+
+- **Proben pro Pixel nach Zoom:** Bisher war es fest eine Probe auf 2 Bildschirmpixel, sodass jede Zoomstufe gleich viele Kacheln brauchte (~200).
+  - Jetzt wächst der Abstand mit der Entfernung: `pixels_per_sample` = 2 × (Blöcke pro Pixel)^0,3, begrenzt auf 2 bis 8.
+  - Werte: 2 nah dran, ~4,6 bei 16 Blöcken pro Pixel, 8 ab etwa 100.
+  - Weit draußen braucht eine Ansicht dadurch ein Viertel bis ein Sechzehntel der Proben.
+- **Detailliertes Gelände nur nah dran:** Die Vanilla-Oberfläche (D-034) wird nur gerechnet, solange ein Block mindestens einen Bildschirmpixel breit ist (`refine_allowed`). Bei 2-fachem GUI-Maßstab heißt das ab 0,5x.
+  - Weiter draußen bleibt die schnelle Vorschau mit geschätzten Höhen.
+  - Bewusste Abweichung von der Fabric-Version, die bis Schritt 4 verfeinert.
+- **Grobe Kacheln aus feinen:** Fehlt eine Kachel, liegen aber die vier eine Stufe feineren im Speicher, wird sie aus ihnen zusammengesetzt (`SeedService::compose`), statt gerechnet zu werden.
+  - Jedes Pixel ist das Mittel der 2×2 darunter.
+  - Fehlende feinere Kacheln entstehen genauso, bis drei Stufen tief.
+  - Höchstens 48 Kacheln pro Frame.
+  - Waren alle vier verfeinert, gilt die neue Kachel als verfeinert.
+  - Herauszoomen nach dem Hineinzoomen kostet so keine Rechenzeit.
+- **Nur Arbeitsspeicher:** Kacheln werden zwei Sekunden nach der letzten Anfrage der Karte verworfen (`RELEASE_AFTER`), also wenn sie zu ist; ebenso die Seed-Atlas-Texturen auf der Grafikkarte. Nichts wird auf die Festplatte geschrieben.
+  - Strukturmarker bleiben, sie sind klein.
+- **Gemessen im Testspiel:**
+  - Bei 0,3x rechnen die Worker ~4 s statt ~18 s; bei 0,018x ~3 s.
+  - Hineinzoomen auf 0,7x mit vollem Detail: ~4 s.
+  - Wieder herauszoomen: keine Rechenphase, die Karte ist sofort voll.

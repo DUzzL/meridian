@@ -94,6 +94,8 @@ fn fs(in: Out) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// How long after the map's last frame its Seed Atlas textures are dropped.
+const RELEASE_AFTER: std::time::Duration = std::time::Duration::from_secs(2);
 /// Region textures uploaded per frame at most.
 const UPLOADS_PER_FRAME: usize = 6;
 /// Texture memory kept before the least recently drawn are dropped.
@@ -108,6 +110,8 @@ struct Entry {
     revision: u64,
     last_frame: u64,
     bytes: usize,
+    /// A Seed Atlas tile (dropped when the map closes).
+    seed: bool,
 }
 
 struct Gpu {
@@ -121,6 +125,8 @@ struct Gpu {
     bytes: usize,
     frame: u64,
     icons: Vec<(wgpu::BindGroup, wgpu::Texture)>,
+    /// Whether any Seed Atlas tile is held.
+    has_seed: bool,
 }
 
 #[derive(Default)]
@@ -243,6 +249,7 @@ impl Gpu {
             background,
             _background_texture: background_texture,
             entries: HashMap::new(),
+            has_seed: false,
             bytes: 0,
             frame: 0,
             icons: Vec::new(),
@@ -339,8 +346,25 @@ impl Gpu {
         Self::write(queue, &texture, side, &bytes);
         let size = (side * side * 4) as usize;
         self.bytes += size;
-        self.entries.insert(key, Entry { bind, _texture: texture, revision, last_frame: self.frame, bytes: size });
+        self.entries.insert(key, Entry { bind, _texture: texture, revision, last_frame: self.frame, bytes: size, seed: fixed.is_some() });
+        self.has_seed |= fixed.is_some();
         true
+    }
+
+    /// Drops the Seed Atlas tiles: they are recomputed (or made from the
+    /// tile cache) when the map opens again, and take the most memory.
+    fn release_seed(&mut self) {
+        if !self.has_seed {
+            return;
+        }
+        let bytes = &mut self.bytes;
+        self.entries.retain(|_, e| {
+            if e.seed {
+                *bytes -= e.bytes;
+            }
+            !e.seed
+        });
+        self.has_seed = false;
     }
 
     fn evict(&mut self) {
@@ -363,10 +387,18 @@ impl Gpu {
 impl WorldMapRenderer {
     /// Draws the map when its screen is open; true if it drew.
     pub fn draw(&self, event: &mut WorldDrawnEvent<'_, '_>) -> bool {
-        let Some(frame) = FRAME.lock().clone() else { return false };
-        if frame.at.elapsed() > std::time::Duration::from_millis(200) {
+        let frame = FRAME.lock().clone();
+        let age = frame.as_ref().map(|f| f.at.elapsed());
+        let Some(frame) = frame.filter(|_| age.is_some_and(|a| a <= std::time::Duration::from_millis(200))) else {
+            // The map is closed (not just a slow frame): its Seed Atlas
+            // textures go.
+            if age.is_none_or(|a| a >= RELEASE_AFTER)
+                && let Some(gpu) = self.gpu.lock().as_mut()
+            {
+                gpu.release_seed();
+            }
             return false;
-        }
+        };
         let world = &mut *event.world;
         let [w, h] = world.size;
         if w == 0 || h == 0 || frame.gui[0] <= 0.0 || frame.gui[1] <= 0.0 {
