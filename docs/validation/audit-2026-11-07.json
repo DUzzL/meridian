@@ -1,0 +1,280 @@
+{
+  "date": "2026-11-07",
+  "code_commit": "30ac262",
+  "horizon_commit": "66f3981f522b24c250b21523a70080965b940424",
+  "native_build": "native-66f3981-337ba39a8b1a",
+  "setup": {
+    "world": "AuditFixValidation",
+    "seed": 12345,
+    "physical_window": [
+      3024,
+      1720
+    ],
+    "gpu": "Apple M6",
+    "render_distance": 8,
+    "max_fps": 120,
+    "pause_on_lost_focus": false,
+    "inactivity_fps_limit": "minimized",
+    "movement": "spectator forward/back, sprint held, five seconds each",
+    "enlarge_toggles": true,
+    "isolated_game_directory": true
+  },
+  "checks": {
+    "cargo_fmt": "pass",
+    "cargo_clippy_workspace_all_targets_D_warnings": "pass",
+    "core_tests": 258,
+    "core_ignored_measurements": 3,
+    "perf_ignored": 1,
+    "host_tests": 2,
+    "seedatlas_tests": 8,
+    "parity_versions": 38,
+    "parity_seconds": 591.27,
+    "native_build": "pass"
+  },
+  "enlarged_minimap": [
+    {
+      "avg_fps": 119.9469450495271,
+      "cpu": {
+        "avg_ms": 1.789187994323029,
+        "max_ms": 4.629292011260986,
+        "p50_ms": 2.020334005355835,
+        "p95_ms": 3.2298338413238525,
+        "p99_ms": 3.801039934158325
+      },
+      "dynamic_entities_drawn": 0,
+      "dynamic_entities_drawn_avg_per_frame": 0.0,
+      "frames": 604,
+      "gpu": {
+        "avg_ms": 3.3163310084121904,
+        "max_ms": 4.4695000648498535,
+        "p50_ms": 3.375999927520752,
+        "p95_ms": 4.029749870300293,
+        "p99_ms": 4.22666597366333
+      },
+      "low_01pct_fps": 91.39757906799356,
+      "low_1pct_fps": 112.58280014719756,
+      "max_ms": 10.941208839416504,
+      "p50_ms": 8.337875366210938,
+      "p95_ms": 8.483207702636719,
+      "p99_ms": 8.522500038146973,
+      "phases_avg_ms": {
+        "prepare": 0.4726901877770163,
+        "render": 0.9704550831079088,
+        "tick": 0.31127386200025875,
+        "update": 0.03543365724773735
+      },
+      "seconds": 5.035559678077698,
+      "slow_phases_avg_ms": {
+        "prepare": 0.6427620053291321,
+        "render": 2.305499758039202,
+        "tick": 1.1258271549429213,
+        "update": 0.07851185955639396
+      },
+      "static_bytes_uploaded": 0,
+      "static_entities_drawn": 0,
+      "static_entities_drawn_avg_per_frame": 0.0,
+      "static_snapshot_bytes_built": 0,
+      "static_snapshot_rebuilds": 0
+    },
+    {
+      "avg_fps": 119.9946723819104,
+      "cpu": {
+        "avg_ms": 2.0045095271808058,
+        "max_ms": 5.226876258850098,
+        "p50_ms": 2.0559589862823486,
+        "p95_ms": 3.4352920055389404,
+        "p99_ms": 4.551000118255615
+      },
+      "dynamic_entities_drawn": 0,
+      "dynamic_entities_drawn_avg_per_frame": 0.0,
+      "frames": 605,
+      "gpu": {
+        "avg_ms": 3.1255504686970355,
+        "max_ms": 4.105416774749756,
+        "p50_ms": 3.1725831031799316,
+        "p95_ms": 3.7672080993652344,
+        "p99_ms": 3.964333057403565
+      },
+      "low_01pct_fps": 115.88885114009344,
+      "low_1pct_fps": 116.267317101853,
+      "max_ms": 8.628957748413086,
+      "p50_ms": 8.333416938781738,
+      "p95_ms": 8.506791114807129,
+      "p99_ms": 8.58458423614502,
+      "phases_avg_ms": {
+        "prepare": 0.5298488770880975,
+        "render": 1.0618532174628628,
+        "tick": 0.3721002783195293,
+        "update": 0.0413931521606316
+      },
+      "seconds": 5.041890510559082,
+      "slow_phases_avg_ms": {
+        "prepare": 0.6517324277332851,
+        "render": 2.757981998579843,
+        "tick": 1.3897618864263808,
+        "update": 0.025006142844046866
+      },
+      "static_bytes_uploaded": 0,
+      "static_entities_drawn": 0,
+      "static_entities_drawn_avg_per_frame": 0.0,
+      "static_snapshot_bytes_built": 0,
+      "static_snapshot_rebuilds": 0
+    }
+  ],
+  "ore_vein_one_minute": [
+    {
+      "avg_fps": 119.79377013582358,
+      "cpu": {
+        "avg_ms": 2.0660459864998635,
+        "max_ms": 4.613374710083008,
+        "p50_ms": 2.1741249561309814,
+        "p95_ms": 3.2420010566711426,
+        "p99_ms": 3.585376024246216
+      },
+      "dynamic_entities_drawn": 0,
+      "dynamic_entities_drawn_avg_per_frame": 0.0,
+      "frames": 3594,
+      "gpu": {
+        "avg_ms": 4.347490726276179,
+        "max_ms": 5.258790969848633,
+        "p50_ms": 4.575041770935059,
+        "p95_ms": 4.998000144958496,
+        "p99_ms": 5.128334045410156
+      },
+      "low_01pct_fps": 63.2581090972775,
+      "low_1pct_fps": 101.4231523069252,
+      "max_ms": 16.004249572753906,
+      "p50_ms": 8.339917182922363,
+      "p95_ms": 8.489874839782715,
+      "p99_ms": 8.54908275604248,
+      "phases_avg_ms": {
+        "prepare": 0.46683279533534167,
+        "render": 1.342007850424807,
+        "tick": 0.23884528062296495,
+        "update": 0.01925353313216154
+      },
+      "seconds": 30.00156014728546,
+      "slow_phases_avg_ms": {
+        "prepare": 0.6342894376979934,
+        "render": 2.0564988785319858,
+        "tick": 1.1866850836409464,
+        "update": 0.019549805347600743
+      },
+      "static_bytes_uploaded": 0,
+      "static_entities_drawn": 0,
+      "static_entities_drawn_avg_per_frame": 0.0,
+      "static_snapshot_bytes_built": 0,
+      "static_snapshot_rebuilds": 0
+    },
+    {
+      "avg_fps": 119.95898401364823,
+      "cpu": {
+        "avg_ms": 2.099093721712189,
+        "max_ms": 4.674999237060547,
+        "p50_ms": 2.2307088375091553,
+        "p95_ms": 3.273792028427124,
+        "p99_ms": 3.6398329734802246
+      },
+      "dynamic_entities_drawn": 0,
+      "dynamic_entities_drawn_avg_per_frame": 0.0,
+      "frames": 3599,
+      "gpu": {
+        "avg_ms": 4.33657836450342,
+        "max_ms": 5.985833168029785,
+        "p50_ms": 4.544958114624023,
+        "p95_ms": 5.01229190826416,
+        "p99_ms": 5.132583141326904
+      },
+      "low_01pct_fps": 92.2836422818106,
+      "low_1pct_fps": 113.53904415589842,
+      "max_ms": 15.166625022888184,
+      "p50_ms": 8.337708473205566,
+      "p95_ms": 8.481541633605957,
+      "p99_ms": 8.519000053405762,
+      "phases_avg_ms": {
+        "prepare": 0.4885897041857656,
+        "render": 1.3505198701152077,
+        "tick": 0.2411621414631125,
+        "update": 0.01969059126822109
+      },
+      "seconds": 30.001921319961543,
+      "slow_phases_avg_ms": {
+        "prepare": 0.6994203552603722,
+        "render": 2.0080762770440845,
+        "tick": 1.2241250061326556,
+        "update": 0.02154041688966875
+      },
+      "static_bytes_uploaded": 0,
+      "static_entities_drawn": 0,
+      "static_entities_drawn_avg_per_frame": 0.0,
+      "static_snapshot_bytes_built": 0,
+      "static_snapshot_rebuilds": 0
+    }
+  ],
+  "persistence_before": {
+    "0_-1.mrg": {
+      "size": 84922,
+      "sha256": "9a248a8684a8d6aeaace779511735c1fadec2d39d5ab251444afe3073a015a34",
+      "mtime_ns": 1794087224344482462
+    },
+    "0_0.mrg": {
+      "size": 26,
+      "sha256": "63ee8b5b3b9a7d79f654a25d7cb413140d960511c33034fe936adc6a4cd7cada",
+      "mtime_ns": 1794087224344700295
+    }
+  },
+  "persistence_after": {
+    "newer_sha256": "9a248a8684a8d6aeaace779511735c1fadec2d39d5ab251444afe3073a015a34",
+    "newer_same_hash": true,
+    "newer_same_mtime": true,
+    "corrupt_backups": [
+      {
+        "name": "0_0.mrg.broken.1794087246",
+        "sha256": "63ee8b5b3b9a7d79f654a25d7cb413140d960511c33034fe936adc6a4cd7cada"
+      }
+    ],
+    "stored_waypoints": [
+      "Original",
+      "NetherTarget"
+    ],
+    "current_set": "default"
+  },
+  "cross_dimension_teleport": {
+    "from": "minecraft:overworld",
+    "to": "minecraft:the_nether",
+    "position": [
+      12.5,
+      110.0,
+      14.5
+    ],
+    "via": "waypoint list dimension dropdown and Teleport button"
+  },
+  "unknown_height_teleport": {
+    "y_before": 149.0,
+    "position_after": [
+      -5230.5,
+      149.0,
+      1825.5
+    ],
+    "menu_y": "~"
+  },
+  "chat_share": {
+    "automatically_added": false,
+    "link_clicked": true,
+    "temporary_accepted": true,
+    "persisted_after_quit": false
+  },
+  "deathpoint": {
+    "survived_respawn_at_death_position": true,
+    "kept_10_blocks_away": true,
+    "removed_on_return": true
+  },
+  "marker_zoom_samples": {
+    "ore_visible": "about 0.3x",
+    "ore_hidden": "about 0.2x",
+    "villages_and_middle_kinds_hidden_landmarks_remain": "about 0.094x",
+    "scope": "visual samples, not every kind and radius boundary"
+  },
+  "version_override_survived_restart": "1.20.6",
+  "test_game_closed": true
+}
