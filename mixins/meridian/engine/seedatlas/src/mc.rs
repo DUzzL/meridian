@@ -1,5 +1,5 @@
 //! Minecraft versions as the engine numbers them (`enum MCVersion` in
-//! `biomes.h`), so the port compares them as the C code does (`mc <= MC_1_17`).
+//! `biomes.h`), so they compare as in the C code (`mc <= MC_1_17`).
 #![allow(non_upper_case_globals)]
 
 pub const MC_UNDEF: i32 = 0;
@@ -68,103 +68,16 @@ pub const MC_26_2: i32 = 40;
 pub const MC_26_3: i32 = 41;
 pub const MC_NEWEST: i32 = MC_26_3;
 
-/// `mc2str`: the version's name as the Seed Atlas app shows it.
+/// `mc2str`: the version's name as the Seed Atlas app shows it ("?" for
+/// numbers the engine does not know).
 pub fn mc2str(mc: i32) -> &'static str {
-    match mc {
-        MC_B1_7 => "Beta 1.7",
-        MC_B1_8 => "Beta 1.8",
-        MC_1_0_0 => "1.0",
-        MC_1_1_0 => "1.1",
-        MC_1_2_5 => "1.2",
-        MC_1_3_2 => "1.3",
-        MC_1_4_7 => "1.4",
-        MC_1_5_2 => "1.5",
-        MC_1_6_4 => "1.6",
-        MC_1_7_10 => "1.7",
-        MC_1_8_9 => "1.8",
-        MC_1_9_4 => "1.9",
-        MC_1_10_2 => "1.10",
-        MC_1_11_2 => "1.11",
-        MC_1_12_2 => "1.12",
-        MC_1_13_2 => "1.13",
-        MC_1_14_4 => "1.14",
-        MC_1_15_2 => "1.15",
-        MC_1_16_1 => "1.16.1",
-        MC_1_16_5 => "1.16",
-        MC_1_17_1 => "1.17",
-        MC_1_18_2 => "1.18",
-        MC_1_19_2 => "1.19.2",
-        MC_1_19_4 => "1.19",
-        MC_1_20_6 => "1.20",
-        MC_1_21_1 => "1.21.1",
-        MC_1_21_2 => "1.21.2",
-        MC_1_21_3 => "1.21.3",
-        MC_1_21_4 => "1.21.4",
-        MC_1_21_5 => "1.21.5",
-        MC_1_21_6 => "1.21.6",
-        MC_1_21_7 => "1.21.7",
-        MC_1_21_8 => "1.21.8",
-        MC_1_21_9 => "1.21.9",
-        MC_1_21_10 => "1.21.10",
-        MC_1_21_11 => "1.21",
-        MC_26_1 => "26.1",
-        MC_26_1_1 => "26.1.1",
-        MC_26_1_2 => "26.1.2",
-        MC_26_2 => "26.2",
-        MC_26_3 => "26.3",
-        _ => "?",
-    }
+    crate::ffi::mc_name(mc).unwrap_or("?")
 }
 
 /// `str2mc`: a version by name (`1.12`, `1.12.2`, `26.3-pre-2`...), or
 /// `MC_UNDEF`.
 pub fn str2mc(s: &str) -> i32 {
-    match s {
-        "26.3 Pre-Release 2" | "26.3-pre-2" => MC_26_3,
-        "1.21 WD" => MC_1_21_4,
-        "Beta 1.8" => MC_B1_8,
-        "Beta 1.7" => MC_B1_7,
-        "1.0.0" | "1.0" => MC_1_0_0,
-        "1.1.0" | "1.1" => MC_1_1_0,
-        "1.2.5" | "1.2" => MC_1_2_5,
-        "1.3.2" | "1.3" => MC_1_3_2,
-        "1.4.7" | "1.4" => MC_1_4_7,
-        "1.5.2" | "1.5" => MC_1_5_2,
-        "1.6.4" | "1.6" => MC_1_6_4,
-        "1.7.10" | "1.7" => MC_1_7_10,
-        "1.8.9" | "1.8" => MC_1_8_9,
-        "1.9.4" | "1.9" => MC_1_9_4,
-        "1.10.2" | "1.10" => MC_1_10_2,
-        "1.11.2" | "1.11" => MC_1_11_2,
-        "1.12.2" | "1.12" => MC_1_12_2,
-        "1.13.2" | "1.13" => MC_1_13_2,
-        "1.14.4" | "1.14" => MC_1_14_4,
-        "1.15.2" | "1.15" => MC_1_15_2,
-        "1.16.1" => MC_1_16_1,
-        "1.16.5" | "1.16" => MC_1_16_5,
-        "1.17.1" | "1.17" => MC_1_17_1,
-        "1.18.2" | "1.18" => MC_1_18_2,
-        "1.19.2" => MC_1_19_2,
-        "1.19.4" | "1.19" => MC_1_19_4,
-        "1.20.6" | "1.20" => MC_1_20_6,
-        "1.21.1" => MC_1_21_1,
-        "1.21.2" => MC_1_21_2,
-        "1.21.3" => MC_1_21_3,
-        "1.21.4" => MC_1_21_4,
-        "1.21.5" => MC_1_21_5,
-        "1.21.6" => MC_1_21_6,
-        "1.21.7" => MC_1_21_7,
-        "1.21.8" => MC_1_21_8,
-        "1.21.9" => MC_1_21_9,
-        "1.21.10" => MC_1_21_10,
-        "1.21.11" | "1.21" => MC_1_21_11,
-        "26.1" => MC_26_1,
-        "26.1.1" => MC_26_1_1,
-        "26.1.2" => MC_26_1_2,
-        "26.2" => MC_26_2,
-        "26.3" => MC_26_3,
-        _ => MC_UNDEF,
-    }
+    crate::ffi::mc_from_name(s)
 }
 
 #[cfg(test)]
@@ -180,5 +93,19 @@ mod tests {
         assert_eq!(mc2str(MC_1_16), "1.16");
         assert_eq!(str2mc("0.9"), MC_UNDEF);
         const { assert!(MC_1_17 < MC_1_18 && MC_B1_8 < MC_1_0) };
+    }
+
+    /// The constants here are the engine's numbers: every name the engine
+    /// gives a number leads back to it.
+    #[test]
+    fn constants_match_the_engine() {
+        for mc in MC_B1_7..=MC_NEWEST {
+            assert_ne!(mc2str(mc), "?", "{mc}");
+            assert_eq!(str2mc(mc2str(mc)), mc, "{}", mc2str(mc));
+        }
+        assert_eq!(mc2str(MC_26_3), "26.3");
+        assert_eq!(mc2str(MC_1_18), "1.18");
+        assert_eq!(mc2str(MC_1_21_4), "1.21.4");
+        assert_eq!(mc2str(MC_NEWEST + 1), "?");
     }
 }

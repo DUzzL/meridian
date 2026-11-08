@@ -2,7 +2,7 @@
 # crate from the bundle, where the repository's workspace does not exist.
 [package]
 name = "meridian-seedatlas"
-description = "Seed Atlas for Meridian: biomes and structures from a world seed (a Rust port of the Seed Atlas engine, derived from cubiomes)"
+description = "Seed Atlas for Meridian: biomes and structures from a world seed (the Seed Atlas engine, derived from cubiomes, through its C ABI)"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
@@ -10,8 +10,13 @@ license = "GPL-3.0-or-later"
 
 [dependencies]
 
+# Compiles the engine (c/); a crate in Horizon's Cargo.lock.
+[build-dependencies]
+cc = "=1.6.0"
+
+# Only src/ffi.rs calls the C engine.
 [lints.rust]
-unsafe_code = "forbid"
+unsafe_code = "deny"
 
 [dev-dependencies]
 flate2 = "=1.1.10"

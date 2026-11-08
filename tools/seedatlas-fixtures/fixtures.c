@@ -1,7 +1,7 @@
-/* Writes parity fixtures from the Fabric version's native interface (the
- * seedatlas_xaero glue on DUzzL/seed-atlas-xaero main, ABI 6, over the Seed
- * Atlas engine) for every Minecraft version it accepts. Development tool
- * only: not part of the mod.
+/* Writes parity fixtures from the engine's C ABI for the mods (seedatlas-sax
+ * of DUzzL/Seed-Atlas, ABI 6, which the Fabric version builds as well) for
+ * every Minecraft version it accepts. Development tool only: not part of the
+ * mod.
  *
  * Usage: fixtures <version> > <version>.txt   (one file per version)
  *
@@ -19,7 +19,7 @@
  *   W seed detailed x z                          sax_spawn
  *   M seed x0 z0 x1 z1 rc row...                 sax_scan_slime_chunks
  */
-#include "seedatlas_xaero.h"
+#include "seedatlas_sax.h"
 #include <stdio.h>
 #include <stdlib.h>
 

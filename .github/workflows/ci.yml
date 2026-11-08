@@ -16,14 +16,36 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
+      # meridian-seedatlas compiles the Seed Atlas engine (C11), which needs a
+      # GNU or LLVM C compiler: on Windows MinGW, as Horizon's launcher uses.
+      - name: Set up MinGW
+        if: runner.os == 'Windows'
+        id: msys2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          install: mingw-w64-x86_64-gcc
+      - name: Put MinGW on the PATH
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo '${{ steps.msys2.outputs.msys2-location }}\mingw64\bin' >> "$GITHUB_PATH"
       - name: Install Rust 1.95 (Horizon's minimum)
-        run: rustup toolchain install 1.95.0 --profile minimal --component rustfmt --component clippy && rustup default 1.95.0
+        shell: bash
+        run: |
+          toolchain=1.95.0
+          # the target Horizon builds Windows for
+          if [ "$RUNNER_OS" = Windows ]; then toolchain=1.95.0-x86_64-pc-windows-gnu; fi
+          rustup toolchain install $toolchain --profile minimal --component rustfmt --component clippy
+          rustup default $toolchain
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
       - name: Lockfile only uses crates Horizon locks
         if: runner.os == 'Linux'
         run: python3 tools/check_lock.py
+      - name: The engine copy matches its Seed Atlas commit
+        if: runner.os == 'Linux'
+        run: tools/vendor-seedatlas.sh --check
 
   adapter:
     name: Horizon adapter (pinned Nightly)

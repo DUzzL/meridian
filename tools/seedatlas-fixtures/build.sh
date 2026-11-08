@@ -1,18 +1,23 @@
 #!/bin/bash
-# Builds the fixture tools against the Seed Atlas engine and the Fabric
-# version's native glue (both from their main branches), then writes the
-# fixtures for every Minecraft version the glue accepts.
-#   SEEDATLAS_ENGINE_DIR  .../Seed-Atlas/seedatlas-engine        (main)
-#   SEEDATLAS_GLUE_DIR    .../seed-atlas-xaero/src/main/native     (main)
+# Builds the fixture tool against a Seed Atlas checkout (its engine and the
+# engine's C ABI for the mods, seedatlas-sax, which the Fabric version builds
+# as well), with the engine's flags, then writes the fixtures for every
+# Minecraft version the ABI accepts. meridian-seedatlas compiles the same
+# sources (its c/ folder), so the parity test checks its FFI layer.
+#   SEEDATLAS_DIR  .../Seed-Atlas (a checkout; the commit of c/SEEDATLAS_COMMIT)
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
-engine=${SEEDATLAS_ENGINE_DIR:?set SEEDATLAS_ENGINE_DIR}
-glue=${SEEDATLAS_GLUE_DIR:?set SEEDATLAS_GLUE_DIR}
+root=${SEEDATLAS_DIR:?set SEEDATLAS_DIR}
+engine="$root/seedatlas-engine"
+sax="$root/seedatlas-sax"
 out=${TMPDIR:-/tmp}/meridian-seedatlas-fixtures
 mkdir -p "$out"
-sources="$engine/biomes.c $engine/util.c $engine/finders.c $engine/generator.c $engine/layers.c $engine/biomenoise.c $engine/noise.c $engine/quadbase.c"
-cc -O2 -w -I"$engine" -I"$glue" -DSEEDATLAS_XAERO_BUILD "$here/fixtures.c" "$glue/seedatlas_xaero.c" $sources -lm -o "$out/fixtures"
-cc -O2 -w -I"$engine" "$here/biome_table.c" $sources -lm -o "$out/biome_table"
+sources=()
+for f in biomes util finders generator layers biomenoise noise quadbase; do
+  sources+=("$engine/$f.c")
+done
+cc -std=gnu11 -O2 -fwrapv -ffp-contract=off -w -I"$engine" -I"$sax" -DSAX_STATIC \
+  "$here/fixtures.c" "$sax/seedatlas_sax.c" "${sources[@]}" -lm -o "$out/fixtures"
 fixtures="$here/../../mixins/meridian/engine/seedatlas/tests/fixtures"
 rm -rf "$fixtures"
 mkdir -p "$fixtures"
@@ -21,6 +26,4 @@ for v in $versions; do
   "$out/fixtures" "$v" | gzip -9 > "$fixtures/$v.txt.gz" &
 done
 wait
-"$out/biome_table" > "$here/../../mixins/meridian/engine/seedatlas/src/biome_table.rs"
-python3 "$here/btree_table.py" "$engine/tables/btree21wd.h" "$here/../../mixins/meridian/engine/seedatlas/src/btree21wd.rs"
 du -sh "$fixtures"

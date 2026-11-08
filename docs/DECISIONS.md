@@ -590,3 +590,18 @@ Das Audit vom 2026-11-07 (Commit `92c0fd5`) fand 42 Punkte (AUD-001 bis AUD-042)
 - Antworten von `/seedatlas` bleiben in einer Zeile der Aktionsleiste, weil Horizon keine lokale Chatzeile ausgeben kann.
 - Die maximale Wegpunkt-Entfernung wird nicht nach Dimension skaliert (O2 `waypoint_max_distance_dimension_scale`): Was die Option genau tut, lässt sich aus erlaubten Quellen nicht sicher ablesen, und beim Standard 0 wirkt sie nicht.
 - Offene O3-Beobachtungen (D-012, KEYBINDS „Offene Beobachtungen“) bleiben offen; sie brauchen die Referenz im Spiel.
+
+## D-041: Die Seed-Atlas-Engine selbst statt eines Rust-Ports (2026-11-08)
+
+Bisher war `meridian-seedatlas` eine Übersetzung der C-Engine und der Fabric-Glue nach Rust (D-025, D-026, Fixtures aus der Fabric-Bibliothek). Das hatte drei Folgen: jede Änderung der Engine musste zweimal gemacht werden; Fehler rutschten trotz Fixtures durch (`viability.rs`, Dörfer 1.3–1.9); und die Fixtures stammten von einer Fabric-Bibliothek, die auf dem Mac mit FMA gebaut war, sodass der Port an sechs Stellen `mul_add` nachbildete und damit von der App abwich.
+
+Seitdem steht `cc` (1.6.0) in Horizons Lockfile, und Bundle-Crates dürfen ein `build.rs` mit `[build-dependencies]` haben (horizon-mixins, `docs/crates-data-and-named-hooks.md`); der Launcher bringt auf jeder Plattform einen C-Compiler mit. Der Grund für D-025 ist damit entfallen.
+
+**Entschieden:** Die Crate kompiliert die Engine und ihre C-Schnittstelle für die Mods (`seedatlas-sax`, jetzt im Seed-Atlas-Repo, auch von der Fabric-Version gebaut) per `build.rs` und `cc` (in Horizons Lockfile) und ruft sie über eine kleine FFI-Schicht auf (`src/ffi.rs`, das einzige `unsafe`). Die API der Karte (`Atlas`, `Hit`, Marker, Biome, Versionen) bleibt gleich.
+
+- Engine und Schnittstelle liegen als Kopie in `seedatlas/c/` (der Launcher baut nur das Bundle); `tools/vendor-seedatlas.sh` kopiert sie, CI prüft die Kopie gegen den Commit in `c/SEEDATLAS_COMMIT`.
+- Gebaut wird mit den Flags der Engine (`-fwrapv -ffp-contract=off`), auf jeder Plattform gleich. Windows braucht einen GNU-Compiler: der Launcher bringt MinGW mit, die CI installiert es.
+- Die Fixtures schreibt jetzt die C-Schnittstelle selbst (`tools/seedatlas-fixtures/build.sh` gegen einen Seed-Atlas-Checkout); sie prüfen die FFI-Schicht und die Kopie.
+- Damit gelten Korrekturen und Beschleunigungen der Engine ohne Nacharbeit auch in Meridian.
+
+Ersetzt den Rust-Port aus D-025; `docs/SEEDATLAS_PORT.md` beschreibt den neuen Aufbau.

@@ -51,7 +51,7 @@ Seed Atlas is on by default and can be switched off in its settings. In singlepl
 
 On the world map, the toolbar on the right edge switches the seed layer and opens the Seed Atlas settings (both only while Seed Atlas is on), next to zoom, centring, waypoints, settings and the controls. The seed layer fills unexplored areas with the seed's biomes and, from 1.18, its terrain; structure markers (off by default) show where structures generate, with a right-click menu to mark them completed or set a waypoint. The settings also offer nearest biome and structure search, biome highlighting and the world generation version.
 
-The engine is a Rust port of the Seed Atlas engine and the Seed Atlas Fabric mod's native interface; parity tests compare it with the Fabric version for every Minecraft version (`mixins/meridian/engine/seedatlas/tests`).
+The engine is the Seed Atlas engine itself, with the C interface the Fabric version uses as well (`seedatlas-sax`), compiled into the mod: Meridian computes exactly what the Seed Atlas app and the Fabric version do, for every Minecraft version. Building it needs a C compiler, which the Horizon launcher brings.
 
 ## Coming from other map mods
 
@@ -69,7 +69,7 @@ cargo test --workspace
 tools/check-adapter.sh
 ```
 
-`docs/` holds the feature list, key list, decisions and progress; `docs/SEEDATLAS_PORT.md` describes the Seed Atlas port and its fixtures.
+`docs/` holds the feature list, key list, decisions and progress; `docs/SEEDATLAS_PORT.md` describes how the Seed Atlas engine is built in and tested.
 
 ## Licence
 

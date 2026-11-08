@@ -1,60 +1,70 @@
-# Seed Atlas port: guide
+# Seed Atlas engine: guide
 
-`mixins/meridian/engine/seedatlas` ports the Seed Atlas engine (C, derived
-from cubiomes) and the Fabric version's native glue to Rust, for every
-Minecraft version the Fabric version offers (1.1 to 26.3).
+`mixins/meridian/engine/seedatlas` (`meridian-seedatlas`) runs the Seed Atlas
+engine itself, not a translation of it: the engine (C, derived from cubiomes)
+and its C ABI for the mods (`seedatlas-sax`, ABI 6), which the Fabric version
+builds as well. So Meridian, the Fabric version and the Seed Atlas app compute
+the same, bit for bit, for every Minecraft version (1.1 to 26.3). Until
+2026-11 the crate was a Rust port of both (D-041).
 
-## Reference sources (read only)
+## Where the C code comes from
 
-- Engine: https://github.com/DUzzL/Seed-Atlas, `seedatlas-engine/` (`*.c`,
-  `*.h`, `tables/`), ported at commit `fc2c628`; `main` at `2539698` only
-  changed build and test files since.
-- Glue: https://github.com/DUzzL/seed-atlas-xaero, `src/main/native/seedatlas_xaero.c`
-  (ABI 6), compared at commit `58c70ff` (release 2.0.0).
+- https://github.com/DUzzL/Seed-Atlas: `seedatlas-engine/` (`*.c`, `*.h`,
+  `tables/`) and `seedatlas-sax/` (`seedatlas_sax.c`, `.h`), at the commit in
+  `seedatlas/c/SEEDATLAS_COMMIT`.
+- The crate compiles a copy in `seedatlas/c/`, because the Horizon launcher
+  builds a mod's crates from the bundle alone. `tools/vendor-seedatlas.sh
+  <checkout>` makes the copy from a clean Seed Atlas checkout and records its
+  commit; `tools/vendor-seedatlas.sh --check` (CI) compares the copy with that
+  commit on GitHub. Never edit `c/seedatlas-*` by hand: change Seed Atlas,
+  then copy again.
+- `seedatlas/c/shim.c` exports what the engine only offers as inline
+  functions (`isSlimeChunk`).
 
-Never open anything of Xaero's (no decompiled code, jars or assets).
+## Building
 
-## Rules for the port
+`build.rs` compiles the C code with the `cc` crate (in Horizon's Cargo.lock)
+and the engine's own flags: `-fwrapv` (the engine relies on wrapping signed
+arithmetic) and `-ffp-contract=off` (no fused multiply-adds, which would make
+results depend on the platform). The engine needs C11 variable-length arrays,
+so it builds with GCC or clang, not MSVC's C compiler: Horizon's launcher brings
+MinGW GCC on Windows x64 (`x86_64-pc-windows-gnu`), LLVM-MinGW on Windows ARM64,
+the Command Line Tools on macOS and the system's `cc` on Linux.
 
-- Translate the C faithfully, function by function, keeping its names in doc
-  comments (`/// \`getStructurePos\`...`). Results must be bit-identical.
-- Versions are `i32` constants in `src/mc.rs` (`MC_1_12`, `MC_1_18`...), with
-  the same order as the C enum, so `mc <= MC_1_17` reads as in C.
-- Integer arithmetic wraps where C's unsigned or overflowing arithmetic does:
-  use `wrapping_*`, and cast through the same widths as C (`as i64 as u64`
-  for an `int` added to a `uint64_t`). C `/` and `%` truncate like Rust's.
-- Floats: keep `float` (`f32`) and `double` (`f64`) exactly where C has them,
-  including the implicit conversions. The fixtures come from clang on Apple
-  Silicon, which fuses `a*b + c` into FMA in a few places; where a result
-  differs only far from the origin, try `mul_add` in the same order clang
-  would (see `end_island_weight` in `biome_noise.rs`).
-- No `unsafe`, no new dependencies.
+## Rules
+
+- `src/ffi.rs` is the only module with `unsafe` code (the crate denies it
+  elsewhere): the C declarations and safe wrappers. A `sax_context` is
+  read-only after it is created, so `Atlas` shares one between its clones and
+  threads.
+- `src/atlas.rs` keeps the API the map uses (`Atlas`, `Hit`, the marker kinds
+  and result flags); every call goes to the `sax_*` function of the same name.
+- `mc.rs`, `biomes.rs` and `structures.rs` keep the engine's numbers as Rust
+  constants (versions, biome ids, structure kinds); names, colours, version
+  names and structure configurations come from the engine (`mc2str`,
+  `biome2str`, `initBiomeColors`, `getStructureConfig`). A test checks that
+  the version constants match the engine's.
 - Code comments in English only.
 
 ## Testing
 
 `tests/parity.rs` checks every fixture (one gzip file per version in
-`tests/fixtures/`, written by the real glue via `tools/seedatlas-fixtures/`).
-Limit it to some versions while working:
+`tests/fixtures/`), written by the engine's C ABI itself through
+`tools/seedatlas-fixtures/` (`SEEDATLAS_DIR=<Seed Atlas checkout>
+tools/seedatlas-fixtures/build.sh`, from the commit of `c/`): it checks the FFI
+layer and the copy. Limit it to some versions while working:
 
 ```bash
 SEEDATLAS_VERSIONS=1.12,1.7 cargo test -p meridian-seedatlas --release --test parity
 ```
 
-Every group of differences is listed with an example. Also run
-`cargo clippy -p meridian-seedatlas --all-targets` and `cargo fmt --all`.
+Also run `cargo clippy -p meridian-seedatlas --all-targets` and
+`cargo fmt --all`.
 
-## Layout
+## Updating the engine
 
-| File | Content |
-|---|---|
-| `mc.rs` | versions, `mc2str`, `str2mc` |
-| `rng.rs`, `noise.rs` | `rng.h`, `noise.c` |
-| `biomes.rs`, `biome_table.rs` | `biomes.c`, names and colours (`util.c`) |
-| `layers.rs` | `layers.c` and the layer stack of `generator.c` (1.0 to 1.17) |
-| `biome_noise.rs`, `btree*.rs` | `biomenoise.c` (1.18+ climate, Nether, End, Voronoi) |
-| `beta.rs`, `surface.rs` | Beta 1.7 biomes, `SurfaceNoise`, depth and scale |
-| `generator.rs` | `generator.c` dispatch: `setupGenerator`, `applySeed`, `genBiomes` |
-| `structures.rs`, `viability.rs`, `finders.rs`, `endcity.rs` | `finders.c` |
-| `terrain.rs` | glue: terrain heights and the Nether floor (ABI 6) |
-| `atlas.rs` | glue: the `sax_*` interface |
+1. Change and commit the engine in Seed Atlas (its own tests:
+   `make -C seedatlas-engine test-versions`, `make -C seedatlas-sax test`).
+2. `tools/vendor-seedatlas.sh <Seed Atlas checkout>`.
+3. Regenerate the fixtures (above) where the engine's results changed on
+   purpose, and run the parity test.
