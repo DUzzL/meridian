@@ -58,8 +58,8 @@ enum Source {
 fn sources() -> Vec<(&'static str, Source)> {
     use Source::*;
     vec![
-        ("camp", Own(include_bytes!("assets/seedatlas/camp.png"))),
-        ("camp_special", Own(include_bytes!("assets/seedatlas/camp_special.png"))),
+        ("camp", Own(include_bytes!("data/assets/seedatlas/camp.png"))),
+        ("camp_special", Own(include_bytes!("data/assets/seedatlas/camp_special.png"))),
         ("ancient_city", Composed(warden_head, false)),
         ("bastion", Block("cracked_polished_blackstone_bricks", true)),
         ("chambers", Item("trial_key")),
@@ -69,8 +69,8 @@ fn sources() -> Vec<(&'static str, Source)> {
         ("fortress", Block("nether_bricks", true)),
         ("gateway", Item("ender_pearl")),
         ("geode", Item("amethyst_shard")),
-        ("hut", Own(include_bytes!("assets/seedatlas/hut.png"))),
-        ("igloo", Own(include_bytes!("assets/seedatlas/igloo.png"))),
+        ("hut", Own(include_bytes!("data/assets/seedatlas/hut.png"))),
+        ("igloo", Own(include_bytes!("data/assets/seedatlas/igloo.png"))),
         ("jungle", Block("mossy_cobblestone", true)),
         ("mansion", Item("totem_of_undying")),
         // The rail is transparent between its sleepers: no frame.
@@ -81,14 +81,14 @@ fn sources() -> Vec<(&'static str, Source)> {
         ("outpost", Item("crossbow_standby")),
         ("portal", Block("crying_obsidian", true)),
         ("ruins", Composed(cracked_mossy_stone_bricks, true)),
-        ("shipwreck", Own(include_bytes!("assets/seedatlas/shipwreck.png"))),
+        ("shipwreck", Own(include_bytes!("data/assets/seedatlas/shipwreck.png"))),
         ("slime", Item("slime_ball")),
         ("spawn", Item("compass_00")),
         ("stronghold", Item("ender_eye")),
         ("trails", Item("brush")),
         ("treasure", Composed(chest, false)),
         ("village", Composed(villager_head, false)),
-        ("well", Own(include_bytes!("assets/seedatlas/well.png"))),
+        ("well", Own(include_bytes!("data/assets/seedatlas/well.png"))),
     ]
 }
 
@@ -248,7 +248,7 @@ pub fn load(root: Option<&Path>) -> HashMap<&'static str, Icon> {
         let img = img.map(|i| crop(&i)).unwrap_or_else(|| Image::new(1, 1));
         out.insert(id, Icon { width: img.w, height: img.h, rgba: img.px, block, size: display_size(id) });
     }
-    let done = decode(include_bytes!("assets/seedatlas/completed.png")).map(|i| crop(&i)).unwrap_or_else(|| Image::new(1, 1));
+    let done = decode(include_bytes!("data/assets/seedatlas/completed.png")).map(|i| crop(&i)).unwrap_or_else(|| Image::new(1, 1));
     out.insert("completed", Icon { width: done.w, height: done.h, rgba: done.px, block: false, size: DISPLAY_SIZE });
     out.insert("frame", Icon { width: 1, height: 1, rgba: vec![0x14, 0x14, 0x14, 0xC0], block: false, size: DISPLAY_SIZE });
     out
