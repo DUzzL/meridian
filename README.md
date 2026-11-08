@@ -8,7 +8,13 @@ Meridian is an independent project. It is not affiliated with or endorsed by the
 
 Meridian is a Horizon native mod (`mixins/meridian`). The bundle targets the Horizon revision named in `mixins/meridian/horizon-mixin.toml`.
 
-**From a `.hnmod` file.** `tools/pack-hnmod.sh` packs the bundle into `target/meridian-<version>.hnmod`. Put it in the instance's `horizon-native-mods/` folder (the Mods page's **Open folder**), turn Meridian on under Options > Mods and press **Build** on the Mods page.
+**From a `.hnmod` file.** `tools/pack-hnmod.sh` packs the bundle into `target/meridian-<version>.hnmod`. Put it as `meridian.hnmod` in the game folder's `horizon-native-mods/` folder (not `horizon-mods/`, which holds content mods only), turn it on with the line `mod.meridian:true` in `horizon-mods.txt` of the same folder, then build the game with it: **Build** on the launcher's Mods page, or
+
+```bash
+/Applications/Horizon.app/Contents/MacOS/horizon-launcher native-build --instance horizon --trust-native-code
+```
+
+A native mod only runs in a build that contains it: dropping the file in and starting the game is not enough.
 
 **From the source folder.** Build it into your Horizon instance with the launcher:
 
