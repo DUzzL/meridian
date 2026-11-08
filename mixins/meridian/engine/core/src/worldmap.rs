@@ -507,18 +507,14 @@ impl WorldMap {
                 });
                 continue;
             }
-            // The dot size setting, at the default 2 the 1.2 units the map
-            // always drew.
-            let r = 0.6 * o.radar.dot_size.max(1) as f32 * u;
-            let diamond = |r: f32| [[x, y - r], [x + r, y], [x, y + r], [x - r, y]];
-            ops.push(DrawOp::Quad {
-                points: diamond(r + 0.7 * u),
-                argb: 0xFF00_0000,
-            });
-            ops.push(DrawOp::Quad {
-                points: diamond(r),
-                argb: 0xFF00_0000 | radar::color(e, o.player[1], o.radar),
-            });
+            // The same dot as on the minimap, crisp at the map's scale.
+            let r = radar::dot_radius(o.radar.dot_size, u);
+            ops.extend(radar::dot(
+                [x, y],
+                r,
+                u,
+                radar::color(e, o.player[1], o.radar),
+            ));
         }
         // The paired dimension's waypoints, dimmed, under the shown ones.
         for w in o.paired_waypoints {
@@ -1047,6 +1043,7 @@ mod tests {
                     _ => None,
                 })
                 .count()
+                / 2 // a dot fills two quads in its colour
         };
         let mut s = crate::config::RadarSettings::default();
         assert_eq!(colors(&s), 2, "the height limit holds on the world map");

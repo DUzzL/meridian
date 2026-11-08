@@ -1,12 +1,14 @@
 //! The entity radar on the minimap: which entities show, in what colour and
 //! order, and their diamond-shaped dots.
 //!
-//! Defaults follow the reference mod's first-start categories (O2): living
-//! things yellow, players white, items red, other entities purple; dots
-//! two units across, entities more than 20 blocks above or below left out
-//! (players almost never), darker the further up or down they are; items
-//! drawn first, then living things, hostile ones, players last. Past the
-//! cap, the farthest entities on the map are left out.
+//! Defaults follow the reference mod's first-start categories (O2) and how
+//! it draws them (O3, D-042): living things yellow, players white, items red
+//! (pure red), other entities purple, each colour adjustable; dots about
+//! three units across with a dark rim; entities more than 20 blocks above or
+//! below left out (players almost never); entities above you in full colour,
+//! below you darker from five blocks down; items drawn first, then living
+//! things, hostile ones, players last. Past the cap, the farthest entities on
+//! the map are left out.
 
 use crate::config::{NameMode, RadarSettings};
 use crate::minimap::{Axes, DrawOp, Layout};
@@ -21,14 +23,15 @@ pub enum Class {
 }
 
 impl Class {
-    /// The chat colour index the reference's categories use.
-    pub fn rgb(self) -> u32 {
-        match self {
-            Class::Player => 0xFFFFFF,
-            Class::Hostile | Class::Friendly => 0xFFFF55,
-            Class::Item => 0xFF5555,
-            Class::Other => 0xAA00AA,
-        }
+    /// The class's colour in the settings (0xRRGGBB).
+    pub fn rgb(self, s: &RadarSettings) -> u32 {
+        (match self {
+            Class::Player => s.player_color,
+            Class::Hostile => s.hostile_color,
+            Class::Friendly => s.friendly_color,
+            Class::Item => s.item_color,
+            Class::Other => s.other_color,
+        }) & 0x00FF_FFFF
     }
 
     /// Drawing order: lower first.
@@ -247,11 +250,23 @@ pub fn shown(e: &Entity, s: &RadarSettings) -> bool {
     wanted != s.reversed
 }
 
-/// A colour darkened toward black by the height difference `dy` against
-/// `limit` (at the limit, a third of its brightness remains).
+/// Blocks below the player within which marks keep their full colour.
+pub const FADE_START: f64 = 5.0;
+
+/// A colour darkened by the height difference `dy` (entity minus player)
+/// against `limit`, as on the reference: entities above or less than five
+/// blocks below keep their colour; further down it drops to three quarters
+/// and on to a quarter at the limit.
 pub fn faded(rgb: u32, dy: f64, limit: f64) -> u32 {
-    let f = 1.0 - (dy.abs() / limit.max(1.0)).min(1.0) * 0.67;
-    crate::color::scale(rgb, f as f32)
+    let below = -dy;
+    if below < FADE_START {
+        return rgb;
+    }
+    let span = (limit - FADE_START).max(1.0);
+    let f = (0.75 - 0.5 * ((below - FADE_START) / span).min(1.0)) as f32;
+    let [r, g, b] = crate::color::channels(rgb);
+    let c = |x: u8| (x as f32 * f).floor() as u8;
+    crate::color::rgb(c(r), c(g), c(b))
 }
 
 /// The entities a radar draws around `center`, in drawing order: those the
@@ -286,15 +301,15 @@ pub fn select<'a>(
 /// height difference to `y` when the fade is on.
 pub fn color(e: &Entity, y: f64, s: &RadarSettings) -> u32 {
     if s.height_fade {
-        faded(e.class.rgb(), e.pos[1] - y, e.class.height_limit(s))
+        faded(e.class.rgb(s), e.pos[1] - y, e.class.height_limit(s))
     } else {
-        e.class.rgb()
+        e.class.rgb(s)
     }
 }
 
 /// The tint a face is drawn with so it fades like a dot.
 pub fn face_tint(e: &Entity, y: f64, s: &RadarSettings) -> u32 {
-    0xFF00_0000 | rgb_to_shade(e.class.rgb(), color(e, y, s))
+    0xFF00_0000 | rgb_to_shade(e.class.rgb(s), color(e, y, s))
 }
 
 /// The radar's dots for `entities` around the player at `center`.
@@ -310,7 +325,7 @@ pub fn dots(
     }
     let axes = Axes::new(layout.rotate, yaw);
     let u = layout.unit;
-    let r = s.dot_size.max(1) as f32 * u;
+    let r = dot_radius(s.dot_size, u);
     let half = layout.size as f64 / 2.0 - r as f64;
     let [cx, cy] = layout.center();
     let to_screen = |e: &Entity| {
@@ -356,15 +371,7 @@ pub fn dots(
                 argb: face_tint(e, center[1], s),
             });
         } else {
-            let diamond = |r: f32| [[x, y - r], [x + r, y], [x, y + r], [x - r, y]];
-            ops.push(DrawOp::Quad {
-                points: diamond(r + u * 0.75),
-                argb: 0xFF00_0000,
-            });
-            ops.push(DrawOp::Quad {
-                points: diamond(r),
-                argb: 0xFF00_0000 | rgb,
-            });
+            ops.extend(dot([x, y], r, u, rgb));
         }
         let named = match s.names {
             NameMode::Off => false,
@@ -384,6 +391,48 @@ pub fn dots(
         }
     }
     ops
+}
+
+/// A dot's half diagonal in GUI pixels for the dot size setting (`u` GUI
+/// pixels per unit): at the default 2 about one and a half units, as the
+/// reference draws them on both maps.
+pub fn dot_radius(dot_size: u8, u: f32) -> f32 {
+    0.78 * dot_size.max(1) as f32 * u
+}
+
+/// A dot: a diamond in `rgb` on a dark rim, its tips cut off so it reads
+/// round, as on the reference.
+pub fn dot(at: [f32; 2], r: f32, u: f32, rgb: u32) -> [DrawOp; 4] {
+    let [x, y] = at;
+    let diamond = |r: f32| [[x, y - r], [x + r, y], [x, y + r], [x - r, y]];
+    // A square of 0.6 r rounds the diamond's sides without its tips.
+    let square = |h: f32| {
+        [
+            [x - h, y - h],
+            [x + h, y - h],
+            [x + h, y + h],
+            [x - h, y + h],
+        ]
+    };
+    let rim = r + 0.7 * u;
+    [
+        DrawOp::Quad {
+            points: diamond(rim),
+            argb: 0xFF00_0000,
+        },
+        DrawOp::Quad {
+            points: square(rim * 0.6),
+            argb: 0xFF00_0000,
+        },
+        DrawOp::Quad {
+            points: diamond(r),
+            argb: 0xFF00_0000 | rgb,
+        },
+        DrawOp::Quad {
+            points: square(r * 0.6),
+            argb: 0xFF00_0000 | rgb,
+        },
+    ]
 }
 
 /// The grey a face is tinted with to show the same height fade as a dot
@@ -430,14 +479,21 @@ mod tests {
 
     #[test]
     fn colours_like_the_reference() {
-        assert_eq!(Class::Friendly.rgb(), 0xFFFF55);
+        let s = RadarSettings::default();
+        assert_eq!(Class::Friendly.rgb(&s), 0xFFFF55);
         assert_eq!(
-            Class::Hostile.rgb(),
+            Class::Hostile.rgb(&s),
             0xFFFF55,
             "hostile mobs share the living colour"
         );
-        assert_eq!(Class::Player.rgb(), 0xFFFFFF);
-        assert_eq!(Class::Item.rgb(), 0xFF5555);
+        assert_eq!(Class::Player.rgb(&s), 0xFFFFFF);
+        assert_eq!(Class::Item.rgb(&s), 0xFF0000, "items are pure red");
+        assert_eq!(Class::Other.rgb(&s), 0xAA00AA);
+        let custom = RadarSettings {
+            hostile_color: 0xFF0000,
+            ..RadarSettings::default()
+        };
+        assert_eq!(Class::Hostile.rgb(&custom), 0xFF0000);
     }
 
     #[test]
@@ -476,11 +532,35 @@ mod tests {
         let ops = dots(&layout(), [0.0, 64.0, 0.0], 0.0, &ents, &s);
         assert_eq!(
             ops.len(),
-            4,
+            8,
             "the cow 26 blocks up is left out, the player is not"
         );
-        assert!(faded(0xFFFF55, 10.0, 20.0) < 0xFFFF55);
-        assert_eq!(faded(0xFFFF55, 0.0, 20.0), 0xFFFF55);
+    }
+
+    /// Colours measured on the reference: yellow pigs at known heights.
+    #[test]
+    fn fade_below_like_the_reference() {
+        for (dy, want) in [
+            (-2.0, 0xFFFF55),
+            (-4.5, 0xFFFF55),
+            (-5.0, 0xBFBF3F),
+            (-6.0, 0xB6B63C),
+            (-8.0, 0xA5A537),
+            (-10.0, 0x949431),
+            (-12.0, 0x83832B),
+            (-15.0, 0x6A6A23),
+            (-18.0, 0x50501A),
+            (-19.0, 0x484818),
+        ] {
+            assert_eq!(faded(0xFFFF55, dy, 20.0), want, "dy {dy}");
+        }
+        for dy in [0.5, 5.0, 12.0, 19.0] {
+            assert_eq!(
+                faded(0xFFFF55, dy, 20.0),
+                0xFFFF55,
+                "above keeps its colour"
+            );
+        }
     }
 
     #[test]
@@ -492,11 +572,11 @@ mod tests {
             e(3, Class::Friendly, [500.0, 64.0, 0.0]),
         ];
         let ops = dots(&layout(), [0.0, 64.0, 0.0], 0.0, &ents, &s);
-        assert_eq!(ops.len(), 4, "the far one is off the map");
-        let DrawOp::Quad { argb, .. } = ops[1] else {
+        assert_eq!(ops.len(), 8, "the far one is off the map");
+        let DrawOp::Quad { argb, .. } = ops[2] else {
             panic!()
         };
-        assert_eq!(argb, 0xFFFF_5555, "items first, players over them");
+        assert_eq!(argb, 0xFFFF_0000, "items first, players over them");
         let disabled = RadarSettings {
             enabled: false,
             ..s
@@ -538,7 +618,7 @@ mod tests {
         assert_eq!(ids, [1, 2, 4], "players still drawn last");
         // The minimap: entities off the map leave room for those on it.
         let ops = dots(&layout(), [0.0, 64.0, 0.0], 0.0, &ents, &s);
-        assert_eq!(ops.len(), 6, "three dots");
+        assert_eq!(ops.len(), 12, "three dots");
     }
 
     #[test]
@@ -548,8 +628,8 @@ mod tests {
         dog.tamed = true;
         let zombie = e(2, Class::Hostile, [2.0, 64.0, 0.0]);
         let ops = dots(&layout(), [0.0, 64.0, 0.0], 0.0, &[dog, zombie], &s);
-        // Dots come in pairs (rim, colour); the tamed friend is drawn last.
-        let DrawOp::Quad { points, .. } = &ops[3] else {
+        // Dots come in fours (rim, colour); the tamed friend is drawn last.
+        let DrawOp::Quad { points, .. } = &ops[6] else {
             panic!()
         };
         assert_eq!(

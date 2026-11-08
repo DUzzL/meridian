@@ -439,6 +439,58 @@ pub struct RadarSettings {
     /// Dot size in minimap units.
     pub dot_size: u8,
     pub max_entities: u32,
+    /// Mark colours per class (0xRRGGBB).
+    pub player_color: u32,
+    pub hostile_color: u32,
+    pub friendly_color: u32,
+    pub item_color: u32,
+    pub other_color: u32,
+}
+
+/// Colours the radar settings offer, with their names; the defaults are the
+/// reference's (O3: items are pure red, not the chat palette's light red).
+pub const RADAR_COLORS: [(&str, u32); 16] = [
+    ("Yellow", 0xFFFF55),
+    ("Gold", 0xFFAA00),
+    ("Red", 0xFF0000),
+    ("Light Red", 0xFF5555),
+    ("Dark Red", 0xAA0000),
+    ("Pink", 0xFF55FF),
+    ("Purple", 0xAA00AA),
+    ("Blue", 0x5555FF),
+    ("Dark Blue", 0x0000AA),
+    ("Aqua", 0x55FFFF),
+    ("Dark Aqua", 0x00AAAA),
+    ("Green", 0x55FF55),
+    ("Dark Green", 0x00AA00),
+    ("White", 0xFFFFFF),
+    ("Gray", 0xAAAAAA),
+    ("Black", 0x000000),
+];
+
+/// A radar colour's name, or its hex code when it is not one of
+/// [`RADAR_COLORS`].
+pub fn radar_color_name(rgb: u32) -> String {
+    RADAR_COLORS
+        .iter()
+        .find(|(_, c)| *c == rgb & 0x00FF_FFFF)
+        .map_or_else(
+            || format!("#{:06X}", rgb & 0x00FF_FFFF),
+            |(n, _)| (*n).to_owned(),
+        )
+}
+
+/// The next (or with `back` the previous) of [`RADAR_COLORS`]; a colour
+/// that is none of them goes to the first.
+pub fn next_radar_color(rgb: u32, back: bool) -> u32 {
+    let n = RADAR_COLORS.len();
+    match RADAR_COLORS
+        .iter()
+        .position(|(_, c)| *c == rgb & 0x00FF_FFFF)
+    {
+        Some(i) => RADAR_COLORS[if back { (i + n - 1) % n } else { (i + 1) % n }].1,
+        None => RADAR_COLORS[0].1,
+    }
 }
 
 impl Default for RadarSettings {
@@ -462,6 +514,11 @@ impl Default for RadarSettings {
             height_fade: true,
             dot_size: 2,
             max_entities: 1000,
+            player_color: 0xFFFFFF,
+            hostile_color: 0xFFFF55,
+            friendly_color: 0xFFFF55,
+            item_color: 0xFF0000,
+            other_color: 0xAA00AA,
         }
     }
 }

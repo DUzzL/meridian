@@ -1395,6 +1395,46 @@ pub fn options() -> Vec<Opt> {
             value: |s| format!("{}", s.radar.dot_size),
             step: |s, b| s.radar.dot_size = cycle(&[1u8, 2, 3, 4], s.radar.dot_size, b),
         },
+        Opt {
+            label: "Player Color",
+            group: Radar,
+            value: |s| crate::config::radar_color_name(s.radar.player_color),
+            step: |s, b| {
+                s.radar.player_color = crate::config::next_radar_color(s.radar.player_color, b)
+            },
+        },
+        Opt {
+            label: "Hostile Mob Color",
+            group: Radar,
+            value: |s| crate::config::radar_color_name(s.radar.hostile_color),
+            step: |s, b| {
+                s.radar.hostile_color = crate::config::next_radar_color(s.radar.hostile_color, b)
+            },
+        },
+        Opt {
+            label: "Friendly Mob Color",
+            group: Radar,
+            value: |s| crate::config::radar_color_name(s.radar.friendly_color),
+            step: |s, b| {
+                s.radar.friendly_color = crate::config::next_radar_color(s.radar.friendly_color, b)
+            },
+        },
+        Opt {
+            label: "Item Color",
+            group: Radar,
+            value: |s| crate::config::radar_color_name(s.radar.item_color),
+            step: |s, b| {
+                s.radar.item_color = crate::config::next_radar_color(s.radar.item_color, b)
+            },
+        },
+        Opt {
+            label: "Other Entity Color",
+            group: Radar,
+            value: |s| crate::config::radar_color_name(s.radar.other_color),
+            step: |s, b| {
+                s.radar.other_color = crate::config::next_radar_color(s.radar.other_color, b)
+            },
+        },
         toggle!("Coordinates", Information, minimap.show_coords),
         toggle!("Biome", Information, minimap.show_biome),
         toggle!(
