@@ -68,7 +68,12 @@ fn scan(atlas: &Atlas, marker: &MarkerKind, dimension: Dimension, b: [i32; 4]) -
             }
             k => atlas.scan_structures(k, b, true),
         };
-        hits.extend(found.unwrap_or_default());
+        hits.extend(
+            found
+                .unwrap_or_default()
+                .into_iter()
+                .filter(crate::seedatlas::shown_on_map),
+        );
     }
     hits
 }

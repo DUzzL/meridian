@@ -814,6 +814,14 @@ impl Default for SeedService {
     }
 }
 
+/// Whether a found structure is drawn and searched for: not the twenty End
+/// gateways the dragon fight opens around the main island (the interface
+/// reports them as fixed starts), only those on the outer islands.
+pub fn shown_on_map(hit: &Hit) -> bool {
+    !(hit.kind == meridian_seedatlas::structures::kind::END_GATEWAY
+        && hit.flags & meridian_seedatlas::atlas::RESULT_FIXED != 0)
+}
+
 /// The colours of a region's biome tile. With the terrain look on (and a
 /// version that has terrain) the heights the Java tile worker requests are
 /// computed here, with a one-sample halo, and the tile gets its relief.
@@ -888,6 +896,22 @@ fn tile_pixels(atlas: &Atlas, look: &TileLook, job: Job) -> Vec<u32> {
             _ => atlas.nether_floor_area(hx, hz, y, step, hn, hn).ok(),
         },
     };
+    // The End's far previews average finer biome samples (chunk-sized, up
+    // to eight to a side; four for the coarsest steps, whose samples cost
+    // more), so islands read as a density, not a speckle.
+    let fine_factor = if dimension == Dimension::End && heights.is_none() {
+        (step / 16).clamp(1, if step > 256 { 4 } else { 8 }) as usize
+    } else {
+        1
+    };
+    let fine = (fine_factor > 1)
+        .then(|| {
+            let k = fine_factor as i32;
+            atlas
+                .biome_area(dimension, x0, z0, y, step / k, n * k, n * k)
+                .ok()
+        })
+        .flatten();
     seedatlas_look::style_tile(&TileInput {
         looks: look.looks.as_ref(),
         mc: atlas.mc,
@@ -904,6 +928,8 @@ fn tile_pixels(atlas: &Atlas, look: &TileLook, job: Job) -> Vec<u32> {
         heights: heights.as_deref(),
         surface: surface.as_ref(),
         highlight: &look.highlight,
+        layer_y: y,
+        fine_ids: fine.as_deref().map(|f| (f, fine_factor)),
     })
 }
 
@@ -961,6 +987,7 @@ fn run(atlas: &Atlas, look: &TileLook, job: Job, globals: &Globals) -> Done {
                         .map(Option::unwrap_or_default),
                 }
             };
+            let found = found.map(|hits| hits.into_iter().filter(shown_on_map).collect());
             Done::Markers(job, Arc::new(found.unwrap_or_default()))
         }
     }
@@ -2093,6 +2120,25 @@ mod tests {
             view_box([10.0, 10.0], [400.0, 300.0]).0,
             view_box([900.0, 900.0], [400.0, 300.0]).0
         );
+    }
+
+    #[test]
+    fn no_gateways_on_the_main_island() {
+        let atlas = Atlas::versioned(42, false, meridian_seedatlas::mc::MC_NEWEST);
+        let gateway = meridian_seedatlas::structures::kind::END_GATEWAY;
+        let ring = atlas
+            .scan_structures(gateway, [-200, -200, 200, 200], true)
+            .unwrap();
+        assert_eq!(
+            ring.len(),
+            20,
+            "the interface reports the dragon fight's ring"
+        );
+        assert!(!ring.iter().any(shown_on_map));
+        let outer = atlas
+            .scan_structures(gateway, [1000, 1000, 6000, 6000], true)
+            .unwrap();
+        assert!(!outer.is_empty() && outer.iter().all(shown_on_map));
     }
 
     #[test]

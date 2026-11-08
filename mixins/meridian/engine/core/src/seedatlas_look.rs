@@ -21,10 +21,31 @@ const WATER: u8 = 1;
 const DEEP: u8 = 2;
 const LAND: u8 = 3;
 
-const END_STONE: u32 = 0xD9D99A;
-const END_VOID: u32 = 0x1A1A2E;
-const NETHER_LAVA: u32 = 0xE0600A;
+/// End stone's texture mean: the reference map's base colour for islands.
+const END_STONE_TEXTURE: u32 = 0xDCDF9E;
+/// The void between End islands as the reference map draws explored void.
+pub const END_VOID: u32 = 0x0A0017;
+/// Lava's texture mean; lava glows in its own light.
+const LAVA_TEXTURE: u32 = 0xD9691A;
+/// Cave-mode ground deeper than this below the layer is not drawn (the
+/// reference's default cave depth), as on the explored map.
+pub const CAVE_DEPTH: i32 = 30;
+/// The top of the Nether's lava sea.
+const LAVA_SEA: i32 = 31;
 const MAIN_ISLAND_RADIUS_SQUARED: i64 = 100 * 100;
+/// Share of End islands' ground per End biome, measured on the seed layer's
+/// own heights (three seeds, 3 x 4096^2 blocks each).
+const END_LAND_HIGHLANDS: f32 = 0.995;
+const END_LAND_MIDLANDS: f32 = 0.82;
+const END_LAND_BARRENS: f32 = 0.38;
+const END_LAND_SMALL_ISLANDS: f32 = 0.07;
+/// Mean colour of island ground as [`apply_end`] draws it (slopes and the
+/// darkening below y 63 included), for the coarse previews.
+const END_LAND_MEAN: u32 = 0xE7EAA7;
+/// Share of Nether columns whose floor lies within the cave depth below the
+/// layer (measured on the seed layer's floors at y 64 and 100; the rest is
+/// drawn black).
+const NETHER_GROUND_SHARE: f32 = 0.38;
 
 const fn fill_i32(table: &mut [i32; LIMIT], ids: &[usize], value: i32) {
     let mut i = 0;
@@ -261,14 +282,33 @@ pub fn apply_surface(
     }
 }
 
-/// End terrain: density heights decide both the island outline and its
-/// colour. `heights` is the `(size+2)^2` halo grid; 0 means void. A missing
-/// or wrong-sized grid leaves the tile flat.
+/// The slope level of a seed sample from its height and its north and
+/// north-west neighbours' at `step` blocks apart: the explored map's levels
+/// for single blocks, their blend for coarser samples.
+fn terrain_level(h: f32, north: f32, north_west: f32, step: i32) -> f32 {
+    if step <= 1 {
+        let block = |v: f32| v.floor().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+        crate::color::slope_level(
+            crate::config::Slopes::Smooth,
+            block(h),
+            Some(block(north)),
+            Some(block(north_west)),
+        ) as f32
+    } else {
+        let s = step as f32;
+        crate::color::slope_light((north - north_west) / s, (h - north) / s)
+    }
+}
+
+/// End terrain as the explored map draws it: end stone in the End's light,
+/// lit from the north, a little darker below y 63, void between. `heights`
+/// is the `(size+2)^2` halo grid; 0 means void, and void neighbours count as
+/// level ground. A missing or wrong-sized grid leaves the tile flat.
 pub fn apply_end(
     argb: &mut [u32],
     ids: &[i32],
-    origin_x: i32,
-    origin_z: i32,
+    _origin_x: i32,
+    _origin_z: i32,
     step: i32,
     size: usize,
     heights: &[f32],
@@ -290,34 +330,50 @@ pub fn apply_end(
                 argb[i] = alpha | END_VOID;
                 continue;
             }
-            // Void has no surface height: do not turn the drop to zero into a rim.
-            let mut nw = heights[z * hw + x];
-            let mut se = heights[(z + 2) * hw + x + 2];
-            if !nw.is_finite() || nw <= 0.0 {
-                nw = h;
-            }
-            if !se.is_finite() || se <= 0.0 {
-                se = h;
-            }
-            let slope = (se - nw) / (2.0 * step as f32);
-            let mut delta = round(fmax(-40.0, fmin(40.0, slope * 120.0)));
-            delta += end_grain(origin_x, origin_z, step, x, z);
-            argb[i] = shade(alpha | END_STONE, delta);
+            let ground = |v: f32, or: f32| if v.is_finite() && v > 0.0 { v } else { or };
+            let north = ground(heights[z * hw + x + 1], h);
+            let north_west = ground(heights[z * hw + x], north);
+            let level = terrain_level(h, north, north_west, step);
+            argb[i] = alpha
+                | crate::color::lit(
+                    END_STONE_TEXTURE,
+                    crate::color::END_LIGHT,
+                    level,
+                    crate::color::depth_factor(h.clamp(-4096.0, 4096.0) as i16),
+                );
         }
     }
 }
 
-fn end_grain(origin_x: i32, origin_z: i32, step: i32, x: usize, z: usize) -> i32 {
-    (hash(
-        (origin_x / step).wrapping_add(x as i32),
-        (origin_z / step).wrapping_add(z as i32),
-        0x5EED5,
-    ) % 7) as i32
-        - 3
+/// The share of island ground an End biome sample stands for (the main
+/// island inside the central biome, whose rest is void); `None` for biomes
+/// that are not the End's.
+fn end_land(id: i32, bx: i64, bz: i64) -> Option<f32> {
+    Some(match id {
+        biomes::END_HIGHLANDS => END_LAND_HIGHLANDS,
+        biomes::END_MIDLANDS => END_LAND_MIDLANDS,
+        biomes::END_BARRENS => END_LAND_BARRENS,
+        biomes::SMALL_END_ISLANDS => END_LAND_SMALL_ISLANDS,
+        biomes::THE_END => {
+            if bx * bx + bz * bz < MAIN_ISLAND_RADIUS_SQUARED {
+                1.0
+            } else {
+                0.0
+            }
+        }
+        _ => return None,
+    })
 }
 
-/// End look without density heights: distant views, and the moment before
-/// the heights arrive.
+/// `a` and `b` mixed, `t` of `b`.
+fn mix_rgb(a: u32, b: u32, t: f32) -> u32 {
+    crate::color::blend(a & 0x00FF_FFFF, b & 0x00FF_FFFF, t)
+}
+
+/// End look without heights: distant views and the moment before the
+/// heights arrive. Each sample mixes island ground and void by the share of
+/// ground its biome holds, so far views show the islands' density instead
+/// of a speckle and match the refined tiles' brightness.
 pub fn apply_end_preview(
     argb: &mut [u32],
     ids: &[i32],
@@ -326,74 +382,152 @@ pub fn apply_end_preview(
     step: i32,
     size: usize,
 ) {
-    let n = size * size;
-    if size == 0 || step <= 0 || argb.len() < n || ids.len() < n {
-        return;
-    }
-    let centre = (step / 2) as i64;
-    for z in 0..size {
-        for x in 0..size {
-            let i = z * size + x;
-            let id = id_of(ids[i]) as i32;
-            let alpha = argb[i] & 0xFF00_0000;
-            let grain = end_grain(origin_x, origin_z, step, x, z);
-            let bx = origin_x as i64 + x as i64 * step as i64 + centre;
-            let bz = origin_z as i64 + z as i64 * step as i64 + centre;
-            argb[i] = match id {
-                biomes::END_HIGHLANDS => shade(alpha | END_STONE, grain - 4),
-                biomes::END_MIDLANDS => shade(alpha | END_STONE, grain - 16),
-                // The main island sits inside the central the_end biome.
-                biomes::THE_END => {
-                    if bx * bx + bz * bz < MAIN_ISLAND_RADIUS_SQUARED {
-                        shade(alpha | END_STONE, grain - 4)
-                    } else {
-                        alpha | END_VOID
-                    }
-                }
-                biomes::SMALL_END_ISLANDS | biomes::END_BARRENS => alpha | END_VOID,
-                _ => argb[i],
-            };
-        }
-    }
+    apply_end_preview_fine(argb, ids, ids, 1, origin_x, origin_z, step, size);
 }
 
-/// Nether cave-mode surface: `heights` is the predicted floor at the map
-/// layer (`(size+2)^2` halo grid). Columns below the lava sea (y 31) become
-/// lava, other ground is shaded by slope with the north-west light.
-pub fn apply_nether(
+/// [`apply_end_preview`] averaged over `fine`: `factor`^2 biome samples per
+/// pixel (`(size * factor)^2`, `step / factor` blocks apart).
+#[allow(clippy::too_many_arguments)]
+pub fn apply_end_preview_fine(
     argb: &mut [u32],
     ids: &[i32],
+    fine: &[i32],
+    factor: usize,
     origin_x: i32,
     origin_z: i32,
     step: i32,
     size: usize,
+) {
+    let n = size * size;
+    let factor = factor.max(1);
+    let side = size * factor;
+    if size == 0 || step <= 0 || argb.len() < n || ids.len() < n || fine.len() < side * side {
+        return;
+    }
+    let sub = (step as i64 / factor as i64).max(1);
+    for z in 0..size {
+        for x in 0..size {
+            let i = z * size + x;
+            let alpha = argb[i] & 0xFF00_0000;
+            let mut land = 0.0;
+            let mut known = 0;
+            for fz in 0..factor {
+                for fx in 0..factor {
+                    let (sx, sz) = (x * factor + fx, z * factor + fz);
+                    let bx = origin_x as i64 + sx as i64 * sub + sub / 2;
+                    let bz = origin_z as i64 + sz as i64 * sub + sub / 2;
+                    if let Some(l) = end_land(fine[sz * side + sx], bx, bz) {
+                        land += l;
+                        known += 1;
+                    }
+                }
+            }
+            if known == 0 {
+                continue;
+            }
+            argb[i] = alpha | mix_rgb(END_VOID, END_LAND_MEAN, land / known as f32);
+        }
+    }
+}
+
+/// The ground colour of a Nether biome: its surface block's texture mean.
+fn nether_ground(id: i32) -> Option<u32> {
+    Some(match id {
+        biomes::NETHER_WASTES => 0x622626,
+        biomes::SOUL_SAND_VALLEY => 0x513E33,
+        biomes::CRIMSON_FOREST => 0x831F1F,
+        biomes::WARPED_FOREST => 0x2B7265,
+        biomes::BASALT_DELTAS => 0x515156,
+        _ => return None,
+    })
+}
+
+/// The light on predicted Nether ground: the explored map's unlit cave
+/// light, raised to the mean brightness of explored Nether floors on the
+/// reference map (lava, fire and glowstone light much of them; the seed
+/// cannot know where).
+const NETHER_SEED_LIGHT: [f32; 3] = [0.46, 0.33, 0.32];
+
+/// Nether ground in the cave-mode light: dark, brighter toward the layer.
+fn nether_lit(base: u32, level: f32, below_layer: f32) -> u32 {
+    let near = 1.0 - (below_layer / CAVE_DEPTH as f32).clamp(0.0, 1.0);
+    crate::color::lit(base, NETHER_SEED_LIGHT, 0.5 * level, 1.0 + 0.5 * near)
+}
+
+/// The Nether as the explored map's cave mode at `layer` shows it: the floor
+/// below the open space within [`CAVE_DEPTH`] blocks of the layer, unlit and
+/// dark; deeper floors and solid rock black; the lava sea glowing where it
+/// lies within reach. `heights` is the floor grid with the one-sample halo
+/// (`(size+2)^2`, see `sax_nether_floor_area_sampled`).
+#[allow(clippy::too_many_arguments)]
+pub fn apply_nether(
+    argb: &mut [u32],
+    ids: &[i32],
+    _origin_x: i32,
+    _origin_z: i32,
+    step: i32,
+    size: usize,
     heights: &[f32],
+    layer: i32,
 ) {
     let hw = size + 2;
     let n = size * size;
     if step <= 0 || heights.len() != hw * hw || argb.len() < n || ids.len() < n {
         return;
     }
+    let bottom = layer - CAVE_DEPTH;
     for z in 0..size {
         for x in 0..size {
             let i = z * size + x;
-            if id_of(ids[i]) >= LIMIT {
+            let Some(base) = nether_ground(ids[i]) else {
                 continue;
-            }
+            };
+            let alpha = argb[i] & 0xFF00_0000;
             let h = heights[(z + 1) * hw + x + 1];
-            let grain = (hash(
-                (origin_x / step).wrapping_add(x as i32),
-                (origin_z / step).wrapping_add(z as i32),
-                0x4E7B,
-            ) % 5) as i32
-                - 2;
-            if h < 31.0 {
-                argb[i] = shade((argb[i] & 0xFF00_0000) | NETHER_LAVA, grain * 2);
-                continue;
-            }
-            let slope = (heights[(z + 2) * hw + x + 2] - heights[z * hw + x]) / (2.0 * step as f32);
-            let delta = round(fmax(-45.0, fmin(45.0, slope * 60.0)));
-            argb[i] = shade(argb[i], delta + grain - 10);
+            let floor = h.floor() as i32;
+            argb[i] = alpha
+                | if !h.is_finite() || floor <= 0 {
+                    0
+                } else if floor < LAVA_SEA {
+                    if LAVA_SEA >= bottom {
+                        crate::color::lit(LAVA_TEXTURE, crate::color::DAY_LIGHT, 0.0, 1.0)
+                    } else {
+                        0
+                    }
+                } else if floor < bottom {
+                    0
+                } else {
+                    let near = |v: f32, or: f32| {
+                        if v.is_finite() && v >= bottom as f32 {
+                            v
+                        } else {
+                            or
+                        }
+                    };
+                    let north = near(heights[z * hw + x + 1], h);
+                    let north_west = near(heights[z * hw + x], north);
+                    nether_lit(
+                        base,
+                        terrain_level(h, north, north_west, step),
+                        (layer - floor) as f32,
+                    )
+                };
+        }
+    }
+}
+
+/// The Nether without floors (far views and before they arrive): its
+/// ground and black mixed by the share of floor within reach, so the
+/// previews match the refined tiles' darkness.
+pub fn apply_nether_preview(argb: &mut [u32], ids: &[i32], size: usize) {
+    let n = size * size;
+    if argb.len() < n || ids.len() < n {
+        return;
+    }
+    for i in 0..n {
+        if let Some(base) = nether_ground(ids[i]) {
+            let ground = nether_lit(base, 0.0, CAVE_DEPTH as f32 / 2.0);
+            argb[i] = (argb[i] & 0xFF00_0000) | mix_rgb(0, ground, NETHER_GROUND_SHARE);
         }
     }
 }
@@ -1118,6 +1252,12 @@ pub struct TileInput<'a> {
     pub surface: Option<&'a SurfaceGrid>,
     /// Highlight mask ([`highlight_mask`]); empty when off.
     pub highlight: &'a [bool],
+    /// The Y the tile's biomes (and Nether floors) are taken at: the cave
+    /// layer of the Nether.
+    pub layer_y: i32,
+    /// Finer biome ids for the End's coarse preview: `(ids, factor)` with
+    /// `factor`^2 samples per pixel.
+    pub fine_ids: Option<(&'a [i32], usize)>,
 }
 
 impl std::fmt::Debug for TileInput<'_> {
@@ -1204,19 +1344,21 @@ pub fn style_tile(input: &TileInput) -> Vec<u32> {
     } else if input.dimension == Dimension::Overworld {
         let colors = preview_colors(input, heights);
         apply_preview(&mut pixels, ids, step, size, heights, &colors);
-    } else if input.dimension == Dimension::Nether
-        && heights.is_none()
-        && !input.refining
-        && needs_surface_refinement(Dimension::Nether, true, false, step)
-    {
-        // Flat preview; the refinement pass adds the cave floor.
-    } else if input.dimension == Dimension::End {
+    } else if input.dimension == Dimension::Nether {
+        // The cave floor where the refinement computed it, else its mean
+        // look (far views, and before the floors arrive).
         match heights {
-            None => apply_end_preview(&mut pixels, ids, ox, oz, step, size),
-            Some(h) => apply_end(&mut pixels, ids, ox, oz, step, size, h),
+            Some(h) => apply_nether(&mut pixels, ids, ox, oz, step, size, h, input.layer_y),
+            None => apply_nether_preview(&mut pixels, ids, size),
         }
-    } else if let (Dimension::Nether, Some(h), true) = (input.dimension, heights, step < 64) {
-        apply_nether(&mut pixels, ids, ox, oz, step, size, h);
+    } else if input.dimension == Dimension::End {
+        match (heights, input.fine_ids) {
+            (Some(h), _) => apply_end(&mut pixels, ids, ox, oz, step, size, h),
+            (None, Some((fine, factor))) => {
+                apply_end_preview_fine(&mut pixels, ids, fine, factor, ox, oz, step, size)
+            }
+            (None, None) => apply_end_preview(&mut pixels, ids, ox, oz, step, size),
+        }
     } else if step < 64 {
         apply(&mut pixels, ids, ox, oz, step, size, input.seed, heights);
     }
@@ -1375,14 +1517,19 @@ mod tests {
     fn end_has_void_and_stone() {
         let size = 3;
         let ids = [biomes::END_HIGHLANDS; 9];
-        let mut heights = flat_heights(size, 60.0);
+        let mut heights = flat_heights(size, 70.0);
         let hw = size + 2;
         heights[hw + 1] = 0.0; // sample [0,0] is void
         let mut px = [0xFF12_3456_u32; 9];
         apply_end(&mut px, &ids, 0, 0, 1, size, &heights);
         assert_eq!(px[0], 0xFF00_0000 | END_VOID);
-        let (r, g, b) = rgb(px[4]);
-        assert!(r > 150 && g > 150 && b > 80 && r >= b, "stone: {r} {g} {b}");
+        // Flat end stone as the explored map draws it: (255, 255, 185).
+        assert_eq!(px[4], 0xFFFF_FFB9);
+        assert_eq!(px[1], 0xFFFF_FFB9, "void neighbours count as level ground");
+        // Below y 63 a little darker.
+        let mut low = [0u32; 9];
+        apply_end(&mut low, &ids, 0, 0, 1, size, &flat_heights(size, 50.0));
+        assert!(sum(low[4]) < sum(px[4]));
         // A wrong-sized grid leaves the tile untouched.
         let mut flat = [0xFF12_3456_u32; 9];
         apply_end(&mut flat, &ids, 0, 0, 1, size, &[1.0; 3]);
@@ -1390,48 +1537,135 @@ mod tests {
     }
 
     #[test]
-    fn end_preview_matches_the_refined_palette() {
-        // The main island sits around the origin inside the_end.
-        let mut px = [0xFFAB_CDEF_u32; 4];
-        apply_end_preview(&mut px, &[biomes::THE_END; 4], 0, 0, 1, 2);
-        assert!(
-            px.iter()
-                .all(|&p| p != 0xFF00_0000 | END_VOID && sum(p) > 300)
+    fn end_slopes_like_the_explored_map() {
+        // A terrace falling one block to the south: the row below the step
+        // lies in shadow, the rest stays flat; no bright rims.
+        let size = 3;
+        let hw = size + 2;
+        let mut heights = flat_heights(size, 70.0);
+        for x in 0..hw {
+            for z in 2..hw {
+                heights[z * hw + x] = 69.0;
+            }
+        }
+        let ids = [biomes::END_HIGHLANDS; 9];
+        let mut px = [0xFF00_0000u32; 9];
+        apply_end(&mut px, &ids, 0, 0, 1, size, &heights);
+        let flat = 0xFFFF_FFB9;
+        assert_eq!(px[0], flat);
+        assert_eq!(
+            px[3],
+            crate::color::lit(END_STONE_TEXTURE, crate::color::END_LIGHT, -8.0, 1.0) | 0xFF00_0000
         );
-        let mut far = [0xFFAB_CDEF_u32; 4];
-        apply_end_preview(&mut far, &[biomes::THE_END; 4], 4000, 4000, 1, 2);
-        assert_eq!(far, [0xFF00_0000 | END_VOID; 4]);
-        let mut barrens = [0xFFAB_CDEF_u32; 1];
-        apply_end_preview(&mut barrens, &[biomes::END_BARRENS], 0, 0, 1, 1);
-        assert_eq!(barrens[0], 0xFF00_0000 | END_VOID);
-        let mut other = [0xFFAB_CDEF_u32; 1];
-        apply_end_preview(&mut other, &[PLAINS], 0, 0, 1, 1);
-        assert_eq!(other[0], 0xFFAB_CDEF);
+        assert_eq!(px[6], flat);
+        assert!(px.iter().all(|&p| sum(p) <= sum(flat)));
     }
 
     #[test]
-    fn nether_floor_is_lava_below_the_sea_and_shaded_above() {
+    fn end_preview_mixes_ground_and_void_by_biome() {
+        // The main island sits around the origin inside the_end.
+        let mut px = [0xFFAB_CDEF_u32; 4];
+        apply_end_preview(&mut px, &[biomes::THE_END; 4], 0, 0, 1, 2);
+        assert_eq!(px, [0xFF00_0000 | END_LAND_MEAN; 4]);
+        let mut far = [0xFFAB_CDEF_u32; 4];
+        apply_end_preview(&mut far, &[biomes::THE_END; 4], 4000, 4000, 1, 2);
+        assert_eq!(far, [0xFF00_0000 | END_VOID; 4]);
+        // Barrens hold some islands, small islands few.
+        let mut barrens = [0xFF00_0000u32; 1];
+        apply_end_preview(&mut barrens, &[biomes::END_BARRENS], 0, 0, 1, 1);
+        let mut small = [0xFF00_0000u32; 1];
+        apply_end_preview(&mut small, &[biomes::SMALL_END_ISLANDS], 0, 0, 1, 1);
+        assert!(sum(small[0]) < sum(barrens[0]) && sum(barrens[0]) < sum(END_LAND_MEAN));
+        let mut other = [0xFFAB_CDEF_u32; 1];
+        apply_end_preview(&mut other, &[PLAINS], 0, 0, 1, 1);
+        assert_eq!(other[0], 0xFFAB_CDEF);
+        // Finer samples average: half highlands, half small islands.
+        let fine = [
+            biomes::END_HIGHLANDS,
+            biomes::SMALL_END_ISLANDS,
+            biomes::SMALL_END_ISLANDS,
+            biomes::END_HIGHLANDS,
+        ];
+        let mut avg = [0xFF00_0000u32; 1];
+        apply_end_preview_fine(
+            &mut avg,
+            &[biomes::END_HIGHLANDS],
+            &fine,
+            2,
+            2000,
+            2000,
+            32,
+            1,
+        );
+        let want = mix_rgb(
+            END_VOID,
+            END_LAND_MEAN,
+            (END_LAND_HIGHLANDS + END_LAND_SMALL_ISLANDS) / 2.0,
+        );
+        assert_eq!(avg[0] & 0xFF_FFFF, want);
+    }
+
+    #[test]
+    fn nether_like_the_explored_cave_map() {
         let size = 2;
         let ids = [biomes::NETHER_WASTES; 4];
-        let mut low = [0xFF72_2D2D_u32; 4];
-        apply_nether(&mut low, &ids, 0, 0, 1, size, &flat_heights(size, 20.0));
-        let (r, g, b) = rgb(low[0]);
-        assert!(r > 150 && r > g && g > b, "lava: {r} {g} {b}");
+        // Layer 64: floors from 34 up are drawn, dark; deeper ones black.
         let mut ground = [0xFF72_2D2D_u32; 4];
-        apply_nether(&mut ground, &ids, 0, 0, 1, size, &flat_heights(size, 70.0));
-        // Flat ground is the biome colour dimmed by about 10 per cent.
-        assert!(sum(ground[0]) < sum(0xFF72_2D2D));
-        assert!(sum(ground[0]) > sum(0xFF72_2D2D) * 7 / 10);
-        let hw = size + 2;
-        let mut rising = flat_heights(size, 70.0);
-        for z in 0..hw {
-            for x in 0..hw {
-                rising[z * hw + x] = 70.0 + (x + z) as f32 * 2.0;
-            }
-        }
-        let mut lit = [0xFF72_2D2D_u32; 4];
-        apply_nether(&mut lit, &ids, 0, 0, 1, size, &rising);
-        assert!(sum(lit[0]) > sum(ground[0]));
+        apply_nether(
+            &mut ground,
+            &ids,
+            0,
+            0,
+            1,
+            size,
+            &flat_heights(size, 50.0),
+            64,
+        );
+        let (r, g, b) = rgb(ground[0]);
+        assert!(
+            r > g && g.abs_diff(b) <= 2 && r < 80,
+            "dark netherrack: {r} {g} {b}"
+        );
+        let mut near = [0xFF00_0000u32; 4];
+        apply_nether(
+            &mut near,
+            &ids,
+            0,
+            0,
+            1,
+            size,
+            &flat_heights(size, 62.0),
+            64,
+        );
+        assert!(sum(near[0]) > sum(ground[0]), "brighter toward the layer");
+        let mut deep = [0xFF00_0000u32; 4];
+        apply_nether(
+            &mut deep,
+            &ids,
+            0,
+            0,
+            1,
+            size,
+            &flat_heights(size, 33.0),
+            64,
+        );
+        assert_eq!(deep[0], 0xFF00_0000, "out of reach");
+        let mut sea = [0xFF00_0000u32; 4];
+        apply_nether(&mut sea, &ids, 0, 0, 1, size, &flat_heights(size, 20.0), 64);
+        assert_eq!(sea[0], 0xFF00_0000, "the lava sea lies too deep below 64");
+        apply_nether(&mut sea, &ids, 0, 0, 1, size, &flat_heights(size, 20.0), 50);
+        let (r, g, b) = rgb(sea[0]);
+        assert!(
+            r > 200 && r > g && g > b,
+            "lava glows within reach: {r} {g} {b}"
+        );
+        let mut none = [0xFF00_0000u32; 4];
+        apply_nether(&mut none, &ids, 0, 0, 1, size, &flat_heights(size, 0.0), 64);
+        assert_eq!(none[0], 0xFF00_0000);
+        // The preview: as dark as the mix of ground and black.
+        let mut preview = [0xFF72_2D2D_u32; 4];
+        apply_nether_preview(&mut preview, &ids, size);
+        assert!(sum(preview[0]) < sum(ground[0]) && preview[0] != 0xFF00_0000);
     }
 
     #[test]
@@ -1568,6 +1802,8 @@ mod tests {
             heights,
             surface: None,
             highlight,
+            layer_y: 64,
+            fine_ids: None,
         }
     }
 
@@ -1630,13 +1866,16 @@ mod tests {
             &[],
         ));
         assert!(e.iter().all(|&p| p != 0xFF00_0000 | END_VOID));
-        // Nether: the first pass stays flat, the second adds the floor.
+        // Nether: the first pass shows the mean cave look, the second the
+        // floor.
         let n_ids = [biomes::NETHER_WASTES; 4];
         let n_argb = [biomes::color(biomes::NETHER_WASTES); 4];
         let mut first = input(&looks, Dimension::Nether, &n_ids, &n_argb, None, &[]);
         first.refining = false;
-        assert_eq!(style_tile(&first), n_argb.to_vec());
-        let low = flat_heights(2, 10.0);
+        let mut preview = n_argb;
+        apply_nether_preview(&mut preview, &n_ids, 2);
+        assert_eq!(style_tile(&first), preview.to_vec());
+        let low = flat_heights(2, 50.0);
         let n = style_tile(&input(
             &looks,
             Dimension::Nether,
