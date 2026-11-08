@@ -599,7 +599,7 @@ Seitdem steht `cc` (1.6.0) in Horizons Lockfile, und Bundle-Crates dürfen ein `
 
 **Entschieden:** Die Crate kompiliert die Engine und ihre C-Schnittstelle für die Mods (`seedatlas-sax`, jetzt im Seed-Atlas-Repo, auch von der Fabric-Version gebaut) per `build.rs` und `cc` (in Horizons Lockfile) und ruft sie über eine kleine FFI-Schicht auf (`src/ffi.rs`, das einzige `unsafe`). Die API der Karte (`Atlas`, `Hit`, Marker, Biome, Versionen) bleibt gleich.
 
-- Engine und Schnittstelle liegen als Kopie in `seedatlas/c/` (der Launcher baut nur das Bundle); `tools/vendor-seedatlas.sh` kopiert sie, CI prüft die Kopie gegen den Commit in `c/SEEDATLAS_COMMIT`.
+- Engine und Schnittstelle liegen als Kopie in `engine/data/seedatlas-c/` (der Launcher baut nur das Bundle, und eine `.hnmod` trägt außer Rust und TOML nur Dateien unter `data/`); `tools/vendor-seedatlas.sh` kopiert sie, CI prüft die Kopie gegen den Commit in `SEEDATLAS_COMMIT`. `tools/pack-hnmod.sh` packt das Bundle als `.hnmod`.
 - Gebaut wird mit den Flags der Engine (`-fwrapv -ffp-contract=off`), auf jeder Plattform gleich. Windows braucht einen GNU-Compiler: der Launcher bringt MinGW mit, die CI installiert es.
 - Die Fixtures schreibt jetzt die C-Schnittstelle selbst (`tools/seedatlas-fixtures/build.sh` gegen einen Seed-Atlas-Checkout); sie prüfen die FFI-Schicht und die Kopie.
 - Damit gelten Korrekturen und Beschleunigungen der Engine ohne Nacharbeit auch in Meridian.

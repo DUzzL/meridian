@@ -4,7 +4,7 @@
 # as well), with the engine's flags, then writes the fixtures for every
 # Minecraft version the ABI accepts. meridian-seedatlas compiles the same
 # sources (its c/ folder), so the parity test checks its FFI layer.
-#   SEEDATLAS_DIR  .../Seed-Atlas (a checkout; the commit of c/SEEDATLAS_COMMIT)
+#   SEEDATLAS_DIR  .../Seed-Atlas (a checkout; the commit of engine/data/seedatlas-c/SEEDATLAS_COMMIT)
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 root=${SEEDATLAS_DIR:?set SEEDATLAS_DIR}

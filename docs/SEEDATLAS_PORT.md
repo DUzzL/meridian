@@ -11,14 +11,16 @@ the same, bit for bit, for every Minecraft version (1.1 to 26.3). Until
 
 - https://github.com/DUzzL/Seed-Atlas: `seedatlas-engine/` (`*.c`, `*.h`,
   `tables/`) and `seedatlas-sax/` (`seedatlas_sax.c`, `.h`), at the commit in
-  `seedatlas/c/SEEDATLAS_COMMIT`.
-- The crate compiles a copy in `seedatlas/c/`, because the Horizon launcher
-  builds a mod's crates from the bundle alone. `tools/vendor-seedatlas.sh
+  `engine/data/seedatlas-c/SEEDATLAS_COMMIT`.
+- The crate compiles a copy in `engine/data/seedatlas-c/`, because the Horizon
+  launcher builds a mod's crates from the bundle alone, and a `.hnmod` carries
+  only Rust, TOML and files under a `data/` folder (`engine/data/` is one, a
+  crate's `seedatlas/data/` is not). `tools/vendor-seedatlas.sh
   <checkout>` makes the copy from a clean Seed Atlas checkout and records its
   commit; `tools/vendor-seedatlas.sh --check` (CI) compares the copy with that
-  commit on GitHub. Never edit `c/seedatlas-*` by hand: change Seed Atlas,
+  commit on GitHub. Never edit `seedatlas-c/seedatlas-*` by hand: change Seed Atlas,
   then copy again.
-- `seedatlas/c/shim.c` exports what the engine only offers as inline
+- `engine/data/seedatlas-c/shim.c` exports what the engine only offers as inline
   functions (`isSlimeChunk`).
 
 ## Building

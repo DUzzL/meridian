@@ -57,3 +57,9 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y libasound2-dev libudev-dev libxkbcommon-dev libwayland-dev
       - run: rustup toolchain install 1.95.0 --profile minimal && rustup default 1.95.0
       - run: tools/check-adapter.sh
+      - name: Pack the .hnmod
+        run: tools/pack-hnmod.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: meridian-hnmod
+          path: target/meridian-*.hnmod
