@@ -521,7 +521,7 @@ Das Audit vom 2026-11-07 (Commit `92c0fd5`) fand 42 Punkte (AUD-001 bis AUD-042)
   - Stammt sie von einem neueren Meridian oder bleibt sie nach drei Versuchen unlesbar: Sie bleibt unberührt, und der Speicher wird in dieser Sitzung nie geschrieben. Regionen werden dann trotzdem angezeigt.
 - **Beenden (AUD-023):** Beenden und Trennen warten bis zu 5 s auf offene Speicher-Jobs (`flush_and_wait`).
 - **Reihenfolge (AUD-037):** Laden wartet auf frühere Speicher-Jobs derselben Datei. Temporäre Dateien heißen nach Prozess und Zähler; der Ordner wird unter Unix mit `fsync` gesichert.
-- **Zweites Spiel (WM-20):** Eine Sperrdatei `meridian.lock` mit Betriebssystem-Sperre; ein zweites Spiel speichert keine Regionen und zeigt einen Hinweis. Wegpunkte, Seeds und Einstellungen sind davon nicht erfasst.
+- **Zweites Spiel (WM-20):** Eine Sperrdatei `meridian.lock` mit Betriebssystem-Sperre; ein zweites Spiel speichert keine Regionen und zeigt einen Hinweis. Wegpunkte, Seeds und Einstellungen sind davon nicht erfasst. *(Erweitert in D-040: alle Ablagen.)*
 - **Kartennamen** werden ohne Groß-/Kleinschreibung verglichen. Umbenennen nimmt Seeds, erledigte Strukturen und Spielversionen mit, wartet vorher auf laufende Speicher-Jobs und wird abgelehnt, wenn die Kartenliste des Servers nicht lesbar war.
 
 **Weltkarte und Engine**
@@ -529,7 +529,7 @@ Das Audit vom 2026-11-07 (Commit `92c0fd5`) fand 42 Punkte (AUD-001 bis AUD-042)
 - **Speicherbudget (AUD-009):** Neben `max_loaded_regions` gilt `world_map.max_region_mib` (Standard 512 MiB). Weit herausgezoomt werden alle Regionen außerhalb der 5 × 5 um die Kartenmitte und der 3 × 3 um den Spieler zu Übersichtsbildern. D-027 stimmt damit. GPU-Texturen werden beim Trennen und beim Kartenwechsel verworfen.
 - **Höhlenebenen (AUD-012):** Chunk-Antworten tragen ihren Lesemodus; Antworten für eine andere Ebene werden verworfen. Die Bridge führt Anfragen nach Position und Modus (Version 11).
 - **Revisionen (AUD-013)** kommen aus einem prozessweiten Zähler; der Texturschlüssel enthält den Kartennamen.
-- **Spawn auf Servern (AUD-022):** Horizon meldet nicht, wann ein Server einen neuen Spawn angekündigt hat. Nach dem Laden einer Ebene gilt ein Spawn erst, wenn ein anderer gemeldet wird oder 5 s vergangen sind (`SPAWN_GRACE`). Bis dahin liest die Engine weiter, speichert aber nichts. Fällt die Wahl auf eine andere Karte, wird das Gelesene verworfen und neu gelesen. Ein Wechsel der Höhlenebene wartet so lange, damit das Gelesene nicht verloren geht. Wechselt die Ebene (Portal) oder endet das Spiel in diesen 5 s, gehen höchstens diese Sekunden Kartierung verloren.
+- **Spawn auf Servern (AUD-022):** Horizon meldet nicht, wann ein Server einen neuen Spawn angekündigt hat. Nach dem Laden einer Ebene gilt ein Spawn erst, wenn ein anderer gemeldet wird oder 5 s vergangen sind (`SPAWN_GRACE`). Bis dahin liest die Engine weiter, speichert aber nichts. Fällt die Wahl auf eine andere Karte, wird das Gelesene verworfen und neu gelesen. Ein Wechsel der Höhlenebene wartet so lange, damit das Gelesene nicht verloren geht. Wechselt die Ebene (Portal) oder endet das Spiel in diesen 5 s, gehen höchstens diese Sekunden Kartierung verloren. *(Ersetzt in D-040: Spawnpaket statt Zeitfenster.)*
 - **Zeit statt Frames (AUD-038):** Das Anfrage-Timeout sind 10 s, `chunk_reads_per_tick` gilt pro 50 ms Wanduhrzeit (nicht Spielzeit, die unter `/tick freeze` steht). Standard jetzt 64 (rund 1280 Chunks/s); vorher waren es 16 pro Frame. `frame_budget_us` und das 1,5-ms-Budget der Bridge bleiben bewusst pro Frame.
 - **Threads (AUD-039):** Kartenworker, Nächste-Suche und PNG-Export laufen mit niedriger Priorität. Die Ansicht einer anderen Dimension hat höchstens 2 Worker und wird auf einem eigenen Thread abgebaut.
 
@@ -538,7 +538,7 @@ Das Audit vom 2026-11-07 (Commit `92c0fd5`) fand 42 Punkte (AUD-001 bis AUD-042)
 - **Minimap-Bild (AUD-006):** Die Textur läuft ringförmig um und bewegt sich in Zellen zu 32 × 32 Texeln. Beim Gehen werden nur hereinrollende Zellen zusammengesetzt und als Teilrechtecke hochgeladen, bei neu gezeichneten Regionen nur deren Zellen. Herausgezoomt deckt ein Texel 2 bis 16 Blöcke (etwa ein physischer Pixel). Schleimchunks werden pro Chunk geprüft. Gemessen (Release, vergrößerte Minimap): ~1 µs pro Frame beim Gehen statt 3,4 ms plus 9 MB Upload je Blockschritt. Der anschließende Spieltest hielt bei schneller Bewegung das 120-fps-Limit; Bedingungen und Messwerte stehen in [AUDIT_VALIDATION.md](AUDIT_VALIDATION.md).
 - **Radar (AUD-016):** Filtern, auf die Karte beschränken, nach Entfernung sortieren, kappen, dann nach Zeichenreihenfolge sortieren. Über dem Limit bleiben also die nächsten Entities. Minimap und Weltkarte teilen den Filter (Höhenlimit, Ausblendung, Limit, Reihenfolge, Punktgröße).
 - **Glatte Entity-Punkte (AUD-010):** Die Bridge liefert neben der interpolierten auch die Tick-Position; „Smooth Entity Dots“ aus zeigt die Tick-Position.
-- **Biom-Übergänge (AUD-010):** „Biome Blending“ mittelt Gras-, Laub- und Wasserfarben über ein 5 × 5-Fenster, aber nur innerhalb eines Chunks, weil ein Chunk-Abzug seine Nachbarn nicht kennt. Grenzen auf einer Chunkkante bleiben hart. Umschalten liest geladene Chunks neu.
+- **Biom-Übergänge (AUD-010):** „Biome Blending“ mittelt Gras-, Laub- und Wasserfarben über ein 5 × 5-Fenster, aber nur innerhalb eines Chunks, weil ein Chunk-Abzug seine Nachbarn nicht kennt. Grenzen auf einer Chunkkante bleiben hart. Umschalten liest geladene Chunks neu. *(Ersetzt in D-040: über Chunkgrenzen.)*
 - **Höhlentiefe** wirkt: Boden tiefer als Ebene − Tiefe bleibt unerkundet.
 - **Entfernte Felder:** `minimap.frame`, `share_world_map_tiles`, `minimap.terrain` und `world_map.cave` taten nichts und sind entfernt; alte Dateien laden weiter. „Lighting“ unter Gelände gilt für beide Karten; die doppelte Zeile „Map Lighting“ entfällt.
 - **Lesbare Höhlenkarten (AUD-027):** Standard jetzt aus, wie O2. Bereits gespeicherte Dateien enthalten den Wert und behalten ihn.
@@ -584,12 +584,30 @@ Das Audit vom 2026-11-07 (Commit `92c0fd5`) fand 42 Punkte (AUD-001 bis AUD-042)
 - Ein von Hand eingegebener Seed hat im Einzelspieler Vorrang vor dem erkannten (die Fabric-Version setzt bei jedem Laden den erkannten wieder ein). So lässt sich ein anderer Seed über eine Welt legen.
 - Automatische Seed-Atlas-Worker: `clamp(Kerne − 2, 1, 4)` in einem Pool, mit niedriger Priorität (Fabric: `clamp(Kerne − 2, 2, 8)` plus ein Strukturpool), wegen der Last aus D-034.
 
-**Nicht umgesetzt**
+**Nicht umgesetzt** *(die ersten drei Punkte sind seit D-040 umgesetzt)*
 
 - `/seedatlas` ohne Tab-Vervollständigung: Horizons `tab_complete` gilt nur serverseitig für LAN-Gäste.
 - Antworten von `/seedatlas` bleiben in einer Zeile der Aktionsleiste, weil Horizon keine lokale Chatzeile ausgeben kann.
 - Die maximale Wegpunkt-Entfernung wird nicht nach Dimension skaliert (O2 `waypoint_max_distance_dimension_scale`): Was die Option genau tut, lässt sich aus erlaubten Quellen nicht sicher ablesen, und beim Standard 0 wirkt sie nicht.
 - Offene O3-Beobachtungen (D-012, KEYBINDS „Offene Beobachtungen“) bleiben offen; sie brauchen die Referenz im Spiel.
+
+## D-040: Restpunkte nach der Audit-Prüfung
+
+Die Prüfung vom 2026-11-07 ([AUDIT_VALIDATION.md](AUDIT_VALIDATION.md)) ließ fünf Grenzen aus D-039 offen. Vier davon brauchten Horizon-Stellen, die die Bridge noch nicht nutzte. Bridge jetzt Version 12. Ablauf und Messwerte der Prüfung: AUDIT_VALIDATION.md, Abschnitt „Nachprüfung der Restpunkte“.
+
+- **`/seedatlas` im Chat:** Antworten gehen als Client-Chatzeilen (`ChatSource::Client`) in den eigenen Chat, wie Fabric-Rückmeldungen; nie an den Server. Fehler rot. Die Aktionsleiste wird dafür nicht mehr genutzt.
+- **Tab-Vervollständigung:** Eine neue Injektion (`client-command-tree`, `bridge/commands.rs`) ergänzt Horizons lokalen Befehlsbaum (`with_native_commands`) um die Unterbefehle von `/seedatlas`, `nether`/`end` und alle Versionsnamen. Ausgeführt wird weiter über den Mod-Hook. Horizons `tab_complete`-Hook gilt nur für LAN-Gäste und hilft hier nicht.
+- **Maximale Wegpunkt-Entfernung je Dimension:** Neue Option „Scale WP Distance to Dimension“ (`waypoints.max_distance_dimension_scale`, Standard an): Die Grenze wird durch den Koordinatenmaßstab der Dimension geteilt, im Nether also ein Achtel. Quelle ist der öffentliche Changelog des Referenz-Autors (Forum-Thread der Referenz, Seite 118); dass „skalieren“ Teilen durch den Maßstab heißt, ist Meridians Lesart. Bei 0 (Standard) wirkt die Option nicht.
+- **Biom-Blending über Chunkgrenzen:** Die Bridge liest zu jedem Chunk einen Rand von 2 Spalten aus geladenen Nachbarn (Biome auf der Höhe der nächsten eigenen Spalte), `ChunkSnapshot::biome_border` mit 20 × 20 Einträgen. Fehlt ein Nachbar, gilt die eigene Randspalte. Die Engine merkt sich pro Chunk die Biome seiner Kanten und welche Nachbarn beim Lesen geladen waren. Kommt ein Nachbar dazu, wird der Chunk nur neu gelesen, wenn auf einer der beiden Seiten mehr als ein Biom oder ein anderes Biom liegt. Blockänderungen lösen keine Nachbar-Lesungen aus, weil sie Biome nicht ändern. Erste Fassung (jeder Nachbar bei jedem Laden neu) kostete beim Erkunden etwa 0,3 ms pro Frame; die jetzige liegt im Rauschen.
+- **Sperre für alle Ablagen:** Daten- und Einstellungsordner werden vor dem ersten Laden gesperrt. Alle Schreibwege (`write_atomic`, Beiseitelegen kaputter Dateien, Kartenumbenennung, Wegpunkt-Export) prüfen die Sperre. Ist eine Sperre gar nicht zu bekommen, gilt sie als fremd (vorher: als eigene). TOML-Ablagen mit höherer `version` werden wie neuere Regionen nie geschrieben.
+- **Spawn auf Servern ohne Zeitfenster:** `SPAWN_GRACE` entfällt. Ein Spawn gilt nach dem Laden einer Ebene, sobald ein anderer gemeldet wird oder ein `SetDefaultSpawnPosition`-Paket ankommt (neuer Hook `client_packet`; er hört auch einen gleichen Spawn). Bis dahin gibt es kein Wegpunktbuch, Karten-Speichern ist angehalten, und ein Hinweis nennt „Manual maps“ für Server, die nie einen Spawn schicken. Ein Ebenenwechsel in eine andere Dimension startet die Wache nicht neu.
+- **Gehaltene Tasten:** Jeder Frame gleicht „Minimap vergrößern“ und „Gesichter“ mit Horizons physischem Tastenzustand ab, und Release-Ereignisse werden auch außerhalb des Spiels verarbeitet. So bleibt nichts hängen, wenn ein Screen das Loslassen verschluckt.
+
+**Weiter offen**
+
+- Die Beobachtungen an der Referenz (D-012, KEYBINDS „Offene Beobachtungen“) brauchen die Referenz im Spiel und sind nicht nachgeholt.
+- Horizons LAN-Host schickt Gästen bei `/setworldspawn` kein Spawnpaket und beim Beitritt nicht immer den aktuellen Spawn. Meridian folgt dem Paket, das ankommt; auf einem Vanilla-Server ist das nicht geprüft. Gemeldet: [horizon#12128](https://github.com/horizon-rust/horizon/issues/12128). **Behoben** in Horizon `170cfb4` (PR #12321); mit Pin `447e9d2` im Spiel geprüft (AUDIT_VALIDATION.md, „Nachtest mit Horizon-Fixes“).
+- Horizons Logger lässt nur Ziele mit `horizon…` durch; Meridians Logzeilen (z. B. eine fremde Sperre) erscheinen deshalb nicht im Log. Gemeldet: [horizon#12129](https://github.com/horizon-rust/horizon/issues/12129). **Behoben** in Horizon `f6dda11` (PR #12265); Meridians Zeilen stehen jetzt in `latest.log`.
 
 ## D-041: Die Seed-Atlas-Engine selbst statt eines Rust-Ports (2026-11-08)
 

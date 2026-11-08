@@ -335,6 +335,8 @@ pub struct WaypointSettings {
     pub delete_reached_deathpoints: bool,
     /// 0 means unlimited.
     pub max_distance: u32,
+    /// Scale the maximum to dimension coordinates (one eighth in the Nether).
+    pub max_distance_dimension_scale: bool,
     pub teleport_format: String,
     pub teleport_rotation_format: String,
     pub opacity_in_world: u8,
@@ -369,6 +371,7 @@ impl Default for WaypointSettings {
             keep_old_deathpoints: true,
             delete_reached_deathpoints: true,
             max_distance: 0,
+            max_distance_dimension_scale: true,
             teleport_format: "/tp @s {x} {y} {z}".into(),
             teleport_rotation_format: "/tp @s {x} {y} {z} {yaw} ~".into(),
             opacity_in_world: 80,
@@ -377,6 +380,21 @@ impl Default for WaypointSettings {
             beam: false,
             sort: WaypointSort::default(),
         }
+    }
+}
+
+impl WaypointSettings {
+    /// Draw range in this dimension's blocks; global waypoints bypass it.
+    pub fn draw_distance(&self, dimension: &str) -> f64 {
+        if self.max_distance == 0 {
+            return f64::INFINITY;
+        }
+        let scale = if self.max_distance_dimension_scale {
+            meridian_host::DimensionId::new(dimension).coordinate_scale()
+        } else {
+            1.0
+        };
+        f64::from(self.max_distance) / scale
     }
 }
 
@@ -737,6 +755,9 @@ impl ConfigStore {
     /// gives the defaults for this session and is never saved over.
     pub fn load(&self) -> ConfigFile {
         let (file, writable) = persist::load_or_set_aside(&self.path, "settings", |bytes| {
+            if let Some(v) = persist::toml_version(bytes).filter(|&v| v > 1) {
+                return Err(persist::LoadError::Newer(format!("version {v}")));
+            }
             std::str::from_utf8(bytes)
                 .map_err(|e| e.to_string())
                 .and_then(|t| toml::from_str::<ConfigFile>(t).map_err(|e| e.to_string()))
@@ -764,6 +785,21 @@ impl ConfigStore {
 mod tests {
     use super::*;
     use crate::persist::test_dir;
+
+    #[test]
+    fn waypoint_draw_range_uses_dimension_coordinates() {
+        let mut settings = WaypointSettings {
+            max_distance: 1000,
+            ..Default::default()
+        };
+        assert_eq!(settings.draw_distance("minecraft:overworld"), 1000.0);
+        assert_eq!(settings.draw_distance("minecraft:the_nether"), 125.0);
+        assert_eq!(settings.draw_distance("minecraft:the_end"), 1000.0);
+        settings.max_distance_dimension_scale = false;
+        assert_eq!(settings.draw_distance("minecraft:the_nether"), 1000.0);
+        settings.max_distance = 0;
+        assert!(settings.draw_distance("minecraft:the_nether").is_infinite());
+    }
 
     #[test]
     fn defaults_follow_reference_first_start() {

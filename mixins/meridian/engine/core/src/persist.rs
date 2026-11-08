@@ -53,6 +53,7 @@ impl PersistError {
 /// threads and processes never share one), flushed, then renamed; on Unix
 /// the folder is flushed too, so the rename survives a power cut.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), PersistError> {
+    require_writable(path)?;
     static WRITES: AtomicU64 = AtomicU64::new(0);
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(dir).map_err(|e| PersistError::io(dir, e))?;
@@ -155,6 +156,13 @@ pub fn load_or_set_aside<T>(
             );
             Loaded::ReadOnly
         }
+        Err(LoadError::Broken(reason)) if !path_writable(path) => {
+            log::warn!(
+                "meridian: {what} {} is broken ({reason}); another process owns it, left untouched",
+                path.display()
+            );
+            Loaded::ReadOnly
+        }
         Err(LoadError::Broken(reason)) => match set_aside(path) {
             Ok(aside) => {
                 log::warn!(
@@ -187,9 +195,16 @@ pub fn json_version(bytes: &[u8]) -> Option<u32> {
         .map(|v| v.version)
 }
 
+/// The top-level version of TOML stores, before decoding version-specific fields.
+pub fn toml_version(bytes: &[u8]) -> Option<u32> {
+    let value: toml::Value = toml::from_str(std::str::from_utf8(bytes).ok()?).ok()?;
+    value.get("version")?.as_integer()?.try_into().ok()
+}
+
 /// Renames a file to `<name>.broken.<unix time>` beside it (with a counter
 /// when that is taken); the new path.
 pub fn set_aside(path: &Path) -> std::io::Result<PathBuf> {
+    require_writable(path).map_err(std::io::Error::other)?;
     let name = path
         .file_name()
         .map_or_else(|| "file".into(), |n| n.to_string_lossy().into_owned());
@@ -278,17 +293,54 @@ impl FileOrder {
     }
 }
 
-/// Marks this process as the one that writes maps under `data_dir`, with a
+/// Per folder: whether it is this process's, and the locked file.
+type Claims = HashMap<PathBuf, (bool, Option<fs::File>)>;
+static CLAIMS: OnceLock<Mutex<Claims>> = OnceLock::new();
+
+/// Whether a registered data/config root containing this path is writable.
+/// All matching roots must be owned, including aliases through symlinks.
+pub fn path_writable(path: &Path) -> bool {
+    let path = resolved_path(path);
+    CLAIMS
+        .get_or_init(Default::default)
+        .lock()
+        .iter()
+        .all(|(root, (owned, _))| *owned || !path.starts_with(root))
+}
+
+fn resolved_path(path: &Path) -> PathBuf {
+    if let Ok(path) = path.canonicalize() {
+        return path;
+    }
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) if parent != path => resolved_path(parent).join(name),
+        _ => path.to_owned(),
+    }
+}
+
+/// Enforces ownership for non-atomic mutations too (map rename, exports).
+pub fn require_writable(path: &Path) -> Result<(), PersistError> {
+    if path_writable(path) {
+        return Ok(());
+    }
+    Err(PersistError::io(
+        path,
+        std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "another Meridian process owns this folder",
+        ),
+    ))
+}
+
+/// Marks this process as the one that writes under `data_dir`, with a
 /// lock on `meridian.lock` there that the system releases when the process
 /// ends (also after a crash). False when another process holds it (a second
 /// game on the same folder); asking again from this process gives the same
-/// answer.
+/// answer. A lock that cannot be taken at all counts as
+/// held elsewhere, so nothing is written.
 pub fn claim_data_dir(data_dir: &Path) -> bool {
-    /// Per folder: whether it is this process's, and the locked file.
-    type Claims = HashMap<PathBuf, (bool, Option<fs::File>)>;
-    static CLAIMS: OnceLock<Mutex<Claims>> = OnceLock::new();
     let mut claims = CLAIMS.get_or_init(Default::default).lock();
-    let (claimed, _) = claims.entry(data_dir.to_owned()).or_insert_with(|| {
+    let (claimed, _) = claims.entry(resolved_path(data_dir)).or_insert_with(|| {
         let path = data_dir.join("meridian.lock");
         let file = fs::create_dir_all(data_dir).and_then(|_| {
             fs::OpenOptions::new()
@@ -299,12 +351,17 @@ pub fn claim_data_dir(data_dir: &Path) -> bool {
         });
         match file.map(|f| (f.try_lock(), f)) {
             Ok((Ok(()), f)) => (true, Some(f)),
-            Ok((Err(fs::TryLockError::WouldBlock), _)) => (false, None),
-            // No lock to be had (a read-only folder, a file system without
-            // locks): nothing to coordinate with either.
+            Ok((Err(fs::TryLockError::WouldBlock), _)) => {
+                log::warn!(
+                    "meridian: {} is held by another game; nothing there is saved",
+                    path.display()
+                );
+                (false, None)
+            }
+            // Fail closed: an unavailable lock is not proof of exclusive ownership.
             Ok((Err(fs::TryLockError::Error(e)), _)) | Err(e) => {
                 log::warn!("meridian: cannot lock {}: {e}", path.display());
-                (true, None)
+                (false, None)
             }
         }
     });

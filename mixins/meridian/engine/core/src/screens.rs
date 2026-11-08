@@ -1581,6 +1581,11 @@ pub fn options() -> Vec<Opt> {
             waypoints.delete_reached_deathpoints
         ),
         toggle!("Waypoint Beam", Waypoints, waypoints.beam),
+        toggle!(
+            "Scale WP Distance to Dimension",
+            Waypoints,
+            waypoints.max_distance_dimension_scale
+        ),
         Opt {
             label: "Max WP Draw Distance",
             group: Waypoints,

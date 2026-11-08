@@ -8,7 +8,9 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+#[cfg(test)]
+use std::time::Duration;
+use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
@@ -53,6 +55,9 @@ impl ServerMaps {
     pub fn load(server_dir: &Path) -> Self {
         let path = server_dir.join(FILE);
         let (maps, writable) = persist::load_or_set_aside(&path, "map list", |bytes| {
+            if let Some(v) = persist::toml_version(bytes).filter(|&v| v > 1) {
+                return Err(persist::LoadError::Newer(format!("version {v}")));
+            }
             std::str::from_utf8(bytes)
                 .map_err(|e| e.to_string())
                 .and_then(|t| toml::from_str::<ServerMaps>(t).map_err(|e| e.to_string()))
@@ -179,11 +184,6 @@ impl ServerMaps {
     }
 }
 
-/// How long after a level loads its world spawn may still be the last
-/// level's: a server that announces the same spawn again (or none) is taken
-/// as it is after this.
-pub const SPAWN_GRACE: Duration = Duration::from_secs(5);
-
 /// The world spawn reported may still be the last level's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NotYet;
@@ -191,7 +191,8 @@ pub struct NotYet;
 /// Tells a world spawn the server announced for the level now loaded from
 /// one left over from the last level or server (the game keeps it across a
 /// server switch behind a proxy): after a level loads, a spawn counts once
-/// one other than the old is announced, or after [`SPAWN_GRACE`].
+/// a different spawn is observed or an explicit spawn packet arrives.
+/// Waiting alone never confirms a world identity.
 #[derive(Clone, Debug, Default)]
 pub struct SpawnWatch {
     /// The spawn reported when the level loaded, and when that was; `None`
@@ -205,17 +206,23 @@ impl SpawnWatch {
         self.stale = Some((reported, now));
     }
 
+    /// The client received a spawn packet for the loaded level. Identical
+    /// coordinates are fresh too; elapsed time is never evidence of identity.
+    pub fn announced(&mut self) {
+        self.stale = None;
+    }
+
     /// The spawn to choose the map by, given what the game reports now;
     /// [`NotYet`] while it may still be the last level's.
     pub fn spawn(
         &mut self,
         reported: Option<[i32; 3]>,
-        now: Instant,
+        _now: Instant,
     ) -> Result<Option<[i32; 3]>, NotYet> {
-        if let Some((stale, since)) = self.stale {
+        if let Some((stale, _since)) = self.stale {
             // None: not announced yet (a new connection starts without).
             let fresh = reported.is_some() && reported != stale;
-            if !fresh && now.duration_since(since) < SPAWN_GRACE {
+            if !fresh {
                 return Err(NotYet);
             }
             self.stale = None;
@@ -259,19 +266,23 @@ mod tests {
             w.spawn(Some([4, 5, 6]), t + Duration::from_secs(2)),
             Ok(Some([4, 5, 6]))
         );
-        // A server that announces the same spawn again, or none: taken after
-        // the grace time.
+        // Time is not a packet: even after a minute an unchanged spawn
+        // remains unconfirmed. The explicit packet also handles identical spawns.
         w.level_loaded(Some([9, 9, 9]), t);
         assert_eq!(
             w.spawn(Some([9, 9, 9]), t + Duration::from_secs(4)),
             Err(NotYet)
         );
         assert_eq!(
-            w.spawn(Some([9, 9, 9]), t + SPAWN_GRACE),
-            Ok(Some([9, 9, 9]))
+            w.spawn(Some([9, 9, 9]), t + Duration::from_secs(60)),
+            Err(NotYet)
         );
+        w.announced();
+        assert_eq!(w.spawn(Some([9, 9, 9]), t), Ok(Some([9, 9, 9])));
         w.level_loaded(None, t);
-        assert_eq!(w.spawn(None, t + SPAWN_GRACE), Ok(None));
+        assert_eq!(w.spawn(None, t + Duration::from_secs(60)), Err(NotYet));
+        w.announced();
+        assert_eq!(w.spawn(None, t), Ok(None));
     }
 
     #[test]

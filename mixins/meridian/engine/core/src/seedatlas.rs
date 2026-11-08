@@ -107,6 +107,9 @@ impl SeedBook {
     pub fn load(data_dir: &Path) -> Self {
         let path = data_dir.join("seeds.toml");
         let (file, writable) = persist::load_or_set_aside(&path, "seeds", |bytes| {
+            if let Some(v) = persist::toml_version(bytes).filter(|&v| v > 1) {
+                return Err(persist::LoadError::Newer(format!("version {v}")));
+            }
             std::str::from_utf8(bytes)
                 .map_err(|e| e.to_string())
                 .and_then(|t| toml::from_str::<SeedFile>(t).map_err(|e| e.to_string()))

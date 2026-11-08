@@ -238,27 +238,38 @@ const BLEND_RADIUS: usize = 2;
 
 /// Each column's biome tints averaged over the columns within
 /// [`BLEND_RADIUS`] of it, so tints change gradually at biome borders. Only
-/// the chunk's own columns count (a snapshot knows no neighbours), so a
-/// border on a chunk edge stays sharp. `None` when the chunk has one biome.
+/// available neighbouring columns count too, through the snapshot's halo.
+/// Hosts without a halo retain the local fallback. `None` for a uniform local snapshot.
 pub fn blend_biomes(chunk: &PreparedChunk) -> Option<Box<[BiomeAppearance; CHUNK_COLUMNS]>> {
     let cols = &chunk.snapshot.columns;
-    if cols.len() < CHUNK_COLUMNS || cols.iter().all(|c| c.biome == cols[0].biome) {
+    if cols.len() < CHUNK_COLUMNS
+        || (chunk.snapshot.biome_border.is_empty() && cols.iter().all(|c| c.biome == cols[0].biome))
+    {
         return None;
     }
     let no_biome = BiomeAppearance::default();
+    let border = &chunk.snapshot.biome_border;
+    let padded = border.len() == 20 * 20;
     let look = |x: usize, z: usize| {
-        chunk
-            .biomes
-            .get(cols[z * 16 + x].biome as usize)
-            .unwrap_or(&no_biome)
+        let id = if padded {
+            border[z * 20 + x]
+        } else {
+            cols[z * 16 + x].biome
+        };
+        chunk.biomes.get(id as usize).unwrap_or(&no_biome)
     };
     let mut out = Box::new([BiomeAppearance::default(); CHUNK_COLUMNS]);
     for z in 0..16usize {
         for x in 0..16usize {
             let mut sum = [[0u32; 3]; 4];
             let mut n = 0;
-            for nz in z.saturating_sub(BLEND_RADIUS)..=(z + BLEND_RADIUS).min(15) {
-                for nx in x.saturating_sub(BLEND_RADIUS)..=(x + BLEND_RADIUS).min(15) {
+            let (sx, sz, edge) = if padded {
+                (x + BLEND_RADIUS, z + BLEND_RADIUS, 19)
+            } else {
+                (x, z, 15)
+            };
+            for nz in sz.saturating_sub(BLEND_RADIUS)..=(sz + BLEND_RADIUS).min(edge) {
+                for nx in sx.saturating_sub(BLEND_RADIUS)..=(sx + BLEND_RADIUS).min(edge) {
                     let b = look(nx, nz);
                     for (s, c) in sum
                         .iter_mut()
@@ -395,7 +406,43 @@ pub(crate) mod tests {
             ],
             biomes: vec!["minecraft:plains".into()],
             columns: (0..256).map(|i| column(i % 16, i / 16)).collect(),
+            biome_border: Vec::new(),
         }
+    }
+
+    #[test]
+    fn biome_blending_crosses_chunk_boundaries() {
+        let host = FlatHost::default();
+        let mut left = flat_chunk(ChunkPos::new(0, 0));
+        left.biomes.push("other".into());
+        left.biome_border = (0..400).map(|i| u16::from(i % 20 >= 18)).collect();
+        let mut prepared = ColorTable::default().prepare(&host, left, false);
+        prepared.biomes = vec![
+            BiomeAppearance {
+                grass: 0,
+                ..Default::default()
+            },
+            BiomeAppearance {
+                grass: 0xFFFFFF,
+                ..Default::default()
+            },
+        ];
+        let blended = blend_biomes(&prepared).expect("a uniform chunk still blends its neighbour");
+        assert_eq!(blended[8 * 16 + 13].grass, 0);
+        assert_eq!(blended[8 * 16 + 14].grass, 0x333333);
+        assert_eq!(blended[8 * 16 + 15].grass, 0x666666);
+        let mut right = prepared.clone();
+        right.snapshot.biome_border = (0..400).map(|i| u16::from(i % 20 >= 2)).collect();
+        let blended = blend_biomes(&right).unwrap();
+        assert_eq!(blended[8 * 16].grass, 0x999999);
+        assert_eq!(blended[8 * 16 + 1].grass, 0xCCCCCC);
+        assert_eq!(blended[8 * 16 + 2].grass, 0xFFFFFF);
+        right.biome_blending = false;
+        // Switching blending off must not silently retain the averaged colours.
+        assert_ne!(
+            build_tile(&prepared).columns[8 * 16 + 15].accurate,
+            build_tile(&right).columns[8 * 16].accurate
+        );
     }
 
     #[test]

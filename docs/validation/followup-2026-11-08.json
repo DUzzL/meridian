@@ -1,0 +1,375 @@
+{
+  "date": "2026-11-08",
+  "horizon": "66f3981f522b24c250b21523a70080965b940424",
+  "builds": {
+    "checks": "native-66f3981-f25e342242b3",
+    "blend_optimisation_step": "native-66f3981-a86344a3637b",
+    "final": "native-66f3981-91d307a394a7"
+  },
+  "local_chat_status": {
+    "actionbar": null,
+    "chat": [],
+    "order": "newest first",
+    "styled": [
+      {
+        "text": "Performance: biome resolution Full Detail (1x), workers Auto, prefetch Near"
+      },
+      {
+        "text": "Structures: Off"
+      },
+      {
+        "text": "Minecraft version: Auto (26.3)"
+      },
+      {
+        "text": "World type: Normal"
+      },
+      {
+        "text": "Layer: On, opacity: 100%"
+      },
+      {
+        "text": "Seed: 12345 (input: 12345)"
+      },
+      {
+        "text": "Seed Atlas context: Followup2"
+      }
+    ],
+    "subtitle": null,
+    "title": null
+  },
+  "tab_completion": {
+    "/seedatlas ": {
+      "before": "/seedatlas ",
+      "after": "/seedatlas clear"
+    },
+    "/seedatlas cl": {
+      "before": "/seedatlas cl",
+      "after": "/seedatlas clear"
+    },
+    "/seedatlas dimension-seed n": {
+      "before": "/seedatlas dimension-seed n",
+      "after": "/seedatlas dimension-seed nether"
+    },
+    "/seedatlas version 1.20.": {
+      "before": "/seedatlas version 1.20.",
+      "after": "/seedatlas version 1.20.6"
+    },
+    "/seedatlas version 1.20.6 ": {
+      "before": "/seedatlas version 1.20.6 ",
+      "after": "/seedatlas version 1.20.6 "
+    }
+  },
+  "lan": {
+    "lan-1.json": {
+      "lan": {
+        "ok": true,
+        "port": 57904
+      },
+      "seen": [
+        "Meridian: waiting for this world's spawn; choose Manual maps if the server sends none"
+      ]
+    },
+    "lan-2.json": {
+      "spawn_change": [],
+      "reconnect": [
+        0.2317960262298584,
+        "LanWp"
+      ]
+    },
+    "lan-3.json": {
+      "to_new": [],
+      "list1": "Maps: default (shown: default)",
+      "back": [
+        "Added waypoint OnMap2"
+      ],
+      "list2": "Maps: default (shown: default)",
+      "wps": "OnMap2, LanWp"
+    },
+    "lan-4.json": {
+      "new": {
+        "book": [
+          0.25,
+          "OnMap2, LanWp"
+        ],
+        "maps": "Maps: default (shown: default)"
+      },
+      "old": {
+        "book": [
+          0.23,
+          "OnSecondMap, OnMap2, LanWp"
+        ],
+        "maps": "Maps: default (shown: default)"
+      },
+      "new2": {
+        "book": [
+          0.25,
+          "OnSecondMap, OnMap2, LanWp"
+        ],
+        "maps": "Maps: default (shown: default)"
+      }
+    },
+    "lan-5.json": {
+      "new": {
+        "notices": [
+          "Meridian: waiting for this world's spawn; choose Manual maps if the server sends none"
+        ],
+        "book": [
+          0.27,
+          "OnSecondMap, OnMap2, LanWp"
+        ],
+        "maps": "Maps: default (shown: default)"
+      },
+      "old": {
+        "notices": [
+          "Meridian: waiting for this world's spawn; choose Manual maps if the server sends none"
+        ],
+        "book": [
+          0.27,
+          "OnSecondMap2, OnSecondMap, OnMap2, LanWp"
+        ],
+        "maps": "Maps: default (shown: default)"
+      }
+    }
+  },
+  "fly_biome_blending": [
+    {
+      "mode": "on",
+      "world": "Blend1",
+      "frames": 2400,
+      "avg_fps": 120.00073056093566,
+      "p95_ms": 8.443375587463379,
+      "p99_ms": 8.46916675567627,
+      "max_ms": 8.64104175567627,
+      "low_1pct_fps": 117.80458888829632,
+      "cpu": {
+        "avg_ms": 1.1077779949456454,
+        "max_ms": 4.666750907897949,
+        "p50_ms": 0.9769570231437684,
+        "p95_ms": 2.2907490730285645,
+        "p99_ms": 3.039999008178711
+      }
+    },
+    {
+      "mode": "off",
+      "world": "Blend0",
+      "frames": 2400,
+      "avg_fps": 119.99440706095696,
+      "p95_ms": 8.448249816894531,
+      "p99_ms": 8.476874351501465,
+      "max_ms": 9.382291793823242,
+      "low_1pct_fps": 117.23184034020372,
+      "cpu": {
+        "avg_ms": 0.8138159760894875,
+        "max_ms": 4.1739583015441895,
+        "p50_ms": 0.5938339829444885,
+        "p95_ms": 2.0274150371551514,
+        "p99_ms": 2.7217910289764404
+      }
+    },
+    {
+      "mode": "on",
+      "world": "Blend2",
+      "frames": 2400,
+      "avg_fps": 119.9854867761304,
+      "p95_ms": 8.449125289916992,
+      "p99_ms": 8.475208282470703,
+      "max_ms": 10.01449966430664,
+      "low_1pct_fps": 116.39457875345992,
+      "cpu": {
+        "avg_ms": 1.172110469788313,
+        "max_ms": 5.480166912078857,
+        "p50_ms": 1.0593329668045044,
+        "p95_ms": 2.210916042327881,
+        "p99_ms": 2.874000072479248
+      }
+    },
+    {
+      "mode": "off",
+      "world": "Blend3",
+      "frames": 2399,
+      "avg_fps": 119.91262440304487,
+      "p95_ms": 8.452959060668945,
+      "p99_ms": 8.479832649230957,
+      "max_ms": 15.564083099365234,
+      "low_1pct_fps": 110.47557869901809,
+      "cpu": {
+        "avg_ms": 0.838959003896105,
+        "max_ms": 4.120041847229004,
+        "p50_ms": 0.6001670360565186,
+        "p95_ms": 2.2039599418640137,
+        "p99_ms": 2.792665958404541
+      }
+    },
+    {
+      "build": "a86344a3637b",
+      "mode": "on",
+      "world": "Blend4",
+      "frames": 2396,
+      "avg_fps": 119.7573985110946,
+      "p95_ms": 8.44041633605957,
+      "p99_ms": 8.469958305358887,
+      "max_ms": 17.087791442871094,
+      "low_1pct_fps": 99.00266684742142,
+      "cpu": {
+        "avg_ms": 1.0150687206032778,
+        "max_ms": 3.470417022705078,
+        "p50_ms": 0.9090399742126464,
+        "p95_ms": 2.0261240005493164,
+        "p99_ms": 2.599708080291748
+      }
+    },
+    {
+      "build": "a86344a3637b",
+      "mode": "off",
+      "world": "Blend5",
+      "frames": 2400,
+      "avg_fps": 119.95762373640648,
+      "p95_ms": 8.437292098999023,
+      "p99_ms": 8.464750289916992,
+      "max_ms": 13.750374794006348,
+      "low_1pct_fps": 114.09074120910772,
+      "cpu": {
+        "avg_ms": 0.7341340855819484,
+        "max_ms": 3.1914169788360596,
+        "p50_ms": 0.590499997138977,
+        "p95_ms": 1.7449159622192385,
+        "p99_ms": 2.2265830039978027
+      }
+    },
+    {
+      "build": "a86344a3637b",
+      "mode": "on",
+      "world": "Blend6",
+      "frames": 2395,
+      "avg_fps": 119.74872514823096,
+      "p95_ms": 8.451083183288574,
+      "p99_ms": 8.498666763305664,
+      "max_ms": 15.418083190917969,
+      "low_1pct_fps": 98.96412550922189,
+      "cpu": {
+        "avg_ms": 1.1148807566262984,
+        "max_ms": 4.519373893737793,
+        "p50_ms": 0.985334038734436,
+        "p95_ms": 2.2429161071777344,
+        "p99_ms": 3.000499963760376
+      }
+    },
+    {
+      "build": "a86344a3637b",
+      "mode": "off",
+      "world": "Blend7",
+      "frames": 2398,
+      "avg_fps": 119.85277170644623,
+      "p95_ms": 8.451624870300293,
+      "p99_ms": 8.489500045776367,
+      "max_ms": 15.691125869750977,
+      "low_1pct_fps": 106.14550991040352,
+      "cpu": {
+        "avg_ms": 0.7914988407065114,
+        "max_ms": 3.55116605758667,
+        "p50_ms": 0.6202079653739929,
+        "p95_ms": 1.918040990829468,
+        "p99_ms": 2.455167055130005
+      }
+    },
+    {
+      "build": "91d307a394a7",
+      "mode": "on",
+      "world": "Blend8",
+      "frames": 2398,
+      "avg_fps": 119.89831627969538,
+      "p95_ms": 8.448708534240723,
+      "p99_ms": 8.475791931152344,
+      "max_ms": 14.751625061035156,
+      "low_1pct_fps": 109.49491971520156,
+      "cpu": {
+        "avg_ms": 0.8526563979343537,
+        "max_ms": 4.453042030334473,
+        "p50_ms": 0.6825819611549377,
+        "p95_ms": 2.042417049407959,
+        "p99_ms": 2.591583013534546
+      }
+    },
+    {
+      "build": "91d307a394a7",
+      "mode": "off",
+      "world": "Blend9",
+      "frames": 2400,
+      "avg_fps": 119.9523349115457,
+      "p95_ms": 8.442292213439941,
+      "p99_ms": 8.473625183105469,
+      "max_ms": 20.306333541870117,
+      "low_1pct_fps": 108.91985446983422,
+      "cpu": {
+        "avg_ms": 0.8010794785929223,
+        "max_ms": 3.686499118804931,
+        "p50_ms": 0.6299170255661011,
+        "p95_ms": 1.8874589204788208,
+        "p99_ms": 2.400041103363037
+      }
+    },
+    {
+      "build": "91d307a394a7",
+      "mode": "on",
+      "world": "Blend10",
+      "frames": 2399,
+      "avg_fps": 119.90231138319012,
+      "p95_ms": 8.446416854858398,
+      "p99_ms": 8.477458953857422,
+      "max_ms": 16.676416397094727,
+      "low_1pct_fps": 109.418376780985,
+      "cpu": {
+        "avg_ms": 0.8129613702994876,
+        "max_ms": 4.134708881378174,
+        "p50_ms": 0.65625,
+        "p95_ms": 1.9562078714370728,
+        "p99_ms": 2.5200419425964355
+      }
+    },
+    {
+      "build": "91d307a394a7",
+      "mode": "off",
+      "world": "Blend11",
+      "frames": 2399,
+      "avg_fps": 119.91318252257892,
+      "p95_ms": 8.442500114440918,
+      "p99_ms": 8.472291946411133,
+      "max_ms": 15.245959281921388,
+      "low_1pct_fps": 110.78521021803536,
+      "cpu": {
+        "avg_ms": 0.779514920126403,
+        "max_ms": 4.037582874298096,
+        "p50_ms": 0.6191270351409912,
+        "p95_ms": 1.8897080421447752,
+        "p99_ms": 2.5216259956359863
+      }
+    }
+  ],
+  "second_process": {
+    "hashes_before": [
+      "cfb391fe8d624153de0ce46fe2d76f09666b5d7a59c85133c35c9654a2f5bcaa  config/meridian.toml",
+      "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  config/meridian.lock",
+      "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  horizon-mods/.horizon-mod-data/meridian/meridian.lock",
+      "c5238d5ce638c5aa9ef7d363b83639426c1601fe5a2337562cb0467f18749406  horizon-mods/.horizon-mod-data/meridian/worlds/sp-followup/default/minecraft%3Aoverworld/regions/0_0.mrg",
+      "d9b573083063b8bf8b8e759aa6f226c8e898748bb53ee2085c094b02ccc03646  horizon-mods/.horizon-mod-data/meridian/worlds/sp-followup/default/minecraft%3Aoverworld/regions/-1_0.mrg",
+      "30a4255ae5efb15df85dc00c66182eab57692d1c6795180626b268f9755a323a  horizon-mods/.horizon-mod-data/meridian/worlds/sp-followup/default/minecraft%3Aoverworld/regions/-1_-1.mrg",
+      "2506189a8829a49e4949d760654f2c14f04b8c1fe92c81745ec9f1fbc9023596  horizon-mods/.horizon-mod-data/meridian/worlds/sp-followup/default/minecraft%3Aoverworld/regions/0_-1.mrg",
+      "553ca0ba5f1748613d8e1d715a5b090c4d617b74fafeab56911932be07c9aa78  horizon-mods/.horizon-mod-data/meridian/worlds/sp-followup2/default/minecraft%3Aoverworld/regions/0_0.mrg",
+      "d9b573083063b8bf8b8e759aa6f226c8e898748bb53ee2085c094b02ccc03646  horizon-mods/.horizon-mod-data/meridian/worlds/sp-followup2/default/minecraft%3Aoverworld/regions/-1_0.mrg",
+      "515879835e39610cb56ee8783eaa089d3de556e120a220efef93404002970d06  horizon-mods/.horizon-mod-data/meridian/worlds/sp-followup2/default/minecraft%3Aoverworld/regions/-1_-1.mrg",
+      "41d014e8cc2bc7880b3bbee20c69cdbb641db1be1cc56431f675f9dd9024508b  horizon-mods/.horizon-mod-data/meridian/worlds/sp-followup2/default/minecraft%3Aoverworld/regions/0_-1.mrg"
+    ],
+    "hashes_after": [
+      "cfb391fe8d624153de0ce46fe2d76f09666b5d7a59c85133c35c9654a2f5bcaa  config/meridian.toml",
+      "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  config/meridian.lock",
+      "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  horizon-mods/.horizon-mod-data/meridian/meridian.lock",
+      "c5238d5ce638c5aa9ef7d363b83639426c1601fe5a2337562cb0467f18749406  horizon-mods/.horizon-mod-data/meridian/worlds/sp-followup/default/minecraft%3Aoverworld/regions/0_0.mrg",
+      "d9b573083063b8bf8b8e759aa6f226c8e898748bb53ee2085c094b02ccc03646  horizon-mods/.horizon-mod-data/meridian/worlds/sp-followup/default/minecraft%3Aoverworld/regions/-1_0.mrg",
+      "30a4255ae5efb15df85dc00c66182eab57692d1c6795180626b268f9755a323a  horizon-mods/.horizon-mod-data/meridian/worlds/sp-followup/default/minecraft%3Aoverworld/regions/-1_-1.mrg",
+      "2506189a8829a49e4949d760654f2c14f04b8c1fe92c81745ec9f1fbc9023596  horizon-mods/.horizon-mod-data/meridian/worlds/sp-followup/default/minecraft%3Aoverworld/regions/0_-1.mrg",
+      "c7dc0a710e408d3dc8aff812a71569b0ff8797c6a9aea141314cfd23b2f9d772  horizon-mods/.horizon-mod-data/meridian/worlds/sp-followup2/default/minecraft%3Aoverworld/regions/0_0.mrg",
+      "d9b573083063b8bf8b8e759aa6f226c8e898748bb53ee2085c094b02ccc03646  horizon-mods/.horizon-mod-data/meridian/worlds/sp-followup2/default/minecraft%3Aoverworld/regions/-1_0.mrg",
+      "396404c2d844229cf9df8695c5429c68f4d3776db2149cccb795b52455c2ac2c  horizon-mods/.horizon-mod-data/meridian/worlds/sp-followup2/default/minecraft%3Aoverworld/regions/-1_-1.mrg",
+      "34a1c292d04ed6f10f7ffae1be9024202396385b395df8b1b2a979c31c2b723f  horizon-mods/.horizon-mod-data/meridian/worlds/sp-followup2/default/minecraft%3Aoverworld/regions/0_-1.mrg"
+    ]
+  }
+}

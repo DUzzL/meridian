@@ -174,6 +174,10 @@ pub struct ChunkSnapshot {
     pub biomes: Vec<String>,
     /// 256 columns, x fastest, then z.
     pub columns: Vec<ColumnSample>,
+    /// 20 by 20 biome indices, including a two-column halo from adjacent chunks.
+    /// Empty for hosts without neighbouring biome reads.
+    #[serde(default)]
+    pub biome_border: Vec<u16>,
 }
 
 impl ChunkSnapshot {

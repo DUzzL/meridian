@@ -5,10 +5,10 @@ id = "meridian"
 version = "0.1.0"
 priority = 100
 
-# The installed Nightly (2026-11-05). The bridge below injects into Horizon
+# Horizon main 2026-11-08 (has the fixes for #12128 and #12129). The bridge below injects into Horizon
 # internals (not catalog hooks), so it needs this exact commit.
 [compatibility]
-horizon_revision = "66f3981f522b24c250b21523a70080965b940424"
+horizon_revision = "447e9d277d06272196ba66363d5ea8d582581c63"
 
 [api]
 path = "engine"
@@ -57,3 +57,11 @@ helper = "bridge/frame.rs"
 bindings = [
   { name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" },
 ]
+
+# Local command tree, because Horizon's tab_complete hook serves server guests.
+[[injection]]
+id = "client-command-tree"
+kind = "RETURN"
+target = "horizon_client::game::chat::with_native_commands"
+helper = "bridge/commands.rs"
+bindings = [{ name = "tree", ty = "horizon_client::command::Dispatcher", value = "$value" }]

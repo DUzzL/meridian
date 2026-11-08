@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use horizon_client::game::meridian_bridge as bridge;
 use horizon_client::mod_api::{
-    ClientChatReceivedEvent, ClientDisconnectingEvent, ClientLevelLoadEvent,
+    ClientPacketEvent, ClientboundPlayPacket, ClientChatReceivedEvent, ClientDisconnectingEvent, ClientLevelLoadEvent,
     ClientLevelUnloadEvent, ClientResourcesReloadedEvent, ClientStoppingEvent, CommandEvent,
     CommandsEvent, Flow, FrameEvent, Hooks, Host, HudBatch, HudEvent, KeyEvent, ModsEvent,
     NativeMod, RenderHooks, ScreenCharTypedPreEvent, ScreenClosingEvent,
@@ -48,7 +48,7 @@ use parking_lot::Mutex;
 pub const MOD_ID: &str = "meridian";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The bridge shape this adapter was written for.
-const BRIDGE_VERSION: u32 = 11;
+const BRIDGE_VERSION: u32 = 12;
 /// How long leaving a world or quitting waits for region saves.
 const SAVE_WAIT: Duration = Duration::from_secs(5);
 
@@ -333,6 +333,7 @@ fn snapshot(s: bridge::Snapshot) -> ChunkSnapshot {
         mode: s.cave_from.map_or(ReadMode::Surface, ReadMode::CaveFrom),
         blocks: s.blocks,
         biomes: s.biomes,
+        biome_border: s.biome_border,
         columns: s
             .columns
             .into_iter()
@@ -495,16 +496,17 @@ impl State {
             self.engine.hold_saves(true);
             return;
         }
-        let name = self.map_for(data_dir, &context.source, spawn.unwrap_or(None));
+        let spawn = spawn.unwrap_or(None);
+        let name = self.map_for(data_dir, &context.source, spawn);
         if self.engine.map() != name {
-            log::info!("meridian: showing map {name}");
+            log::info!("meridian: showing map {name} (spawn {spawn:?})");
             self.pending.push(Pending::Notice(format!("Meridian: map {name}")));
             // Still held: what the other map got meanwhile is dropped.
             self.engine.set_map(&name);
             gpu_map::forget_regions();
             self.close_viewer();
-            self.open_book(data_dir, &context);
         }
+        self.open_book(data_dir, &context);
         self.engine.hold_saves(false);
     }
 
@@ -594,6 +596,9 @@ impl State {
                 let dir = meridian_core::persist::server_dir(&data_dir, &context.source);
                 let from = dir.join(meridian_core::persist::escape_component(&old));
                 let to = dir.join(meridian_core::persist::escape_component(&new));
+                if let Err(e) = meridian_core::persist::require_writable(&from) {
+                    return format!("Cannot rename map: {e}");
+                }
                 if from != to && from.exists() && let Err(e) = std::fs::rename(&from, &to) {
                     return format!("Renaming the map's folder failed: {e}");
                 }
@@ -703,6 +708,9 @@ impl Meridian {
     fn with_state<R>(&self, host: &dyn Host, f: impl FnOnce(&mut State) -> R) -> R {
         let mut guard = self.state.lock();
         let state = guard.get_or_insert_with(|| {
+            // Claim both roots before any loader can quarantine a file or save defaults.
+            meridian_core::persist::claim_data_dir(&data_dir(host));
+            meridian_core::persist::claim_data_dir(&config_dir(host));
             let store = ConfigStore::new(&config_dir(host));
             let mut config = store.load();
             meridian_core::seedatlas_state::normalize(&mut config.current_mut().seed_atlas);
@@ -730,7 +738,7 @@ impl Meridian {
                 );
             }
             log::info!("meridian {VERSION}: settings in {}", store.path().display());
-            let engine_read_only = engine.read_only();
+            let engine_read_only = engine.read_only() || !meridian_core::persist::path_writable(store.path());
             load_icons();
             State {
                 config,
@@ -750,7 +758,7 @@ impl Meridian {
                 screen: None,
                 open_screen: None,
                 pending: if engine_read_only {
-                    vec![Pending::Notice("Meridian: another game uses this map folder; map changes are not saved".to_owned())]
+                    vec![Pending::Notice("Meridian: data or settings folder is locked; changes there are not saved".to_owned())]
                 } else {
                     Vec::new()
                 },
@@ -1086,15 +1094,15 @@ impl Meridian {
                     _ => {}
                 }
             }
-            let Some((book, dim)) = s.book_here() else {
-                return ("Meridian: no world open".to_owned(), None);
-            };
             if args.get(1) == Some(&"map") {
                 return (s.map_command(&args[2..]), None);
             }
             if args.get(1) == Some(&"radar") {
                 return (s.radar_command(&args[2..]), None);
             }
+            let Some((book, dim)) = s.book_here() else {
+                return ("Meridian: no confirmed world open yet".to_owned(), None);
+            };
             // /meridian waypoint <action> [name...]
             if args.get(1) != Some(&"waypoint") {
                 return (USAGE.to_owned(), None);
@@ -1152,7 +1160,9 @@ impl Meridian {
                         .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
                         .collect();
                     let path = export_dir.join(format!("waypoints-{safe}.json"));
-                    let written = std::fs::create_dir_all(&export_dir)
+                    let written = meridian_core::persist::require_writable(&path)
+                        .map_err(std::io::Error::other)
+                        .and_then(|_| std::fs::create_dir_all(&export_dir))
                         .and_then(|_| std::fs::write(&path, meridian_core::waypoint_io::export_json(book)));
                     match written {
                         Ok(()) => (format!("Waypoints exported to {}", path.display()), None),
@@ -1492,7 +1502,7 @@ impl Hooks for Meridian {
     }
 
     fn key(&self, host: &mut dyn Host, event: &mut KeyEvent<'_>) {
-        if !host.playing() {
+        if !host.playing() && event.pressed {
             return;
         }
         let notice = self.on_key(&*host, event.key, event.pressed);
@@ -1513,6 +1523,8 @@ impl Hooks for Meridian {
     }
 
     fn commands(&self, _host: &mut dyn Host, event: &mut CommandsEvent<'_>) {
+        bridge::command_versions(meridian_core::seedatlas_commands::version_suggestions()
+            .into_iter().map(str::to_owned).collect());
         event.commands.push("meridian");
         event.commands.push("seedatlas");
     }
@@ -1522,9 +1534,10 @@ impl Hooks for Meridian {
         if args.first() == Some(&"seedatlas") {
             let rest = event.command.trim_start().strip_prefix("seedatlas").unwrap_or("").trim().to_owned();
             let (reply, open) = self.on_seedatlas(&*host, &rest);
-            if !reply.is_empty() {
-                host.client_action_bar(Text::literal(reply), false);
-            }
+            bridge::local_chat(reply.into_iter().map(|line| {
+                if line.error { Text::styled(line.text, Style::color(0xFF5555)) }
+                else { Text::literal(line.text) }
+            }).collect());
             if open && host.mod_screen_open(MOD_ID) {
                 self.with_state(&*host, |s| {
                     s.map_open = false;
@@ -1544,6 +1557,15 @@ impl Hooks for Meridian {
             host.client_action_bar(Text::literal(format!("Meridian: {e}")), false);
         }
         Flow::Cancel
+    }
+
+    fn client_packet(&self, host: &mut dyn Host, event: &mut ClientPacketEvent<'_>) {
+        if let ClientboundPlayPacket::SetDefaultSpawnPosition(packet) = event.packet {
+            // This hook hears every announcement, even an identical spawn.
+            // The frame reads game.spawn after Horizon has applied the packet.
+            log::info!("meridian: spawn announced at {:?}", packet.pos);
+            self.with_state(&*host, |s| s.spawn_watch.announced());
+        }
     }
 
     fn client_chat_received(
@@ -1601,7 +1623,9 @@ impl Hooks for Meridian {
             s.levels += 1;
             s.close_viewer();
             // The spawn reported now may be the last level's or server's.
-            s.spawn_watch.level_loaded(bridge::world_spawn(), Instant::now());
+            if s.dimension.as_ref().is_none_or(|old| old == &dimension) {
+                s.spawn_watch.level_loaded(bridge::world_spawn(), Instant::now());
+            }
             s.dimension = Some(dimension.clone());
             let map_host = HorizonHost {
                 host,
@@ -1614,8 +1638,23 @@ impl Hooks for Meridian {
                     // nothing is saved before.
                     let map = s.map_for(&data_dir(host), &context.source, None);
                     s.engine.prepare_map(&map);
-                    s.open_book(&data_dir(host), &context);
+                    let waiting = matches!(context.source, WorldSource::Multiplayer { .. })
+                        && s.config.current().world_map.multiplayer_maps == meridian_core::config::MapSelection::WorldSpawn
+                        && s.spawn_watch.spawn(bridge::world_spawn(), Instant::now()).is_err();
+                    log::info!(
+                        "meridian: level {dimension} loaded, spawn reported {:?}{}",
+                        bridge::world_spawn(),
+                        if waiting { ", waiting for the spawn packet" } else { "" }
+                    );
+                    if waiting {
+                        s.save_book();
+                        s.book = None;
+                        s.pending.push(Pending::Notice("Meridian: waiting for this world's spawn; choose Manual maps if the server sends none".to_owned()));
+                    } else {
+                        s.open_book(&data_dir(host), &context);
+                    }
                     s.engine.handle(&map_host, HostEvent::LevelLoaded(context));
+                    s.engine.hold_saves(waiting);
                 }
                 None => log::warn!(
                     "meridian: cannot tell which world {} belongs to",
@@ -1670,6 +1709,16 @@ impl Hooks for Meridian {
     }
 
     fn frame(&self, host: &mut dyn Host, _event: &mut FrameEvent) {
+        // A screen or lost focus can consume the event. Reconcile releases
+        // from the physical state too, without inventing any new presses.
+        let enlarge = host.mod_key(MOD_ID, "minimap.enlarge", "key.keyboard.z");
+        let faces = host.mod_key(MOD_ID, "radar.faces", "key.keyboard.tab");
+        self.with_state(&*host, |s| {
+            if !bridge::key_held(&enlarge) {
+                s.controls.key("minimap.enlarge", false, &mut s.config.current_mut().minimap);
+            }
+            if !bridge::key_held(&faces) { s.faces_held = false; }
+        });
         if let Some(text) = EXPORT_NOTICE.lock().take() {
             host.client_action_bar(Text::literal(text), false);
         }
@@ -1805,7 +1854,7 @@ impl Hooks for Meridian {
             let alpha = ((settings.opacity_in_world.min(100) as u32 * 255) / 100) << 24;
             for w in waypoints.visible(settings.all_sets) {
                 let distance = w.distance(camera);
-                if !w.global && settings.max_distance > 0 && distance > settings.max_distance as f64
+                if !w.global && distance > settings.draw_distance(&dim)
                 {
                     continue;
                 }
@@ -1888,7 +1937,7 @@ fn world_waypoints(host: &dyn Host, s: &State, gui: [f32; 2], gui_scale: f32, op
     let mark = 9.0 * u;
     for w in waypoints.visible(settings.all_sets) {
         let distance = w.distance(camera.position);
-        if !w.global && settings.max_distance > 0 && distance > settings.max_distance as f64 {
+        if !w.global && distance > settings.draw_distance(&dim) {
             continue;
         }
         // An unknown height shows at eye level.
@@ -3108,10 +3157,11 @@ impl State {
 impl Meridian {
     /// `/seedatlas ...` (the Fabric version's commands); answers the reply
     /// and whether to open the settings.
-    fn on_seedatlas(&self, host: &dyn Host, args: &str) -> (String, bool) {
+    fn on_seedatlas(&self, host: &dyn Host, args: &str) -> (Vec<meridian_core::seedatlas_commands::CommandLine>, bool) {
         self.with_state(host, |s| {
             let map = s.engine.map().to_owned();
-            let context = s.engine.context().map(|c| meridian_core::seedatlas_state::SeedContext::of_map(&c.source, &map));
+            let context = s.engine.context().filter(|c| s.book.is_some() || !matches!(c.source, WorldSource::Multiplayer { .. }))
+                .map(|c| meridian_core::seedatlas_state::SeedContext::of_map(&c.source, &map));
             let detected = s.detected_seed();
             let mut settings = s.config.current().seed_atlas.clone();
             let outcome = {
@@ -3129,7 +3179,7 @@ impl Meridian {
                 s.seed_inputs = None;
                 s.update_seeds();
             }
-            (outcome.lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join(" · "), outcome.open_settings)
+            (outcome.lines, outcome.open_settings)
         })
     }
 }
@@ -3261,7 +3311,8 @@ impl State {
         }
         let sa = self.config.current().seed_atlas.clone();
         let map = self.engine.map().to_owned();
-        let context = self.engine.context().map(|c| meridian_core::seedatlas_state::SeedContext::of_map(&c.source, &map));
+        let context = self.engine.context().filter(|c| self.book.is_some() || !matches!(c.source, WorldSource::Multiplayer { .. }))
+            .map(|c| meridian_core::seedatlas_state::SeedContext::of_map(&c.source, &map));
         if let Some(c) = &context {
             if self.seed_key.as_deref() != Some(c.key.as_str()) {
                 self.seeds.context_changed(&c.key);

@@ -276,6 +276,7 @@ fn rows(c: Category) -> Vec<Row> {
             opt(Waypoints, "Display All Sets", "Waypoints of every set, not only the current one."),
             opt(Waypoints, "Waypoint Beam", "A beam of light over waypoints far away."),
             opt(Waypoints, "Max WP Draw Distance", "Waypoints further away are not drawn in the world."),
+            opt(Waypoints, "Scale WP Distance to Dimension", "Scales the maximum draw distance to the dimension: one eighth in the Nether. Global waypoints stay visible."),
             opt(Waypoints, "Deathpoints", "A waypoint where you died."),
             opt(Waypoints, "Keep Old Deathpoints", "Keeps earlier deathpoints when you die again."),
             opt(Waypoints, "Delete Reached Deathpoints", "Removes a deathpoint once you get back to it."),

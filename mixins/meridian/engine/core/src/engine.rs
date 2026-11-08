@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use meridian_host::{ChunkPos, HostEvent, MapHost, ReadMode, WorldContext};
+use meridian_host::{ChunkPos, ChunkSnapshot, HostEvent, MapHost, ReadMode, WorldContext};
 
 use crate::codec::{self, RegionData};
 use crate::color::Shading;
@@ -55,6 +55,65 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const TICK: Duration = Duration::from_millis(50);
 /// Unanswered requests before a chunk waits for its next load or change.
 const MAX_ATTEMPTS: u8 = 3;
+/// The eight neighbours; index `i` and `7 - i` are opposite.
+const BLEND_DIRS: [(i32, i32); 8] = [
+    (-1, -1),
+    (0, -1),
+    (1, -1),
+    (-1, 0),
+    (1, 0),
+    (-1, 1),
+    (0, 1),
+    (1, 1),
+];
+
+/// What a chunk's biome blend depended on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BlendEdges {
+    /// Per [`BLEND_DIRS`] side: the one biome of the two columns along it
+    /// (a hash of its name), `None` when they hold several.
+    strips: [Option<u64>; 8],
+    /// Which neighbours were loaded when the chunk was read.
+    seen: u8,
+}
+
+impl BlendEdges {
+    fn of(snapshot: &ChunkSnapshot, seen: u8) -> Self {
+        use std::hash::{Hash, Hasher};
+        let mut strips = [None; 8];
+        if snapshot.columns.len() < 256 {
+            return BlendEdges { strips, seen };
+        }
+        let range = |d: i32| match d {
+            -1 => 0..2,
+            1 => 14..16,
+            _ => 0..16,
+        };
+        for (i, (dx, dz)) in BLEND_DIRS.iter().enumerate() {
+            let mut one: Option<u16> = None;
+            let mut mixed = false;
+            for z in range(*dz) {
+                for x in range(*dx) {
+                    let biome = snapshot.columns[z * 16 + x].biome;
+                    match one {
+                        None => one = Some(biome),
+                        Some(b) if b != biome => mixed = true,
+                        _ => {}
+                    }
+                }
+            }
+            strips[i] = match (mixed, one) {
+                (false, Some(b)) => snapshot.biomes.get(b as usize).map(|name| {
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    name.hash(&mut h);
+                    h.finish()
+                }),
+                _ => None,
+            };
+        }
+        BlendEdges { strips, seen }
+    }
+}
 
 #[derive(Debug)]
 enum WorkResult {
@@ -166,6 +225,10 @@ pub struct MapEngine {
     failures: HashMap<ChunkPos, u8>,
     /// Chunks the client holds, whatever map is open.
     loaded_chunks: HashSet<ChunkPos>,
+    /// Per read chunk: its edge biomes and which neighbours its blend saw.
+    blend_edges: HashMap<ChunkPos, BlendEdges>,
+    /// Per requested chunk: the neighbours loaded when it was asked for.
+    blend_requests: HashMap<ChunkPos, u8>,
     /// The cave layer shown, `None` for the surface.
     layer: Option<i32>,
     colors: ColorTable,
@@ -266,6 +329,8 @@ impl MapEngine {
             deferred_layer: None,
             failures: HashMap::new(),
             loaded_chunks: HashSet::new(),
+            blend_edges: HashMap::new(),
+            blend_requests: HashMap::new(),
             layer: None,
             colors: ColorTable::default(),
             shading: None,
@@ -557,10 +622,14 @@ impl MapEngine {
             HostEvent::Disconnected => {
                 self.close();
                 self.loaded_chunks.clear();
+                self.blend_edges.clear();
+                self.blend_requests.clear();
             }
             HostEvent::ChunkLoaded(chunk) => {
                 // Kept even before a map opens: the level hook and the first
                 // chunks may arrive in either order.
+                // Neighbours are reread once this chunk's biomes are known
+                // (see `queue_blend_neighbours`), not on every load.
                 self.loaded_chunks.insert(chunk);
                 self.failures.remove(&chunk);
                 if self.active.is_some() && self.settings.world_map.load_new_chunks {
@@ -570,17 +639,35 @@ impl MapEngine {
             HostEvent::ChunkChanged(chunk) => {
                 if self.active.is_some() && self.settings.world_map.update_chunks {
                     self.failures.remove(&chunk);
+                    // Block changes leave biomes alone: the neighbours'
+                    // blend halos stay valid.
                     self.pending_reads.insert(chunk);
                 }
             }
             HostEvent::ChunkUnloaded(chunk) => {
                 self.loaded_chunks.remove(&chunk);
+                self.blend_edges.remove(&chunk);
+                self.blend_requests.remove(&chunk);
+                // Halos read with this chunk become stale if it comes back
+                // different; forget that they saw it.
+                for (i, (dx, dz)) in BLEND_DIRS.iter().enumerate() {
+                    let back = 1u8 << (BLEND_DIRS.len() - 1 - i);
+                    let neighbour = ChunkPos::new(chunk.x + dx, chunk.z + dz);
+                    if let Some(edges) = self.blend_edges.get_mut(&neighbour) {
+                        edges.seen &= !back;
+                    }
+                    if let Some(mask) = self.blend_requests.get_mut(&neighbour) {
+                        *mask &= !back;
+                    }
+                }
                 self.pending_reads.remove(&chunk);
                 self.in_flight.remove(&chunk);
                 self.failures.remove(&chunk);
             }
             HostEvent::ChunksReset => {
                 self.loaded_chunks.clear();
+                self.blend_edges.clear();
+                self.blend_requests.clear();
                 self.pending_reads.clear();
                 self.in_flight.clear();
                 self.failures.clear();
@@ -889,6 +976,36 @@ impl MapEngine {
         }
     }
 
+    /// Records `snapshot`'s edge biomes and queues the neighbours whose
+    /// blend halo, read without this chunk, would now come out different.
+    /// A neighbour is reread only when the biomes on both sides of the
+    /// shared edge are not one and the same biome.
+    fn queue_blend_neighbours(&mut self, snapshot: &ChunkSnapshot) {
+        let pos = snapshot.pos;
+        // Unknown: assume the halo saw nothing, which costs rereads at most.
+        let seen = self.blend_requests.remove(&pos).unwrap_or(0);
+        let edges = BlendEdges::of(snapshot, seen);
+        for (i, (dx, dz)) in BLEND_DIRS.iter().enumerate() {
+            let neighbour = ChunkPos::new(pos.x + dx, pos.z + dz);
+            let Some(theirs) = self.blend_edges.get_mut(&neighbour) else {
+                continue;
+            };
+            let back = BLEND_DIRS.len() - 1 - i;
+            if theirs.seen & (1 << back) != 0 {
+                continue;
+            }
+            let same =
+                matches!((edges.strips[i], theirs.strips[back]), (Some(a), Some(b)) if a == b);
+            if same {
+                // Its halo already equals what it would read now.
+                theirs.seen |= 1 << back;
+            } else if self.loaded_chunks.contains(&neighbour) {
+                self.pending_reads.insert(neighbour);
+            }
+        }
+        self.blend_edges.insert(pos, edges);
+    }
+
     /// Does this tick's share of the work, stopping after `budget`.
     pub fn tick(&mut self, host: &dyn MapHost, budget: Duration) -> TickReport {
         let deadline = Instant::now() + budget;
@@ -919,6 +1036,9 @@ impl MapEngine {
             self.in_flight.remove(&snapshot.pos);
             self.failures.remove(&snapshot.pos);
             let chunk = snapshot.pos;
+            if self.settings.world_map.terrain.biome_blending {
+                self.queue_blend_neighbours(&snapshot);
+            }
             let mut prepared = self.colors.prepare(host, snapshot, vanilla_biomes);
             prepared.biome_blending = self.settings.world_map.terrain.biome_blending;
             self.ensure_region(RegionPos::of_chunk(chunk));
@@ -952,6 +1072,18 @@ impl MapEngine {
         let budget = (self.read_credit as usize).min(per_tick.saturating_sub(self.in_flight.len()));
         for chunk in self.next_reads(focus, budget) {
             self.pending_reads.remove(&chunk);
+            if self.settings.world_map.terrain.biome_blending {
+                let mut seen = 0u8;
+                for (i, (dx, dz)) in BLEND_DIRS.iter().enumerate() {
+                    if self
+                        .loaded_chunks
+                        .contains(&ChunkPos::new(chunk.x + dx, chunk.z + dz))
+                    {
+                        seen |= 1 << i;
+                    }
+                }
+                self.blend_requests.insert(chunk, seen);
+            }
             host.request_chunk(chunk, mode);
             self.in_flight.insert(chunk, now);
             self.read_credit -= 1.0;
@@ -1184,6 +1316,59 @@ mod tests {
         fn config_dir(&self) -> PathBuf {
             self.flat.data.join("config")
         }
+    }
+
+    #[test]
+    fn blend_rereads_a_neighbour_only_when_the_shared_edge_differs() {
+        let world = World::new("blend-neighbours");
+        let mut e = engine(&world);
+        e.handle(&world, HostEvent::LevelLoaded(overworld()));
+        let origin = ChunkPos::new(0, 0);
+        e.handle(&world, HostEvent::ChunkLoaded(origin));
+        // Read alone: its halo saw no neighbour.
+        e.queue_blend_neighbours(&flat_chunk(origin));
+        assert_eq!(e.blend_edges[&origin].seen, 0);
+
+        // Same biome east of it: the fallback halo was already right.
+        let east = ChunkPos::new(1, 0);
+        e.handle(&world, HostEvent::ChunkLoaded(east));
+        e.pending_reads.clear();
+        e.queue_blend_neighbours(&flat_chunk(east));
+        assert!(
+            !e.pending_reads.contains(&origin),
+            "same edge biome: no reread"
+        );
+        assert_ne!(
+            e.blend_edges[&origin].seen & (1 << 4),
+            0,
+            "east counts as seen"
+        );
+
+        // Another biome south of it: the blend must reach across.
+        let south = ChunkPos::new(0, 1);
+        e.handle(&world, HostEvent::ChunkLoaded(south));
+        e.pending_reads.clear();
+        let mut desert = flat_chunk(south);
+        desert.biomes = vec!["minecraft:desert".into()];
+        e.queue_blend_neighbours(&desert);
+        assert!(
+            e.pending_reads.contains(&origin),
+            "different edge biome: reread"
+        );
+        assert!(
+            e.pending_reads.contains(&east),
+            "the diagonal's corner differs too"
+        );
+        assert!(!e.blend_edges.contains_key(&ChunkPos::new(5, 5)));
+
+        // A block edit leaves biomes alone, so no neighbour is queued.
+        e.pending_reads.clear();
+        e.handle(&world, HostEvent::ChunkChanged(south));
+        assert_eq!(e.pending_reads, HashSet::from([south]));
+
+        // A neighbour that unloads is no longer counted as seen.
+        e.handle(&world, HostEvent::ChunkUnloaded(east));
+        assert_eq!(e.blend_edges[&origin].seen & (1 << 4), 0);
     }
 
     /// The test world's chunk as read in `mode`: a cave read finds the

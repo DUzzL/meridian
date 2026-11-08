@@ -72,7 +72,7 @@
 
 - `cargo test --workspace --locked`: 55 Tests grün (53 Kern, 2 Host).
 - `cargo clippy --workspace --all-targets -- -D warnings`: sauber.
-- `tools/check-adapter.sh`: Der Adapter kompiliert gegen Horizon `66f3981` (installierte Nightly) mit dessen Lockfile und Patches; keine fremden Crates.
+- `tools/check-adapter.sh`: Der Adapter kompiliert gegen Horizon `447e9d2` (`main` vom 2026-11-08, mit den Fixes für horizon#12128 und #12129; vorher `66f3981`) mit dessen Lockfile und Patches; keine fremden Crates.
 
 **Offen**
 
@@ -575,7 +575,17 @@ Das Audit (`docs/AUDIT_REPORT.md`, Commit `92c0fd5`) fand 6 hohe, 23 mittlere un
   - Teleport zu Wegpunkten anderer Dimensionen nutzt das Dimensionsformat (AUD-004).
   - Wegpunkt-Sets lassen sich anlegen, umbenennen und löschen (AUD-005).
   - Die Minimap setzt beim Gehen nur hereinrollende Zellen neu zusammen (AUD-006).
-- **Bridge:** Version 11 (Chunk-Abzüge mit Lesemodus, Anfragen nach Position und Modus, Tick-Positionen der Entities, gemeinsame Entity-Liste).
+- **Bridge:** Version 11 (Chunk-Abzüge mit Lesemodus, Anfragen nach Position und Modus, Tick-Positionen der Entities, gemeinsame Entity-Liste). Seit D-040 Version 12.
 - **Tests:** Kern 258 (dazu 3 ignorierte Messungen), Host 2, Paritätstest aller 38 Versionen mit den erweiterten Fixtures. Neu getestet sind unter anderem Todespunkt-Ablauf, Teleport-Formate, geteilte Wegpunkte, Sets, Sortierung, kaputte und neuere Dateien jeder Ablage, `flush_and_wait`, Speicherbudget, Spawn-Wache, Kartennamen, Sperrdatei, Marker-Stabilität, festhängende Seed-Atlas-Aufträge, Verfeinerung in Nether und End, Scan-Grenzen pro Art, Radar-Auswahl, Textfelder und das Minimap-Bild. Die schwachen Engine-Tests aus AUD-029 prüfen jetzt Inhalte.
 - **Im Spiel geprüft (2026-11-07):** Launcher-Build `native-66f3981-337ba39a8b1a` nach Fast-forward von `audit-fixes` nach `main`. Vergrößerte Minimap bei schneller Bewegung, Erzader-Marker über eine Minute, neuere und kaputte Regionsdateien über Neustart und Speichern, Todespunkt bis zur Rückkehr, tatsächlicher Klick auf „[Add waypoint]“ samt Prüfung, dass temporäre Wegpunkte nicht gespeichert werden, Teleport aus der Liste in den Nether, unbekannte Y-Höhe, Set-Befehle, Weltversion nach Neustart und Stichproben der Marker-Zoomgrenzen bestanden. Messwerte, Ablauf und Prüfgrenzen stehen in [AUDIT_VALIDATION.md](AUDIT_VALIDATION.md). Die Spawn-Wache in einem Servernetz und jede einzelne Marker-Radiusgrenze bleiben ohne Spielprüfung.
-- **Bekannte Grenzen:** keine Tab-Vervollständigung für `/seedatlas`, Antworten in einer Zeile der Aktionsleiste, keine Dimensionsskalierung der maximalen Wegpunkt-Entfernung, Biom-Übergänge nur innerhalb eines Chunks, Sperrdatei nur für Regionen (siehe D-039).
+- **Bekannte Grenzen:** keine Tab-Vervollständigung für `/seedatlas`, Antworten in einer Zeile der Aktionsleiste, keine Dimensionsskalierung der maximalen Wegpunkt-Entfernung, Biom-Übergänge nur innerhalb eines Chunks, Sperrdatei nur für Regionen (siehe D-039). Alle fünf sind seit D-040 behoben.
+
+## Restpunkte nach der Audit-Prüfung (2026-11-08, D-040)
+
+- **Bridge 12:** lokale Chatzeilen, physischer Tastenzustand, Biom-Rand aus Nachbarchunks; neue Injektion für den lokalen Befehlsbaum; Hook `client_packet` für Spawnpakete.
+- **Behoben:** `/seedatlas` antwortet im Chat und hat Tab-Vervollständigung; Wegpunkt-Entfernung je Dimension; Biom-Blending über Chunkgrenzen (ohne messbare Mehrkosten); Sperre für alle Ablagen; Spawn-Erkennung über das Spawnpaket statt 5-s-Fenster; gehaltene Tasten bleiben unter Screens nicht hängen.
+- **Tests:** Kern 261, `storage_safety` 2 (alle sechs Ablagen, echter zweiter Prozess), Host 2, Seed Atlas 8, Parität aller 38 Versionen; `marker_limits` gezielt.
+- **Im Spiel geprüft:** Build `native-66f3981-91d307a394a7` (zuletzt gebaut, für `horizon` ausgewählt); die Spielprüfungen selbst liefen mit `f25e342242b3`, das sich nur im Biom-Blending unterscheidet. Ablauf und Messwerte: [AUDIT_VALIDATION.md](AUDIT_VALIDATION.md).
+- **Offen:** Beobachtungen an der Referenz (D-012/KEYBINDS); Spawnwechsel auf einem Vanilla-Server.
+
+- **Nachtest mit Horizon-Fixes (2026-11-08):** Pin auf Horizon `447e9d2`, neue Logzeilen für Spawn und Sperre, Build `native-447e9d2-236224f0c3f6`. LAN-Beitritt, `/setworldspawn`, Respawn und Zweitprozess im Log geprüft: [AUDIT_VALIDATION.md](AUDIT_VALIDATION.md#nachtest-mit-horizon-fixes-2026-11-08).

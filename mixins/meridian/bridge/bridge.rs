@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 /// Bumped when the shapes below change, so a trait mod can refuse a bridge
 /// it doesn't understand.
-pub const VERSION: u32 = 11;
+pub const VERSION: u32 = 12;
 /// Main-thread time per frame for chunk reads.
 const READ_BUDGET: Duration = Duration::from_micros(1500);
 
@@ -59,6 +59,7 @@ pub struct Snapshot {
     pub biomes: Vec<String>,
     /// 256 columns, x fastest.
     pub columns: Vec<Column>,
+    pub biome_border: Vec<u16>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -114,6 +115,9 @@ pub struct BiomeLook {
 #[derive(Default)]
 struct Shared {
     enabled: bool,
+    local_chat: Vec<horizon_client::text::Text>,
+    held_keys: Vec<String>,
+    command_versions: Vec<String>,
     /// The chunk map's membership revision last reported, 0 for none.
     membership: u64,
     /// Chunks to read: position and the cave ceiling (`None` = surface).
@@ -322,12 +326,72 @@ pub fn clear_looks() {
     });
 }
 
+/// Physical held state is independent of screens consuming key releases.
+pub fn key_held(name: &str) -> bool {
+    with(|s| s.held_keys.iter().any(|key| key == name))
+}
+
+/// Local-only feedback: never sent over the connection or back through chat hooks.
+pub fn local_chat(lines: Vec<horizon_client::text::Text>) {
+    with(|s| s.local_chat.extend(lines));
+}
+
+pub fn command_versions(versions: Vec<String>) {
+    with(|s| s.command_versions = versions);
+}
+
+/// Extend the client-side parsing/completion tree while retaining mod dispatch.
+pub fn complete_commands(mut tree: horizon_client::command::Dispatcher) -> horizon_client::command::Dispatcher {
+    use horizon_client::command::{ArgType, MOD_COMMAND};
+    let Some(root) = tree.find("seedatlas") else { return tree };
+    for name in ["seed", "dimension-seed", "clear", "version", "status", "settings"] {
+        let node = tree.literal(root, name);
+        tree.executes(node, MOD_COMMAND);
+        match name {
+            "seed" => { let arg = tree.argument(node, "seed", ArgType::Greedy); tree.executes(arg, MOD_COMMAND); }
+            "clear" | "dimension-seed" => for dimension in ["nether", "end"] {
+                let dim = tree.literal(node, dimension); tree.executes(dim, MOD_COMMAND);
+                if name == "dimension-seed" {
+                    let arg = tree.argument(dim, "seed", ArgType::Greedy); tree.executes(arg, MOD_COMMAND);
+                }
+            },
+            "version" => for version in with(|s| s.command_versions.clone()) {
+                let version = tree.literal(node, &version); tree.executes(version, MOD_COMMAND);
+            },
+            _ => {}
+        }
+    }
+    tree
+}
+
 /// The frame injection's entry.
 pub(super) fn frame(game: &mut super::Game<'_>) {
     let mut guard = SHARED.lock().unwrap_or_else(|e| e.into_inner());
     let Some(s) = guard.as_mut().filter(|s| s.enabled) else {
         return;
     };
+    s.held_keys = game.physical_keys.iter()
+        .filter_map(|&key| horizon_client::keybinds::key_name(key)).map(str::to_owned).collect();
+    for button in &game.physical_buttons {
+        use winit::event::MouseButton;
+        let key = match button {
+            MouseButton::Left => "key.mouse.left".to_owned(),
+            MouseButton::Right => "key.mouse.right".to_owned(),
+            MouseButton::Middle => "key.mouse.middle".to_owned(),
+            MouseButton::Back => "key.mouse.4".to_owned(),
+            MouseButton::Forward => "key.mouse.5".to_owned(),
+            MouseButton::Other(n) => format!("key.mouse.{}", u32::from(*n) + 1),
+        };
+        s.held_keys.push(key);
+    }
+    for text in std::mem::take(&mut s.local_chat) {
+        use horizon_client::chat::ChatSource;
+        if game.ui.chat.shows(ChatSource::Client) {
+            let ticks = game.visual_ticks();
+            game.ui.chat.add(&game.gui.atlas, text, None, ChatSource::Client,
+                ticks, game.screen == super::Screen::Chat);
+        }
+    }
     report_membership(game, s);
     let (written, overflowed) = crate::world::meridian_changes::take();
     if overflowed {
@@ -411,7 +475,8 @@ fn answer_requests(game: &super::Game<'_>, s: &mut Shared) {
         let Some(chunk) = game.world.chunks.get(&(pos[0], pos[1])) else {
             continue;
         };
-        let snapshot = read_chunk(chunk, facts, biomes, &dimension, pos, cave_from, s.hide, &mut s.blocks, &mut s.biomes);
+        let mut snapshot = read_chunk(chunk, facts, biomes, &dimension, pos, cave_from, s.hide, &mut s.blocks, &mut s.biomes);
+        read_biome_border(game, &mut snapshot, &mut s.biomes);
         s.results.push(snapshot);
         if started.elapsed() >= READ_BUDGET {
             break;
@@ -543,7 +608,56 @@ fn read_chunk(
             });
         }
     }
-    Snapshot { dimension: dimension.to_owned(), pos, cave_from, blocks, biomes, columns }
+    Snapshot { dimension: dimension.to_owned(), pos, cave_from, blocks, biomes, columns, biome_border: Vec::new() }
+}
+
+/// Read the tint halo at the surface height of the nearest centre column.
+/// Missing neighbours fall back to the edge until their load triggers a reread.
+fn read_biome_border(game: &super::Game<'_>, snapshot: &mut Snapshot, looks: &mut HashMap<String, BiomeLook>) {
+    let mut palette: HashMap<String, u16> = snapshot.biomes.iter().enumerate()
+        .map(|(i, name)| (name.clone(), i as u16)).collect();
+    // The neighbours' chunks, looked up once instead of per halo cell.
+    let mut around = Vec::with_capacity(8);
+    snapshot.biome_border.reserve(20 * 20);
+    for z in -2i32..18 {
+        for x in -2i32..18 {
+            let col = snapshot.columns[z.clamp(0, 15) as usize * 16 + x.clamp(0, 15) as usize];
+            // Inside the chunk the column already carries its biome.
+            if (0..16).contains(&x) && (0..16).contains(&z) {
+                snapshot.biome_border.push(col.biome);
+                continue;
+            }
+            let wx = snapshot.pos[0] * 16 + x;
+            let wz = snapshot.pos[1] * 16 + z;
+            let key = (wx >> 4, wz >> 4);
+            let chunk = match around.iter().find(|(k, _)| *k == key) {
+                Some(&(_, chunk)) => chunk,
+                None => {
+                    let chunk = game.world.chunks.get(&key);
+                    around.push((key, chunk));
+                    chunk
+                }
+            };
+            let id = if let Some(chunk) = chunk {
+                let b = game.res.biomes().get(chunk.biome(wx & 15, i32::from(col.height), wz & 15));
+                if !looks.contains_key(&b.name) {
+                    looks.insert(b.name.clone(), BiomeLook {
+                        grass: b.grass, foliage: b.foliage, dry_foliage: b.dry_foliage, water: b.water,
+                    });
+                }
+                match palette.get(b.name.as_str()) {
+                    Some(&i) => i,
+                    None => {
+                        snapshot.biomes.push(b.name.clone());
+                        let i = (snapshot.biomes.len() - 1) as u16;
+                        palette.insert(b.name.clone(), i);
+                        i
+                    }
+                }
+            } else { col.biome };
+            snapshot.biome_border.push(id);
+        }
+    }
 }
 
 fn snapshot_entities(game: &super::Game<'_>) -> Vec<EntitySnap> {
