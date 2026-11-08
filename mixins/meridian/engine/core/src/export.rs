@@ -121,6 +121,9 @@ pub fn export_png(
             let edges = RegionEdges {
                 north: previous_south.get(&x).cloned(),
                 west: west.take(),
+                north_west: previous_south
+                    .get(&(x - 1))
+                    .and_then(|e| e.last().copied().flatten()),
             };
             region.render_dirty(&edges, shading, usize::MAX);
             west = Some(region.east_edge());

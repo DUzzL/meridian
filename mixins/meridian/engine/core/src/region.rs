@@ -1,8 +1,8 @@
 //! A region's tiles and its rendered pixels.
 //!
 //! Pixels are redrawn per chunk, only for chunks marked dirty: a chunk is
-//! dirty when its tile changed or a neighbour it is shaded against (north
-//! or west) changed. Each redraw gives [`Region::revision`] a new number
+//! dirty when its tile changed or a neighbour it is shaded against (north,
+//! north-west or west) changed. Each redraw gives [`Region::revision`] a new number
 //! from one counter of the process, so the renderer knows to upload the
 //! texture again and never takes one region's image for another's.
 
@@ -34,6 +34,8 @@ pub struct RegionEdges {
     pub north: Option<Vec<Option<i16>>>,
     /// The column west of the region, z = 0..512.
     pub west: Option<Vec<Option<i16>>>,
+    /// The column north-west of the region's corner.
+    pub north_west: Option<i16>,
 }
 
 #[derive(Clone, Debug)]
@@ -56,10 +58,10 @@ pub struct Region {
     count: usize,
 }
 
-/// The height neighbours are shaded against: the water surface where there
-/// is water.
+/// The height neighbours are shaded against: the ground, also under water
+/// (as on the reference map, where shores facing west are dark).
 fn surface(col: &TileColumn) -> Option<i16> {
-    (!col.empty).then(|| col.height.saturating_add(col.water_depth as i16))
+    (!col.empty).then_some(col.height)
 }
 
 impl Region {
@@ -101,8 +103,8 @@ impl Region {
             + self.pixels.len() * 4
     }
 
-    /// Stores a tile and marks it and its south and east neighbours inside
-    /// this region dirty. Returns the neighbours that lie in other regions
+    /// Stores a tile and marks it and its south, east and south-east
+    /// neighbours inside this region dirty. Returns the neighbours that lie in other regions
     /// (the caller marks those).
     pub fn set_tile(&mut self, tile: ChunkTile) -> Vec<ChunkPos> {
         debug_assert_eq!(RegionPos::of_chunk(tile.pos), self.pos);
@@ -120,6 +122,7 @@ impl Region {
             pos,
             ChunkPos::new(pos.x + 1, pos.z),
             ChunkPos::new(pos.x, pos.z + 1),
+            ChunkPos::new(pos.x + 1, pos.z + 1),
         ] {
             if RegionPos::of_chunk(chunk) == self.pos {
                 self.dirty.insert(chunk_index(chunk));
@@ -232,12 +235,13 @@ impl Region {
                         } else {
                             edges.north.as_ref().and_then(|e| e[lx as usize])
                         };
-                        let west = if lx > 0 {
-                            self.height_at(lx - 1, lz)
-                        } else {
-                            edges.west.as_ref().and_then(|e| e[lz as usize])
+                        let north_west = match (lx > 0, lz > 0) {
+                            (true, true) => self.height_at(lx - 1, lz - 1),
+                            (true, false) => edges.north.as_ref().and_then(|e| e[lx as usize - 1]),
+                            (false, true) => edges.west.as_ref().and_then(|e| e[lz as usize - 1]),
+                            (false, false) => edges.north_west,
                         };
-                        shade(col, north, west, shading)
+                        shade(col, north, north_west, shading)
                     }
                 };
                 out[(z * CHUNK_SIZE + x) as usize] = pixel;
@@ -253,8 +257,9 @@ impl Region {
     }
 }
 
-/// One map pixel from a column and its neighbours' heights.
-pub fn shade(col: &TileColumn, north: Option<i16>, west: Option<i16>, sh: &Shading) -> u32 {
+/// One map pixel from a column and its north and north-west neighbours'
+/// heights (the reference map's light; see `color`).
+pub fn shade(col: &TileColumn, north: Option<i16>, north_west: Option<i16>, sh: &Shading) -> u32 {
     if col.empty || sh.floor.is_some_and(|f| i32::from(col.height) < f) {
         return UNEXPLORED;
     }
@@ -263,30 +268,31 @@ pub fn shade(col: &TileColumn, north: Option<i16>, west: Option<i16>, sh: &Shadi
         BlockColors::Vanilla => col.vanilla,
     };
     let base = color::rgb(base[0], base[1], base[2]);
-    let mut c = if col.water_depth > 0 {
-        let [r, g, b] = col.water;
-        color::water_over(base, color::rgb(r, g, b), col.water_depth, sh.transparency)
+    let (light, slopes) = color::column_light(sh, col.block_light(), col.sky_light());
+    let depth = if sh.depth {
+        color::depth_factor(col.height)
     } else {
-        let mut f = color::slope_factor(sh.slopes, col.height, north, west);
-        if sh.depth {
-            f *= color::depth_factor(col.height);
+        1.0
+    } * sh.cave_depth_factor(col.height);
+    let c = if col.water_depth > 0 {
+        let [r, g, b] = col.water;
+        let ground = color::lit(base, light, 0.0, depth);
+        color::fluid(
+            ground,
+            color::rgb(r, g, b),
+            light,
+            col.water_depth,
+            sh.transparency,
+        )
+    } else {
+        let level = color::slope_level(sh.slopes, col.height, north, north_west);
+        let c = color::lit(base, light, slopes * level as f32, depth);
+        if sh.slopes == crate::config::Slopes::Vanilla {
+            color::scale(c, color::vanilla_slope(col.height, north))
+        } else {
+            c
         }
-        color::scale(base, f)
     };
-    if sh.lighting {
-        c = color::scale(
-            c,
-            if sh.cave && sh.legible {
-                // Legible: caves are lit by the map, torches still brighten.
-                0.7 + 0.3 * col.block_light() as f32 / 15.0
-            } else if sh.cave {
-                // Dark caves: what torches light stands out.
-                0.35 + 0.65 * col.block_light() as f32 / 15.0
-            } else {
-                color::light_factor(col.block_light(), col.sky_light(), sh.daylight)
-            },
-        );
-    }
     color::opaque(c)
 }
 
@@ -309,10 +315,17 @@ mod tests {
     fn set_tile_marks_neighbours() {
         let mut r = Region::new(RegionPos::new(0, 0));
         assert!(r.set_tile(tile(0, 0)).is_empty());
-        assert_eq!(r.dirty_count(), 3, "itself, east and south");
+        assert_eq!(r.dirty_count(), 4, "itself, east, south and south-east");
         assert!(r.unsaved);
         let outside = r.set_tile(tile(31, 31));
-        assert_eq!(outside, [ChunkPos::new(32, 31), ChunkPos::new(31, 32)]);
+        assert_eq!(
+            outside,
+            [
+                ChunkPos::new(32, 31),
+                ChunkPos::new(31, 32),
+                ChunkPos::new(32, 32)
+            ]
+        );
     }
 
     #[test]
@@ -394,8 +407,8 @@ mod tests {
         assert!(b > red, "lake pixels are blue");
         assert_eq!(
             r.height_at(16, 0),
-            Some(64),
-            "neighbours see the water surface"
+            Some(60),
+            "neighbours see the ground under the water"
         );
     }
 

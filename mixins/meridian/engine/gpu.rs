@@ -110,20 +110,39 @@ fn vs(@builtin(vertex_index) i: u32) -> Out {
     return out;
 }
 
+// A texel of the window (transparent outside it).
+fn texel_at(t: vec2<i32>) -> vec4<f32> {
+    let size = i32(p.misc.x);
+    if (t.x < 0 || t.y < 0 || t.x >= size || t.y >= size) {
+        return vec4(0.0);
+    }
+    return textureLoad(map, (t + vec2<i32>(p.wrap.xy)) % size, 0);
+}
+
 @fragment
 fn fs(in: Out) -> @location(0) vec4<f32> {
     if (p.misc.y > 0.5 && length(in.local) > p.half) {
         discard;
     }
     let world = (p.right * in.local.x - p.forward * in.local.y) * p.texels_per_px + p.center;
-    let size = p.misc.x;
-    let texel = vec2<i32>(floor(world));
+    // Bilinear between the four nearest texels, as the reference's minimap
+    // looks (soft, not blocky); unexplored texels blend in the backdrop.
+    let w = world - vec2(0.5);
+    let base = vec2<i32>(floor(w));
+    let f = fract(w);
+    let t00 = texel_at(base);
+    let t10 = texel_at(base + vec2(1, 0));
+    let t01 = texel_at(base + vec2(0, 1));
+    let t11 = texel_at(base + vec2(1, 1));
+    let w00 = (1.0 - f.x) * (1.0 - f.y) * step(0.001, t00.a);
+    let w10 = f.x * (1.0 - f.y) * step(0.001, t10.a);
+    let w01 = (1.0 - f.x) * f.y * step(0.001, t01.a);
+    let w11 = f.x * f.y * step(0.001, t11.a);
+    let cover = w00 + w10 + w01 + w11;
     var color = p.backdrop;
-    if (texel.x >= 0 && texel.y >= 0 && f32(texel.x) < size && f32(texel.y) < size) {
-        let t = textureLoad(map, (texel + vec2<i32>(p.wrap.xy)) % i32(size), 0);
-        if (t.a > 0.0) {
-            color = vec4(t.rgb, 1.0);
-        }
+    if (cover > 0.0) {
+        let rgb = (t00.rgb * w00 + t10.rgb * w10 + t01.rgb * w01 + t11.rgb * w11) / cover;
+        color = mix(p.backdrop, vec4(rgb, 1.0), cover);
     }
     if (p.grid.x > 0.5) {
         let f = fract((world * p.misc.w + p.grid.zw) / 16.0) * 16.0;

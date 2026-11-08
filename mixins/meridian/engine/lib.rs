@@ -3056,6 +3056,7 @@ impl State {
         let engine = self.viewer.as_ref().map_or(&self.engine, |(_, e)| e);
         let Some(regions) = engine.regions_dir() else { return };
         let shading = meridian_core::color::Shading::new(&self.config.current().world_map.terrain, None)
+            .in_sky(engine.sky())
             .for_cave(engine.layer().is_some(), self.config.current().minimap.cave.legible_caves);
         let name = {
             let (world, dim) = context_labels(self);

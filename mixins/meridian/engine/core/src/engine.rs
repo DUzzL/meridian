@@ -816,7 +816,15 @@ impl MapEngine {
         self.clock += 1;
         region.last_used = self.clock;
         self.regions.insert(pos, region);
-        // Neighbours to the east and south shade their edge against this one.
+        // Neighbours to the east and south shade their edge against this
+        // one, the south-east one its corner.
+        let corner = pos.offset(1, 1);
+        let corner_chunk = ChunkPos::new(corner.x * REGION_CHUNKS, corner.z * REGION_CHUNKS);
+        if let Some(r) = self.regions.get_mut(&corner)
+            && r.tile(corner_chunk).is_some()
+        {
+            r.mark_dirty(corner_chunk);
+        }
         for i in 0..REGION_CHUNKS {
             let (east, south) = (pos.offset(1, 0), pos.offset(0, 1));
             for (rp, chunk) in [
@@ -842,10 +850,24 @@ impl MapEngine {
     }
 
     fn edges(&self, pos: RegionPos) -> RegionEdges {
+        let last = crate::geom::REGION_BLOCKS - 1;
         RegionEdges {
             north: self.regions.get(&pos.offset(0, -1)).map(Region::south_edge),
             west: self.regions.get(&pos.offset(-1, 0)).map(Region::east_edge),
+            north_west: self
+                .regions
+                .get(&pos.offset(-1, -1))
+                .and_then(|r| r.height_at(last, last)),
         }
+    }
+
+    /// The light the open map's dimension is drawn in.
+    pub fn sky(&self) -> crate::color::Sky {
+        self.active
+            .as_ref()
+            .map_or(crate::color::Sky::Overworld, |a| {
+                crate::color::Sky::of_dimension(&a.context.dimension.0)
+            })
     }
 
     /// Takes one finished background job's result.
@@ -1093,11 +1115,13 @@ impl MapEngine {
         // 3. Redraw, nearest regions first.
         let cave = &self.settings.minimap.cave;
         let shading = Shading::new(&self.settings.world_map.terrain, host.day_time())
+            .in_sky(self.sky())
             .for_cave(self.layer.is_some(), cave.legible_caves)
             .with_floor(
                 self.layer
                     .map(|ceiling| ceiling - cave.depth.min(4096) as i32),
-            );
+            )
+            .with_ceiling(self.layer);
         if self.shading.is_none_or(|s| s.differs(&shading)) {
             self.shading = Some(shading);
             for r in self.regions.values_mut() {

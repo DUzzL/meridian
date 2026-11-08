@@ -504,19 +504,34 @@ fn read_chunk(
     let mut block_index: HashMap<u32, u16> = HashMap::new();
     let mut biomes: Vec<String> = Vec::new();
     let mut biome_index: HashMap<u16, u16> = HashMap::new();
+    // Plain water, for the water over waterlogged blocks (kelp, seagrass,
+    // waterlogged stairs...): the map draws their water, not the plant.
+    const PLAIN_WATER: u32 = u32::MAX;
     let mut intern_block = |state: u32| -> u16 {
         *block_index.entry(state).or_insert_with(|| {
-            let f = facts.get(BlockStateId(state));
-            let name = f.name.to_string();
-            block_looks.entry(name.clone()).or_insert_with(|| BlockLook {
-                map_color: MAP_COLORS.get(f.map_color as usize).copied().unwrap_or(0),
-                fluid: match f.fluid {
-                    Fluid::None => 0,
-                    Fluid::Water => 1,
-                    Fluid::Lava => 2,
-                },
-                air: facts.is_air(BlockStateId(state)),
-            });
+            let (name, look) = if state == PLAIN_WATER {
+                let name = "minecraft:water".to_owned();
+                // The vanilla map's water colour (map colour 12).
+                let look = BlockLook {
+                    map_color: MAP_COLORS.get(12).copied().unwrap_or(0),
+                    fluid: 1,
+                    air: false,
+                };
+                (name, look)
+            } else {
+                let f = facts.get(BlockStateId(state));
+                let look = BlockLook {
+                    map_color: MAP_COLORS.get(f.map_color as usize).copied().unwrap_or(0),
+                    fluid: match f.fluid {
+                        Fluid::None => 0,
+                        Fluid::Water => 1,
+                        Fluid::Lava => 2,
+                    },
+                    air: facts.is_air(BlockStateId(state)),
+                };
+                (f.name.to_string(), look)
+            };
+            block_looks.entry(name.clone()).or_insert(look);
             blocks.push(name);
             (blocks.len() - 1) as u16
         })
@@ -585,7 +600,9 @@ fn read_chunk(
                     y -= 1;
                 }
                 let depth = (surface - y).clamp(1, 255) as u8;
-                fluid = Some((intern_block(top_state), depth));
+                let top = facts.get(BlockStateId(top_state));
+                let waterlogged = top.fluid == Fluid::Water && top.name.to_string() != "minecraft:water";
+                fluid = Some((intern_block(if waterlogged { PLAIN_WATER } else { top_state }), depth));
                 while y > bottom && !shows(chunk.get(x, y, z)) {
                     y -= 1;
                 }
