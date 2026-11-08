@@ -589,3 +589,11 @@ Das Audit (`docs/AUDIT_REPORT.md`, Commit `92c0fd5`) fand 6 hohe, 23 mittlere un
 - **Offen:** Beobachtungen an der Referenz (D-012/KEYBINDS); Spawnwechsel auf einem Vanilla-Server.
 
 - **Nachtest mit Horizon-Fixes (2026-11-08):** Pin auf Horizon `447e9d2`, neue Logzeilen für Spawn und Sperre, Build `native-447e9d2-236224f0c3f6`. LAN-Beitritt, `/setworldspawn`, Respawn und Zweitprozess im Log geprüft: [AUDIT_VALIDATION.md](AUDIT_VALIDATION.md#nachtest-mit-horizon-fixes-2026-11-08).
+
+## Optik wie die Referenz, Radar, Seed-Layer in End und Nether (2026-11-08, D-042)
+
+- Gelände nach gemessenem Modell: Tageslicht, Hangstufen aus Nord- und Nordwest-Nachbar, Abdunklung unter y 63, Wasser, Nacht, End- und Nether-Licht, Höhlenhelligkeit nach Tiefe. Im Spiel geprüft: Ebenenfeld 715/720 Blöcke gleich, Minimap und Weltkarte nebeneinander mit der Referenz verglichen.
+- Seetang und Seegras färben das Wasser nicht mehr grün; Minimap bilinear.
+- Radar: Items rot, Abdunklung nur darunter (gemessene Kurve), Punktgröße wie die Referenz, Farben je Klasse einstellbar.
+- Seed Atlas: keine Gateways auf der Hauptinsel; End und Nether im Look der erkundeten Karte, alle Detailstufen gleich hell. Fabric-Version angeglichen.
+- Messtests (von Hand): `cargo test -p meridian-core --release --test calibrate_look -- --ignored --nocapture`.

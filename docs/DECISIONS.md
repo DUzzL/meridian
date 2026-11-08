@@ -623,3 +623,32 @@ Seitdem steht `cc` (1.6.0) in Horizons Lockfile, und Bundle-Crates dürfen ein `
 - Damit gelten Korrekturen und Beschleunigungen der Engine ohne Nacharbeit auch in Meridian.
 
 Ersetzt den Rust-Port aus D-025; `docs/SEEDATLAS_PORT.md` beschreibt den neuen Aufbau.
+
+## D-042: Optik und Radar nach Messung an der Referenz, Seed-Layer in End und Nether (2026-11-08)
+
+Wunsch des Auftraggebers: Die Karte soll praktisch wie die Referenz aussehen, mit Seed Atlas obendrauf; das Radar soll sich gleich verhalten. Einstellungen brauchen keine Parität. Grundlage sind neue O3-Messungen (CLEAN_ROOM, Protokoll 2026-11-08): Teststrukturen bekannter Höhe und Farbe in der Prism-Welt, Pixel der Referenzkarte ausgelesen, dieselbe Welt in Meridian verglichen. Übernommen wurden nur Zahlen, keine Pixel oder Grafiken.
+
+**Gelände (`color.rs`, `region.rs`)**
+- Farbe = Texturmittel × Biom-Tönung × (Licht + 0,059 × Hangstufe), Kanäle gesättigt. Licht am Mittag in vollem Himmelslicht (1,0725; 1,1033; 1,1682), um Mitternacht (0,227; 0,239; 0,262) ohne sichtbare Hänge; dazwischen nach Licht und Tageszeit. End: neutral 1,168. Nether und Höhlen ohne Licht dunkel (Nether rot: 0,316; 0,237; 0,237), Fackeln hellen auf.
+- Hangstufe aus dem Nord- und dem Nordwest-Nachbarn (nicht West): Liegt der Block tiefer als sein Nordnachbar, Schatten (−8). Sonst Lambert-Licht von Norden, 44,5° hoch, auf der Ebene durch die drei Säulen, abgerundet: `floor(10,1 × (n·L − sin 44,5°))`. Das gibt alle 77 gemessenen Ebenen exakt wieder (Test `smooth_slopes_match_the_reference`); im Spiel stimmen 715 von 720 Blöcken auf ±3 (Rest: Spielerpfeil). „Strong“ nimmt 1,5-mal so viele Stufen, „Vanilla“ bleibt die Papierkarte.
+- Keine Aufhellung nach absoluter Höhe; unter y 63 bis zu 10 % dunkler (sechs Blöcke tief).
+- Wasser: 70 % Wasserfarbe (mit dem Licht gedimmt) plus 28 % des beleuchteten Grunds, mit der Tiefe weniger (ab 13 Blöcken langsamer). Nachbarn von Wasser zählen mit ihrer Bodenhöhe, wie in der Referenz (westliche Ufer dunkel). Lava leuchtet selbst.
+- Wasser über wassergefüllten Blöcken (Seetang, Seegras, `waterlogged`) nimmt die Farbe von Wasser, nicht der Pflanze (Bridge).
+- Höhlenmodus: Boden nahe der Ebene bis 1,5-mal heller als an der Höhlentiefe.
+- Minimap: bilinear zwischen den Texeln (Shader), weich wie die Referenz.
+
+**Radar (`radar.rs`, `config.rs`)**
+- Items reinrot 0xFF0000 (nicht 0xFF5555 aus der Chatpalette); sonst wie O2.
+- Abdunklung nur unter dem Spieler: bis knapp 5 Blöcke voll, dann 0,75 − (d − 5)/(Grenze − 5) × 0,5, Kanäle abgerundet (gemessen an Schweinen in bekannter Höhe; Test `fade_below_like_the_reference`). Über dem Spieler keine Abdunklung. Grenze beidseitig.
+- Punkte etwa 1,5 Einheiten Halbdiagonale, abgerundete Raute auf dunklem Rand, auf Minimap und Weltkarte gleich (vorher auf der Karte nur etwa halb so groß).
+- Neue Einstellungen: Farbe je Klasse (Spieler, feindlich, friedlich, Items, Sonstige) aus 16 benannten Farben, Rechtsklick zurück; in der TOML auch freie `0xRRGGBB`-Werte.
+
+**Seed Atlas**
+- Die 20 Gateways des Drachenkampfs (Schnittstellen-Flag `RESULT_FIXED`) erscheinen weder als Marker noch in der Suche nach der nächsten Struktur; die Gateways der äußeren Inseln bleiben. Ebenso in der Fabric-Version.
+- End: Inseln wie die erkundete Karte (Endstein im End-Licht, Hänge aus Nord/Nordwest, keine Körnung), Leere 0x0A0017 wie die erkundete Leere der Referenz. Ohne Höhen (weit draußen, erster Durchgang) mischt jedes Pixel Boden und Leere nach dem gemessenen Landanteil seines Bioms (Highlands 0,995, Midlands 0,82, Barrens 0,38, Small Islands 0,07), gemittelt über bis zu 8 × 8 chunkgroße Biomproben; die mittlere Inselfarbe 0xE7EAA7 ist an den verfeinerten Kacheln gemessen. So haben alle Detailstufen dieselbe Helligkeit; das dunkle Kreuz beim Herauszoomen (zusammengesetzte Kacheln gegen Vorschau) ist weg.
+- Nether: wie der Höhlenmodus der Referenz an der Seed-Ebene: Boden bis 30 Blöcke unter der Ebene dunkel und nach Biom gefärbt, tiefer und Fels schwarz, das Lavameer nur, wo es in Reichweite liegt. Ohne Böden (weit draußen, erster Durchgang) der Mittelwert (38 % Boden, gemessen). Das ersetzt das flächige Orange der verfeinerten Kacheln und die bunten Biomflecken daneben. Das Licht auf vorhergesagtem Boden (0,46; 0,33; 0,32) ist auf die mittlere Helligkeit erkundeter Nether-Böden der Referenz gehoben (dort leuchten Lava, Feuer und Glowstone).
+- Die Fabric-Version (`seed-atlas-xaero`) hat dieselben Änderungen (Gateways, End, Nether), damit der Seed-Layer dort zu Xaeros erkundeter Karte passt.
+
+**Nicht übernommen**
+- Die Referenz zeichnet die Zeile z = 0 und die Spalte x = 0 (Regionsgrenzen) teils anders; das wirkt wie ein Fehler und ist nicht nachgebaut.
+- Die weiche Kante der Radarpunkte (die Referenz zeichnet sie in die unscharf hochskalierte Minimap) ist nur angenähert.
