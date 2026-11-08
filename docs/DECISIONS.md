@@ -652,3 +652,7 @@ Wunsch des Auftraggebers: Die Karte soll praktisch wie die Referenz aussehen, mi
 **Nicht übernommen**
 - Die Referenz zeichnet die Zeile z = 0 und die Spalte x = 0 (Regionsgrenzen) teils anders; das wirkt wie ein Fehler und ist nicht nachgebaut.
 - Die weiche Kante der Radarpunkte (die Referenz zeichnet sie in die unscharf hochskalierte Minimap) ist nur angenähert.
+
+## D-043: Fußspuren verblassen wie in der Referenz (2026-11-08)
+
+Gemessen an der Referenz (O3: 4 Sekunden geradeaus gehen, dann Weltkarte im Sekundentakt aufgenommen): Die Spur besteht aus kleinen roten Punkten (0xFF1919), etwa einer pro Block. Sie bleibt rund 15 Sekunden ganz und verschwindet dann vom ältesten Ende her, ungefähr ein Punkt alle 0,75 Sekunden; nach 4 Sekunden Gehen ist sie nach etwa 28 Sekunden weg. Meridian zeichnete weiße Punkte jeden zweiten Block, die nie verschwanden. Jetzt: ein Punkt pro Block, rot, nach 15 Sekunden einer pro 0,75 Sekunden weg (`worldmap.rs`, Test `footsteps_fade_from_the_far_end`).

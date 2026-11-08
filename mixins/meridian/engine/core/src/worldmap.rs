@@ -38,6 +38,14 @@ const ZOOM_STEP: f64 = 1.2;
 const ENTITY_FACE_HALF: f32 = 3.0;
 /// Most footstep points kept.
 const FOOTSTEPS: usize = 2048;
+/// Footsteps older than this start to go, oldest first (measured on the
+/// reference, D-043).
+const FOOTSTEP_LIFE: std::time::Duration = std::time::Duration::from_secs(15);
+/// At most one footstep goes per this interval, so a long walk's trail
+/// shrinks gradually from its far end.
+const FOOTSTEP_DROP: std::time::Duration = std::time::Duration::from_millis(750);
+/// The footsteps' colour (the reference's red).
+const FOOTSTEP_ARGB: u32 = 0xFFFF_1919;
 
 /// What the map's right-click menu offers.
 #[derive(Clone, Debug, PartialEq)]
@@ -161,6 +169,12 @@ pub struct WorldMap {
     pub press: Option<[f32; 2]>,
     pub dragged: bool,
     pub footsteps: Vec<[i32; 2]>,
+    /// When each footstep was walked, oldest first.
+    footstep_times: std::collections::VecDeque<std::time::Instant>,
+    /// When the last old footstep went.
+    footstep_dropped: Option<std::time::Instant>,
+    /// The block of the latest footstep, even when it has gone.
+    last_step: Option<[i32; 2]>,
     /// The world, map and dimension the footsteps were walked in.
     pub footsteps_of: Option<(WorldContext, String)>,
     /// The zoom range (see [`WorldMap::set_unlimited`]).
@@ -182,6 +196,9 @@ impl WorldMap {
             press: None,
             dragged: false,
             footsteps: Vec::new(),
+            footstep_times: std::collections::VecDeque::new(),
+            footstep_dropped: None,
+            last_step: None,
             footsteps_of: None,
             limits: (MIN_ZOOM, MAX_ZOOM),
             opening: None,
@@ -314,30 +331,58 @@ impl WorldMap {
             .as_ref()
             .is_none_or(|(c, m)| c != context || m != map)
         {
-            self.footsteps.clear();
+            self.clear_footsteps();
             self.footsteps_of = Some((context.clone(), map.to_owned()));
         }
     }
 
     /// Drops the footsteps, as when leaving the world.
     pub fn forget_footsteps(&mut self) {
-        self.footsteps.clear();
+        self.clear_footsteps();
         self.footsteps_of = None;
     }
 
-    /// Notes where the player walked (every other block).
+    fn clear_footsteps(&mut self) {
+        self.footsteps.clear();
+        self.footstep_times.clear();
+        self.footstep_dropped = None;
+        self.last_step = None;
+    }
+
+    /// Notes where the player walked (every block) and lets old footsteps
+    /// go: after [`FOOTSTEP_LIFE`], one per [`FOOTSTEP_DROP`], as on the
+    /// reference, where a trail fades from its far end.
     pub fn step(&mut self, player: [f64; 3]) {
+        self.step_at(player, std::time::Instant::now());
+    }
+
+    /// [`WorldMap::step`] at a given time.
+    pub fn step_at(&mut self, player: [f64; 3], now: std::time::Instant) {
         self.player_at = Some([player[0], player[2]]);
         let p = [player[0].floor() as i32, player[2].floor() as i32];
         let moved = self
-            .footsteps
-            .last()
-            .is_none_or(|l| (l[0] - p[0]).abs() + (l[1] - p[1]).abs() >= 2);
+            .last_step
+            .is_none_or(|l| (l[0] - p[0]).abs() + (l[1] - p[1]).abs() >= 1);
         if moved {
+            self.last_step = Some(p);
             if self.footsteps.len() >= FOOTSTEPS {
                 self.footsteps.remove(0);
+                self.footstep_times.pop_front();
             }
             self.footsteps.push(p);
+            self.footstep_times.push_back(now);
+        }
+        let old = self
+            .footstep_times
+            .front()
+            .is_some_and(|&t| now.saturating_duration_since(t) > FOOTSTEP_LIFE);
+        let due = self
+            .footstep_dropped
+            .is_none_or(|t| now.saturating_duration_since(t) >= FOOTSTEP_DROP);
+        if old && due {
+            self.footsteps.remove(0);
+            self.footstep_times.pop_front();
+            self.footstep_dropped = Some(now);
         }
     }
 
@@ -468,11 +513,11 @@ impl WorldMap {
         let mut ops = Vec::new();
         let (gui, u) = (o.gui, o.unit);
         if o.show_footsteps {
-            for f in self.footsteps.iter().step_by(2) {
+            for f in &self.footsteps {
                 let [x, y] = self.to_screen([f[0] as f64 + 0.5, f[1] as f64 + 0.5], gui, u);
                 ops.push(DrawOp::Fill {
-                    rect: [x - 0.5 * u, y - 0.5 * u, u, u],
-                    argb: 0xA0FF_FFFF,
+                    rect: [x - 0.4 * u, y - 0.4 * u, 0.8 * u, 0.8 * u],
+                    argb: FOOTSTEP_ARGB,
                 });
             }
         }
@@ -1288,6 +1333,32 @@ mod tests {
     }
 
     #[test]
+    fn footsteps_fade_from_the_far_end() {
+        let t0 = std::time::Instant::now();
+        let at = |s: f32| t0 + std::time::Duration::from_secs_f32(s);
+        let mut m = WorldMap::new([0.0; 3]);
+        // Walking 17 blocks in 4 seconds leaves a footstep per block.
+        for i in 0..17 {
+            m.step_at([0.0, 64.0, i as f64], at(i as f32 * 0.25));
+        }
+        assert_eq!(m.footsteps.len(), 17);
+        // Standing still: the whole trail stays 15 seconds...
+        m.step_at([0.0, 64.0, 16.0], at(14.9));
+        assert_eq!(m.footsteps.len(), 17);
+        // ...then goes from its oldest end, one per 0.75 seconds.
+        let mut t = 15.1;
+        while t < 40.0 {
+            m.step_at([0.0, 64.0, 16.0], at(t));
+            t += 0.25;
+            if (t - 18.1).abs() < 0.01 {
+                assert_eq!(m.footsteps.len(), 13);
+                assert_eq!(m.footsteps[0], [0, 4], "the far end went first");
+            }
+        }
+        assert!(m.footsteps.is_empty());
+    }
+
+    #[test]
     fn footsteps_start_afresh_in_another_world_or_dimension() {
         use meridian_host::{DimensionId, WorldSource};
         let world = |name: &str, dim: &str| WorldContext {
@@ -1323,11 +1394,12 @@ mod tests {
     }
 
     #[test]
-    fn footsteps_every_other_block() {
+    fn footsteps_every_block() {
         let mut m = WorldMap::new([0.0; 3]);
         for x in 0..10 {
             m.step([x as f64, 64.0, 0.0]);
+            m.step([x as f64 + 0.5, 64.0, 0.0]);
         }
-        assert_eq!(m.footsteps.len(), 5);
+        assert_eq!(m.footsteps.len(), 10);
     }
 }
