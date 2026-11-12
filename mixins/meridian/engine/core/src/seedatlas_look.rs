@@ -1763,7 +1763,10 @@ mod tests {
         assert_eq!(looks.foliage_color("dappled_forest"), 0xE68E30);
         assert_eq!(looks.water_color("dappled_forest"), 0x375154);
         assert!(!looks.cold_enough_to_snow("dappled_forest", 0, 70, 0, 63));
-        assert_eq!(ground(&looks, "dappled_forest", 0, 70, 0, false, 63), grass(0xDF6827));
+        assert_eq!(
+            ground(&looks, "dappled_forest", 0, 70, 0, false, 63),
+            grass(0xDF6827)
+        );
         // Untinted poplar leaves, not the biome's foliage tint.
         assert_eq!(leaf(&looks, "dappled_forest"), LEAVES_POPLAR);
     }
@@ -1776,12 +1779,24 @@ mod tests {
         assert_eq!(leaf(&looks, "mangrove_swamp"), scale(0x8DB127, 0.55));
         // Only the cold oceans, the snowy beach and the snowy taiga have cold water.
         for name in [
-            "snowy_plains", "ice_spikes", "taiga", "old_growth_pine_taiga",
-            "old_growth_spruce_taiga", "grove", "snowy_slopes", "frozen_peaks", "jagged_peaks",
+            "snowy_plains",
+            "ice_spikes",
+            "taiga",
+            "old_growth_pine_taiga",
+            "old_growth_spruce_taiga",
+            "grove",
+            "snowy_slopes",
+            "frozen_peaks",
+            "jagged_peaks",
         ] {
             assert_eq!(looks.water_color(name), 0x3F76E4, "{name}");
         }
-        for name in ["snowy_taiga", "snowy_beach", "cold_ocean", "deep_cold_ocean"] {
+        for name in [
+            "snowy_taiga",
+            "snowy_beach",
+            "cold_ocean",
+            "deep_cold_ocean",
+        ] {
             assert_eq!(looks.water_color(name), 0x3D57D6, "{name}");
         }
         assert!(looks.known("sulfur_caves"));
