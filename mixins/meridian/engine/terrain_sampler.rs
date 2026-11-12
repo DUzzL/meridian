@@ -507,7 +507,6 @@ const CROWN_SALT: i64 = 0x5EED_A71A5;
 /// `FoliageColor.FOLIAGE_*` without alpha.
 const FOLIAGE_EVERGREEN: i32 = 0x619961;
 const FOLIAGE_BIRCH: i32 = 0x80A755;
-const FOLIAGE_MANGROVE: i32 = 0x92C648;
 /// Mean of the red, orange and yellow poplar leaf textures, weighted by how
 /// often `trees_dappled_forest` picks each (200 : 240 : 90).
 const LEAVES_POPLAR: i32 = 0x803717;
@@ -543,7 +542,9 @@ fn canopy(name: &str) -> Option<Canopy> {
         "windswept_savanna" => foliage(0.62, 0.08),
         "wooded_badlands" => foliage(0.60, 0.25),
         "swamp" => foliage(0.60, 0.15),
-        "mangrove_swamp" => fixed(FOLIAGE_MANGROVE, 0.55, 0.75),
+        // Mangrove leaves take the biome's foliage colour in 26.3 (the
+        // constant 0x92C648 is only the inventory item's tint).
+        "mangrove_swamp" => foliage(0.55, 0.75),
         // Cherry and pale oak leaves are not tinted: texture averages.
         "cherry_grove" => fixed(0xE5ADC2, 0.95, 0.50),
         "pale_garden" => fixed(0x757A73, 1.05, 0.85),
@@ -600,7 +601,7 @@ fn ground(
     }
     match name {
         "minecraft:desert" | "minecraft:beach" => SAND,
-        "minecraft:stony_shore" | "minecraft:stony_peaks" => STONE,
+        "minecraft:stony_shore" | "minecraft:stony_peaks" | "minecraft:sulfur_caves" => STONE,
         "minecraft:badlands" | "minecraft:eroded_badlands" | "minecraft:wooded_badlands" => TERRACOTTA,
         "minecraft:mushroom_fields" => MYCELIUM,
         "minecraft:mangrove_swamp" => MUD,

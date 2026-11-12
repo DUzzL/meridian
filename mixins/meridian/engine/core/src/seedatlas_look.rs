@@ -730,7 +730,6 @@ const CROWN_SALT: i64 = 0x5EED_A71A5;
 // Vanilla's fixed leaf tints (`FoliageColor`).
 const FOLIAGE_BIRCH: i32 = 0x80A755;
 const FOLIAGE_EVERGREEN: i32 = 0x619961;
-const FOLIAGE_MANGROVE: i32 = 0x92C648;
 /// Mean of the red, orange and yellow poplar leaf textures, weighted by how
 /// often `trees_dappled_forest` picks each (200 : 240 : 90).
 const LEAVES_POPLAR: i32 = 0x803717;
@@ -780,7 +779,9 @@ fn canopy(name: &str) -> Option<Canopy> {
         "windswept_savanna" => own(0.62, 0.08),
         "wooded_badlands" => own(0.60, 0.25),
         "swamp" => own(0.60, 0.15),
-        "mangrove_swamp" => fixed(FOLIAGE_MANGROVE, 0.55, 0.75),
+        // Mangrove leaves take the biome's foliage colour in 26.3 (the
+        // constant 0x92C648 is only the inventory item's tint).
+        "mangrove_swamp" => own(0.55, 0.75),
         // Cherry and pale oak leaves are not tinted: texture averages.
         "cherry_grove" => fixed(0xE5ADC2, 0.95, 0.50),
         "pale_garden" => fixed(0x757A73, 1.05, 0.85),
@@ -857,7 +858,7 @@ pub fn ground(
     }
     match name {
         "desert" | "beach" => SAND,
-        "stony_shore" | "stony_peaks" => STONE,
+        "stony_shore" | "stony_peaks" | "sulfur_caves" => STONE,
         "badlands" | "eroded_badlands" | "wooded_badlands" => TERRACOTTA,
         "mushroom_fields" => MYCELIUM,
         "mangrove_swamp" => MUD,
@@ -1006,7 +1007,7 @@ fn climate(name: &str) -> Option<Climate> {
         "stony_shore" | "windswept_hills" | "windswept_gravelly_hills" | "windswept_forest" => {
             c(0.2, 0.3, W)
         }
-        "snowy_plains" | "ice_spikes" => c(0.0, 0.5, COLD),
+        "snowy_plains" | "ice_spikes" => c(0.0, 0.5, W),
         "desert" | "savanna" => c(2.0, 0.0, W),
         "swamp" => Climate {
             foliage: Some(0x6A7039),
@@ -1015,6 +1016,7 @@ fn climate(name: &str) -> Option<Climate> {
         },
         "mangrove_swamp" => Climate {
             foliage: Some(0x8DB127),
+            modifier: Modifier::Swamp,
             ..c(0.8, 0.9, 0x3A7A6A)
         },
         "forest" | "flower_forest" => c(0.7, 0.8, W),
@@ -1034,11 +1036,10 @@ fn climate(name: &str) -> Option<Climate> {
             foliage: Some(0x878D76),
             ..c(0.7, 0.8, 0x76889D)
         },
-        "taiga" | "old_growth_spruce_taiga" => c(0.25, 0.8, COLD),
-        "old_growth_pine_taiga" => c(0.3, 0.8, COLD),
+        "taiga" | "old_growth_spruce_taiga" => c(0.25, 0.8, W),
+        "old_growth_pine_taiga" => c(0.3, 0.8, W),
         "snowy_taiga" => c(-0.5, 0.4, COLD),
-        "savanna_plateau" => c(1.0, 0.0, W),
-        "windswept_savanna" => c(1.1, 0.0, W),
+        "savanna_plateau" | "windswept_savanna" => c(2.0, 0.0, W),
         "jungle" | "bamboo_jungle" => c(0.95, 0.9, W),
         "sparse_jungle" => c(0.95, 0.8, W),
         "badlands" | "eroded_badlands" | "wooded_badlands" => Climate {
@@ -1052,12 +1053,17 @@ fn climate(name: &str) -> Option<Climate> {
             foliage: Some(0xB6DB61),
             ..c(0.5, 0.8, 0x5DB7EF)
         },
-        "grove" => c(-0.2, 0.8, COLD),
-        "snowy_slopes" => c(-0.3, 0.9, COLD),
-        "frozen_peaks" | "jagged_peaks" => c(-0.7, 0.9, COLD),
+        "grove" => c(-0.2, 0.8, W),
+        "snowy_slopes" => c(-0.3, 0.9, W),
+        "frozen_peaks" | "jagged_peaks" => c(-0.7, 0.9, W),
         "stony_peaks" => c(1.0, 0.3, W),
         "mushroom_fields" => c(0.9, 1.0, W),
         "lush_caves" => c(0.5, 0.5, W),
+        // 26.2 cave biome: its own grass and water colours.
+        "sulfur_caves" => Climate {
+            grass: Some(0xABA64F),
+            ..c(0.8, 0.4, 0x34BF89)
+        },
         "nether_wastes" | "crimson_forest" | "warped_forest" | "soul_sand_valley"
         | "basalt_deltas" => c(2.0, 0.0, W),
         "the_end" | "small_end_islands" | "end_midlands" | "end_highlands" | "end_barrens" => {
@@ -1756,9 +1762,31 @@ mod tests {
         assert_eq!(looks.grass_color("dappled_forest", 0, 0), 0xDF6827);
         assert_eq!(looks.foliage_color("dappled_forest"), 0xE68E30);
         assert_eq!(looks.water_color("dappled_forest"), 0x375154);
+        assert!(!looks.cold_enough_to_snow("dappled_forest", 0, 70, 0, 63));
         assert_eq!(ground(&looks, "dappled_forest", 0, 70, 0, false, 63), grass(0xDF6827));
         // Untinted poplar leaves, not the biome's foliage tint.
         assert_eq!(leaf(&looks, "dappled_forest"), LEAVES_POPLAR);
+    }
+
+    /// Values of the 26.3 client data (`worldgen/biome/*.json`).
+    #[test]
+    fn climate_follows_the_26_3_biome_data() {
+        let looks = VanillaLooks;
+        // Mangrove leaves follow the foliage colour of the biome.
+        assert_eq!(leaf(&looks, "mangrove_swamp"), scale(0x8DB127, 0.55));
+        // Only the cold oceans, the snowy beach and the snowy taiga have cold water.
+        for name in [
+            "snowy_plains", "ice_spikes", "taiga", "old_growth_pine_taiga",
+            "old_growth_spruce_taiga", "grove", "snowy_slopes", "frozen_peaks", "jagged_peaks",
+        ] {
+            assert_eq!(looks.water_color(name), 0x3F76E4, "{name}");
+        }
+        for name in ["snowy_taiga", "snowy_beach", "cold_ocean", "deep_cold_ocean"] {
+            assert_eq!(looks.water_color(name), 0x3D57D6, "{name}");
+        }
+        assert!(looks.known("sulfur_caves"));
+        assert_eq!(looks.water_color("sulfur_caves"), 0x34BF89);
+        assert_eq!(looks.grass_color("sulfur_caves", 0, 0), 0xABA64F);
     }
 
     fn ground_of(looks: &VanillaLooks, name: &str, x: i32) -> i32 {
