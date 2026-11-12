@@ -656,3 +656,14 @@ Wunsch des Auftraggebers: Die Karte soll praktisch wie die Referenz aussehen, mi
 ## D-043: Fußspuren verblassen wie in der Referenz (2026-11-08)
 
 Gemessen an der Referenz (O3: 4 Sekunden geradeaus gehen, dann Weltkarte im Sekundentakt aufgenommen): Die Spur besteht aus kleinen roten Punkten (0xFF1919), etwa einer pro Block. Sie bleibt rund 15 Sekunden ganz und verschwindet dann vom ältesten Ende her, ungefähr ein Punkt alle 0,75 Sekunden; nach 4 Sekunden Gehen ist sie nach etwa 28 Sekunden weg. Meridian zeichnete weiße Punkte jeden zweiten Block, die nie verschwanden. Jetzt: ein Punkt pro Block, rot, nach 15 Sekunden einer pro 0,75 Sekunden weg (`worldmap.rs`, Test `footsteps_fade_from_the_far_end`).
+
+## D-044: Biomtabelle des Gelände-Looks gegen die Daten von 26.3 geprüft (2026-11-12)
+
+Quelle: die Biom-, Feature- und Oberflächenregeldateien (`data/minecraft/worldgen/`) und Modelle des offiziellen 26.3-Clients, also Mojangs Daten. Es gibt zwei Tabellen: `core/src/seedatlas_look.rs` (`VanillaLooks`, `canopy`) für den Seed-Layer, und `terrain_sampler.rs` (eigene `canopy`) für die Kacheln aus Horizons Gelände. Im Spiel kommen Gras-, Laub- und Wasserfarben aus der Biomtabelle des Spiels (`GameLooks`, `bridge::biome_look`); `VanillaLooks` gilt für Biome, die das Spiel nicht kennt, und liefert immer die Schneegrenze. Die Baumkronen-Tabellen gehören nicht zu den Daten des Spiels und müssen in beiden Dateien gleich sein.
+
+- **Dappled Forest** hatte die Werte des Waldes (0,7/0,8, grüne Farben, Standardwasser). Jetzt 0,6/0,6, Gras #DF6827, Laub #E68E30, Wasser #375154. Die Kronen sind keine Laubfarbe des Bioms: Pappelblätter (rot, orange, gelb) sind ungefärbt, die Krone nimmt den Mittelwert der drei Texturen nach den Gewichten der Baum-Features (200 : 240 : 90), #803717.
+- **Wasser** von Snowy Plains, Ice Spikes, den Taiga-Biomen, Grove, Snowy Slopes und den Gipfeln war #3D57D6, in den Daten ist es das normale #3F76E4. Kaltes Wasser haben nur kalte Ozeane, Snowy Beach und Snowy Taiga.
+- **Savanna Plateau** und **Windswept Savanna**: Temperatur 2,0 statt 1,0 und 1,1 (gleiche Farben, aber die Daten).
+- **Mangrove Swamp**: Gras-Modifikator `swamp`; die Blätter nehmen die Laubfarbe des Bioms (#8DB127). #92C648 ist nur der Wert des Inventar-Items (`items/mangrove_leaves.json`, `BlockColors` registriert den Block mit dem Laubton).
+- **Sulfur Caves** (26.2) fiel in die Standardwerte; jetzt Gras #ABA64F, Wasser #34BF89, Boden Stein (Oberflächenregel).
+- Nicht angefasst, weil geschätzt oder nur Flecken: Kronenanteile (`own(…)`/`fixed(…)`), Stein- und Kiesflecken in Windswept Hills und Savanna, Podsol in alten Taigen, Grobkies/Grobdreck-Flecken.
