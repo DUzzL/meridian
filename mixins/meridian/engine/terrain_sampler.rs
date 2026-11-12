@@ -507,27 +507,37 @@ const CROWN_SALT: i64 = 0x5EED_A71A5;
 /// `FoliageColor.FOLIAGE_*` without alpha.
 const FOLIAGE_EVERGREEN: i32 = 0x619961;
 const FOLIAGE_BIRCH: i32 = 0x80A755;
-/// Mean of the red, orange and yellow poplar leaf textures, weighted by how
-/// often `trees_dappled_forest` picks each (200 : 240 : 90).
-const LEAVES_POPLAR: i32 = 0x803717;
+/// Mean opaque-pixel colours of the red, orange and yellow poplar leaf
+/// textures (untinted blocks) with the weights of `trees_dappled_forest`
+/// (red 200, orange 240, yellow 90).
+const POPLAR_LEAVES: [(i32, u32); 3] = [(0x9A2C27, 20), (0xBC5618, 24), (0xD78628, 9)];
 
-/// Leaf tint source: a fixed colour, or the biome's own foliage colour.
+/// Leaf tint source: a fixed colour, or the biome's own foliage colour. A
+/// canopy of several untinted leaf kinds lists them in `variants` with their
+/// weights (`fixed` is then their mean): each crown has one of them.
 struct Canopy {
     fixed: Option<i32>,
     texture: f32,
     density: f32,
+    variants: &'static [(i32, u32)],
 }
 
 fn canopy(name: &str) -> Option<Canopy> {
-    let foliage = |texture, density| Canopy { fixed: None, texture, density };
-    let fixed = |color, texture, density| Canopy { fixed: Some(color), texture, density };
+    let foliage = |texture, density| Canopy { fixed: None, texture, density, variants: &[] };
+    let fixed =
+        |color, texture, density| Canopy { fixed: Some(color), texture, density, variants: &[] };
     Some(match name.strip_prefix("minecraft:")? {
         "forest" => foliage(0.60, 0.55),
         "flower_forest" => foliage(0.60, 0.35),
-        // Poplar leaves are not tinted: the mean of the three leaf textures
-        // (red 200, orange 240, yellow 90 of the tree features' weights).
-        "dappled_forest" => fixed(LEAVES_POPLAR, 1.0, 0.45),
-        "windswept_forest" => foliage(0.55, 0.45),
+        // Poplar leaves are not tinted: red, orange or yellow per tree.
+        "dappled_forest" => Canopy {
+            fixed: Some(mean(&POPLAR_LEAVES)),
+            texture: 0.95,
+            density: 0.45,
+            variants: &POPLAR_LEAVES,
+        },
+        // Two thirds of `trees_windswept_hills` are spruces (chance 0.666).
+        "windswept_forest" => fixed(FOLIAGE_EVERGREEN, 0.42, 0.45),
         "dark_forest" => foliage(0.50, 0.90),
         "birch_forest" => fixed(FOLIAGE_BIRCH, 0.62, 0.55),
         "old_growth_birch_forest" => fixed(FOLIAGE_BIRCH, 0.62, 0.60),
@@ -573,6 +583,9 @@ fn surface_color(
     match canopy {
         None => ground,
         Some(canopy) => {
+            if !canopy.variants.is_empty() && step < 8 {
+                return crowns_of(ground, canopy.variants, canopy.texture, canopy.density, x, z);
+            }
             let leaf = leaf(info, &canopy);
             crowns(ground, leaf, canopy.density, x, z, step)
         }
@@ -657,6 +670,20 @@ fn crowns(ground: i32, leaf: i32, density: f32, x: i32, z: i32, step: i32) -> i3
     if step >= 8 {
         return mix(ground, leaf, density);
     }
+    crowns_of(ground, &[(leaf, 1)], 1.0, density, x, z)
+}
+
+/// Crowns whose leaf colour is picked per tree from `variants` by their
+/// weights; `texture` scales the colour with the crown's light.
+fn crowns_of(
+    ground: i32,
+    variants: &[(i32, u32)],
+    texture: f32,
+    density: f32,
+    x: i32,
+    z: i32,
+) -> i32 {
+    let total: u32 = variants.iter().map(|v| v.1).sum();
     let cell_x = x.div_euclid(CROWN_CELL);
     let cell_z = z.div_euclid(CROWN_CELL);
     // A crown covers about 0.6 of its cell.
@@ -678,10 +705,30 @@ fn crowns(ground: i32, leaf: i32, density: f32, x: i32, z: i32, step: i32) -> i3
                 continue;
             }
             let light = round(-(offset_x + offset_z) / radius * 9.0);
-            return scale(leaf, 1.0 + light as f32 / 100.0);
+            let mut pick = (((hash as u64) >> 36) % u64::from(total)) as u32;
+            let mut index = 0;
+            while pick >= variants[index].1 {
+                pick -= variants[index].1;
+                index += 1;
+            }
+            return scale(variants[index].0, texture * (1.0 + light as f32 / 100.0));
         }
     }
     ground
+}
+
+/// The weighted mean of leaf colours (the blend of a canopy at coarse samples).
+fn mean(variants: &[(i32, u32)]) -> i32 {
+    let total: u32 = variants.iter().map(|v| v.1).sum();
+    let mut result = 0;
+    for shift in [16, 8, 0] {
+        let sum: u64 = variants
+            .iter()
+            .map(|&(color, weight)| ((color >> shift) & 0xFF) as u64 * u64::from(weight))
+            .sum();
+        result |= round(sum as f32 / total as f32) << shift;
+    }
+    result
 }
 
 // ---------------------------------------------------------------------------

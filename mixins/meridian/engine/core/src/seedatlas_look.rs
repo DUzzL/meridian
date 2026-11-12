@@ -730,21 +730,25 @@ const CROWN_SALT: i64 = 0x5EED_A71A5;
 // Vanilla's fixed leaf tints (`FoliageColor`).
 const FOLIAGE_BIRCH: i32 = 0x80A755;
 const FOLIAGE_EVERGREEN: i32 = 0x619961;
-/// Mean of the red, orange and yellow poplar leaf textures, weighted by how
-/// often `trees_dappled_forest` picks each (200 : 240 : 90).
-const LEAVES_POPLAR: i32 = 0x803717;
+/// Mean opaque-pixel colours of the red, orange and yellow poplar leaf
+/// textures (untinted blocks) with the weights of `trees_dappled_forest`
+/// (red 200, orange 240, yellow 90).
+const POPLAR_LEAVES: [(i32, u32); 3] = [(0x9A2C27, 20), (0xBC5618, 24), (0xD78628, 9)];
 
 /// Grass/foliage colormap corners (hot-dry, hot-wet, cold).
 pub const GRASS_CORNERS: [i32; 3] = [0xBFB755, 0x47CD33, 0x80B497];
 pub const FOLIAGE_CORNERS: [i32; 3] = [0xAEA42A, 0x1ABF00, 0x60A17B];
 
 /// Leaf tint source of a forest biome's crowns: a fixed colour (or -1 for the
-/// biome's own foliage colour), the texture brightness and the coverage.
+/// biome's own foliage colour), the texture brightness and the coverage. A
+/// canopy of several untinted leaf kinds lists them in `variants` with their
+/// weights (`fixed` is then their mean): each crown has one of them.
 #[derive(Clone, Copy, Debug)]
 struct Canopy {
     fixed: i32,
     texture: f32,
     density: f32,
+    variants: &'static [(i32, u32)],
 }
 
 fn canopy(name: &str) -> Option<Canopy> {
@@ -752,19 +756,26 @@ fn canopy(name: &str) -> Option<Canopy> {
         fixed: -1,
         texture,
         density,
+        variants: &[],
     };
     let fixed = |fixed, texture, density| Canopy {
         fixed,
         texture,
         density,
+        variants: &[],
     };
     Some(match name {
         "forest" => own(0.60, 0.55),
         "flower_forest" => own(0.60, 0.35),
-        // Poplar leaves are not tinted: the mean of the three leaf textures
-        // (red 200, orange 240, yellow 90 of the tree features' weights).
-        "dappled_forest" => fixed(LEAVES_POPLAR, 1.0, 0.45),
-        "windswept_forest" => own(0.55, 0.45),
+        // Poplar leaves are not tinted: red, orange or yellow per tree.
+        "dappled_forest" => Canopy {
+            fixed: mean(&POPLAR_LEAVES),
+            texture: 0.95,
+            density: 0.45,
+            variants: &POPLAR_LEAVES,
+        },
+        // Two thirds of `trees_windswept_hills` are spruces (chance 0.666).
+        "windswept_forest" => fixed(FOLIAGE_EVERGREEN, 0.42, 0.45),
         "dark_forest" => own(0.50, 0.90),
         "birch_forest" => fixed(FOLIAGE_BIRCH, 0.62, 0.55),
         "old_growth_birch_forest" => fixed(FOLIAGE_BIRCH, 0.62, 0.60),
@@ -833,6 +844,9 @@ pub fn surface_color(
     };
     match canopy {
         None => ground,
+        Some(c) if !c.variants.is_empty() && step < 8 => {
+            crowns_of(ground, c.variants, c.texture, c.density, x, z)
+        }
         Some(c) => crowns(ground, leaf(looks, name), c.density, x, z, step),
     }
 }
@@ -892,6 +906,20 @@ pub fn crowns(ground: i32, leaf: i32, density: f32, x: i32, z: i32, step: i32) -
     if step >= 8 {
         return mix(ground, leaf, density);
     }
+    crowns_of(ground, &[(leaf, 1)], 1.0, density, x, z)
+}
+
+/// Crowns whose leaf colour is picked per tree from `variants` by their
+/// weights; `texture` scales the colour with the crown's light.
+pub fn crowns_of(
+    ground: i32,
+    variants: &[(i32, u32)],
+    texture: f32,
+    density: f32,
+    x: i32,
+    z: i32,
+) -> i32 {
+    let total: u32 = variants.iter().map(|v| v.1).sum();
     let cell_x = x.div_euclid(CROWN_CELL);
     let cell_z = z.div_euclid(CROWN_CELL);
     // A crown covers about 0.6 of its cell, so this probability yields the coverage.
@@ -914,10 +942,30 @@ pub fn crowns(ground: i32, leaf: i32, density: f32, x: i32, z: i32, step: i32) -
             }
             // The north-west half of a crown faces the light.
             let light = round(-(off_x + off_z) / radius * 9.0);
-            return scale(leaf, 1.0 + light as f32 / 100.0);
+            let mut pick = ((h >> 36) % i64::from(total)) as u32;
+            let mut index = 0;
+            while pick >= variants[index].1 {
+                pick -= variants[index].1;
+                index += 1;
+            }
+            return scale(variants[index].0, texture * (1.0 + light as f32 / 100.0));
         }
     }
     ground
+}
+
+/// The weighted mean of leaf colours (the blend of a canopy at coarse samples).
+fn mean(variants: &[(i32, u32)]) -> i32 {
+    let total: u32 = variants.iter().map(|v| v.1).sum();
+    let mut result = 0;
+    for shift in [16, 8, 0] {
+        let sum: u64 = variants
+            .iter()
+            .map(|&(color, weight)| ((color >> shift) & 0xFF) as u64 * u64::from(weight))
+            .sum();
+        result |= round(sum as f32 / total as f32) << shift;
+    }
+    result
 }
 
 /// Barycentric form of vanilla's colormap lookup (x = 1 - temperature,
@@ -1767,14 +1815,49 @@ mod tests {
             ground(&looks, "dappled_forest", 0, 70, 0, false, 63),
             grass(0xDF6827)
         );
-        // Untinted poplar leaves, not the biome's foliage tint.
-        assert_eq!(leaf(&looks, "dappled_forest"), LEAVES_POPLAR);
+        // Untinted poplar leaves, not the biome's foliage tint: the weighted
+        // mean (about #B44E20) at texture 0.95 where samples are coarse.
+        assert_eq!(mean(&POPLAR_LEAVES), 0xB44E20);
+        assert_eq!(leaf(&looks, "dappled_forest"), scale(0xB44E20, 0.95));
+        assert_eq!(
+            surface_color(&looks, "dappled_forest", 8, 70, 8, false, 63, 8),
+            mix(grass(0xDF6827), scale(0xB44E20, 0.95), 0.45)
+        );
+        // Fine samples: each crown is one of the three leaf colours, in the
+        // weights 20 : 24 : 9 (unlit crown pixels are `texture` times a colour).
+        let mut seen = [0usize; 3];
+        for z in 0..300 {
+            for x in 0..300 {
+                let c = surface_color(&looks, "dappled_forest", x, 70, z, false, 63, 1);
+                if c == grass(0xDF6827) {
+                    continue;
+                }
+                // Lighting scales all channels alike: classify by green over red
+                // (red 0.29, orange 0.46, yellow 0.62).
+                let (r, g) = ((c >> 16) & 0xFF, (c >> 8) & 0xFF);
+                let hue = g as f32 / r as f32;
+                let kind = if hue < 0.38 {
+                    0
+                } else if hue < 0.54 {
+                    1
+                } else {
+                    2
+                };
+                seen[kind] += 1;
+            }
+        }
+        // All three appear and orange (24 of 53) is the most common.
+        assert!(seen.iter().all(|&n| n > 100), "{seen:?}");
+        assert!(seen[1] > seen[0] && seen[1] > seen[2], "{seen:?}");
     }
 
     /// Values of the 26.3 client data (`worldgen/biome/*.json`).
     #[test]
     fn climate_follows_the_26_3_biome_data() {
         let looks = VanillaLooks;
+        // Two thirds of the windswept forest's trees are spruces: evergreen
+        // leaves like the taiga's.
+        assert_eq!(leaf(&looks, "windswept_forest"), leaf(&looks, "taiga"));
         // Mangrove leaves follow the foliage colour of the biome.
         assert_eq!(leaf(&looks, "mangrove_swamp"), scale(0x8DB127, 0.55));
         // Only the cold oceans, the snowy beach and the snowy taiga have cold water.
