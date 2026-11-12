@@ -731,6 +731,9 @@ const CROWN_SALT: i64 = 0x5EED_A71A5;
 const FOLIAGE_BIRCH: i32 = 0x80A755;
 const FOLIAGE_EVERGREEN: i32 = 0x619961;
 const FOLIAGE_MANGROVE: i32 = 0x92C648;
+/// Mean of the red, orange and yellow poplar leaf textures, weighted by how
+/// often `trees_dappled_forest` picks each (200 : 240 : 90).
+const LEAVES_POPLAR: i32 = 0x803717;
 
 /// Grass/foliage colormap corners (hot-dry, hot-wet, cold).
 pub const GRASS_CORNERS: [i32; 3] = [0xBFB755, 0x47CD33, 0x80B497];
@@ -759,7 +762,9 @@ fn canopy(name: &str) -> Option<Canopy> {
     Some(match name {
         "forest" => own(0.60, 0.55),
         "flower_forest" => own(0.60, 0.35),
-        "dappled_forest" => own(0.60, 0.45),
+        // Poplar leaves are not tinted: the mean of the three leaf textures
+        // (red 200, orange 240, yellow 90 of the tree features' weights).
+        "dappled_forest" => fixed(LEAVES_POPLAR, 1.0, 0.45),
         "windswept_forest" => own(0.55, 0.45),
         "dark_forest" => own(0.50, 0.90),
         "birch_forest" => fixed(FOLIAGE_BIRCH, 0.62, 0.55),
@@ -1012,7 +1017,13 @@ fn climate(name: &str) -> Option<Climate> {
             foliage: Some(0x8DB127),
             ..c(0.8, 0.9, 0x3A7A6A)
         },
-        "forest" | "flower_forest" | "dappled_forest" => c(0.7, 0.8, W),
+        "forest" | "flower_forest" => c(0.7, 0.8, W),
+        // 26.3: autumn colours of the vanilla biome (`dappled_forest.json`).
+        "dappled_forest" => Climate {
+            grass: Some(0xDF6827),
+            foliage: Some(0xE68E30),
+            ..c(0.6, 0.6, 0x375154)
+        },
         "dark_forest" => Climate {
             modifier: Modifier::DarkForest,
             ..c(0.7, 0.8, W)
@@ -1736,6 +1747,18 @@ mod tests {
         );
         assert_eq!(preview_color(&looks, None, 0, 64, 0, false, 1), -1);
         assert!(preview_color(&looks, Some("minecraft:plains"), 0, 64, 0, false, 1) >= 0);
+    }
+
+    /// Values of `worldgen/biome/dappled_forest.json` (26.3).
+    #[test]
+    fn dappled_forest_has_its_autumn_look() {
+        let looks = VanillaLooks;
+        assert_eq!(looks.grass_color("dappled_forest", 0, 0), 0xDF6827);
+        assert_eq!(looks.foliage_color("dappled_forest"), 0xE68E30);
+        assert_eq!(looks.water_color("dappled_forest"), 0x375154);
+        assert_eq!(ground(&looks, "dappled_forest", 0, 70, 0, false, 63), grass(0xDF6827));
+        // Untinted poplar leaves, not the biome's foliage tint.
+        assert_eq!(leaf(&looks, "dappled_forest"), LEAVES_POPLAR);
     }
 
     fn ground_of(looks: &VanillaLooks, name: &str, x: i32) -> i32 {

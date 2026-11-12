@@ -508,6 +508,9 @@ const CROWN_SALT: i64 = 0x5EED_A71A5;
 const FOLIAGE_EVERGREEN: i32 = 0x619961;
 const FOLIAGE_BIRCH: i32 = 0x80A755;
 const FOLIAGE_MANGROVE: i32 = 0x92C648;
+/// Mean of the red, orange and yellow poplar leaf textures, weighted by how
+/// often `trees_dappled_forest` picks each (200 : 240 : 90).
+const LEAVES_POPLAR: i32 = 0x803717;
 
 /// Leaf tint source: a fixed colour, or the biome's own foliage colour.
 struct Canopy {
@@ -522,7 +525,9 @@ fn canopy(name: &str) -> Option<Canopy> {
     Some(match name.strip_prefix("minecraft:")? {
         "forest" => foliage(0.60, 0.55),
         "flower_forest" => foliage(0.60, 0.35),
-        "dappled_forest" => foliage(0.60, 0.45),
+        // Poplar leaves are not tinted: the mean of the three leaf textures
+        // (red 200, orange 240, yellow 90 of the tree features' weights).
+        "dappled_forest" => fixed(LEAVES_POPLAR, 1.0, 0.45),
         "windswept_forest" => foliage(0.55, 0.45),
         "dark_forest" => foliage(0.50, 0.90),
         "birch_forest" => fixed(FOLIAGE_BIRCH, 0.62, 0.55),
