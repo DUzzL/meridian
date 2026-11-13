@@ -13,13 +13,18 @@ for the exact tested build and any outstanding limitations. The published macOS
 SDK and launcher currently need the local corrections recorded there before a
 native game can start; this branch is not yet an out-of-the-box macOS release.
 
-Build the package with the fork's `cargo-horizon-mod` tool:
+A built package is in [`dist/meridian-0.1.0.hmod`](dist/meridian-0.1.0.hmod)
+(SHA-256 in `dist/meridian-0.1.0.hmod.sha256`), for the fork at
+`afe471cf15df56439f23cd991d0d4b85563a14fc`. It holds the mod's source; the
+fork launcher compiles it into the game.
+
+To build the package yourself, use the fork's `cargo-horizon-mod` tool:
 
 ```bash
 tools/pack-hmod.sh
 ```
 
-Install `target/meridian-0.1.0.hmod` in the instance's `horizon-mods/` folder,
+Install `meridian-0.1.0.hmod` in the instance's `horizon-mods/` folder,
 enable `mod.meridian:true` in `horizon-mods.txt`, and use **Build** on the fork
 launcher's Mods page. A native source mod must be compiled before it can run.
 From source, with the fork launcher on your PATH:
