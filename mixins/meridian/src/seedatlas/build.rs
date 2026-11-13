@@ -1,11 +1,10 @@
 //! Compiles the Seed Atlas engine and its C ABI for the mods from
-//! `../data/seedatlas-c/` (copied by `tools/vendor-seedatlas.sh`) with the engine's own flags:
+//! `../../data/meridian/seedatlas_c/` (copied by `tools/vendor-seedatlas.sh`) with the engine's own flags:
 //! wrapping signed arithmetic and no fused multiply-adds, so every platform
 //! computes the same as the Seed Atlas app.
 
-// The C sources sit in the bundle's `engine/data/` folder: a `.hnmod` carries
-// only Rust, TOML and data files, and `engine/data/` is a data folder.
-const C: &str = "../data/seedatlas-c";
+// The C sources are passive data under the mod namespace in the flat .hmod.
+const C: &str = "../../data/meridian/seedatlas_c";
 
 const ENGINE: [&str; 8] = [
     "biomenoise",

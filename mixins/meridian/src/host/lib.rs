@@ -2,7 +2,7 @@
 //!
 //! Meridian's core never talks to Horizon directly. Everything it needs from
 //! the game is either pushed in as a [`HostEvent`] or pulled through the
-//! [`MapHost`] trait. The Horizon adapter (`mixins/meridian/engine`) is the
+//! [`MapHost`] trait. The Horizon adapter (`mixins/meridian`) is the
 //! only implementation shipped; tests use small fakes.
 //!
 //! The capabilities that Horizon does not expose yet (see

@@ -1,0 +1,47 @@
+diff --git a/launcher/src/game_app.rs b/launcher/src/game_app.rs
+index f6135556..52dac17a 100644
+--- a/launcher/src/game_app.rs
++++ b/launcher/src/game_app.rs
+@@ -80,6 +80,17 @@ pub fn ensure(version: &Path) -> io::Result<PathBuf> {
+             fs::hard_link(&from, &to)?;
+         }
+     }
++    // Native SDK executables resolve runtime libraries beside the bundled image.
++    for entry in fs::read_dir(version)? {
++        let entry = entry?;
++        if entry.path().extension().is_some_and(|ext| ext == "dylib") {
++            let from = entry.path();
++            let to = programs.join(entry.file_name());
++            if !same_file(&from, &to) {
++                replace_link(&to, |temp| fs::hard_link(fs::canonicalize(&from)?, temp))?;
++            }
++        }
++    }
+     // Native builds read both companions beside current_exe(), including on a reused bundle.
+     let (from, to) = (
+         version.join("native-mods.json"),
+@@ -93,7 +104,7 @@ pub fn ensure(version: &Path) -> io::Result<PathBuf> {
+         Err(e) if e.kind() == io::ErrorKind::NotFound => remove_if_present(&to)?,
+         Err(e) => return Err(e),
+     }
+-    for name in ["native-data", "native-content"] {
++    for name in ["native-data", "native-content", "horizon-native-mods"] {
+         sync_native_directory(version, &programs, name)?;
+     }
+     Ok(programs.join(PROGRAMS[0]))
+diff --git a/launcher/src/native_mods/api.rs b/launcher/src/native_mods/api.rs
+index e91f5b7f..526a7b02 100644
+--- a/launcher/src/native_mods/api.rs
++++ b/launcher/src/native_mods/api.rs
+@@ -75,6 +75,11 @@ pub(super) fn main_rs(
+         ("/* MOD_ENTRIES */", &entries),
+         ("/* BUILT_MODS */", &inventory),
+     ];
++    // Keep capability bytes in the wrapper image, rather than only in a dylib.
++    let template = template.replace(
++        "std::hint::black_box(&horizon_mod_package::holder::CAPABILITY);",
++        "static HOLDER_CAPABILITY: [u8; horizon_mod_package::holder::CAPABILITY.len()] = horizon_mod_package::holder::CAPABILITY;\n    std::hint::black_box(&HOLDER_CAPABILITY);",
++    );
+     template
+         .split_inclusive("*/")
+         .map(|chunk| {

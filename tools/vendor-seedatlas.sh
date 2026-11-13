@@ -1,15 +1,15 @@
 #!/bin/bash
 # The Seed Atlas engine and its C ABI for the mods (seedatlas-sax) are compiled
-# into meridian-seedatlas from a copy in engine/data/seedatlas-c/ (a .hnmod
-# carries only Rust, TOML and data files): the Horizon launcher
+# into meridian-seedatlas from a copy in data/meridian/seedatlas_c/ (the .hmod
+# includes these sources under the mod namespace): the Horizon launcher
 # builds a mod's crate from the bundle alone. This script makes that copy.
 #
 #   tools/vendor-seedatlas.sh <Seed Atlas checkout>   copy its HEAD (must be clean)
 #   tools/vendor-seedatlas.sh --check                 compare the copy with the commit
-#                                                     in SEEDATLAS_COMMIT on GitHub
+#                                                     in seedatlas_commit on GitHub
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
-dest="$here/../mixins/meridian/engine/data/seedatlas-c"
+dest="$here/../mixins/meridian/data/meridian/seedatlas_c"
 
 # the files of a Seed Atlas tree (engine sources and tables, the mod ABI)
 copy_tree() {
@@ -25,7 +25,7 @@ copy_tree() {
 }
 
 if [[ "${1:-}" == "--check" ]]; then
-    commit=$(cat "$dest/SEEDATLAS_COMMIT")
+    commit=$(cat "$dest/seedatlas_commit")
     tmp=$(mktemp -d)
     trap 'rm -rf "$tmp"' EXIT
     curl -fsSL "https://codeload.github.com/DUzzL/Seed-Atlas/tar.gz/$commit" | tar -xz -C "$tmp"
@@ -43,5 +43,5 @@ if [[ -n "$(git -C "$src" status --porcelain -- seedatlas-engine seedatlas-sax)"
     exit 1
 fi
 copy_tree "$src" "$dest"
-git -C "$src" rev-parse HEAD > "$dest/SEEDATLAS_COMMIT"
-echo "copied Seed Atlas $(cat "$dest/SEEDATLAS_COMMIT")"
+git -C "$src" rev-parse HEAD > "$dest/seedatlas_commit"
+echo "copied Seed Atlas $(cat "$dest/seedatlas_commit")"

@@ -1,0 +1,61 @@
+id = "meridian"
+name = "Meridian"
+version = "0.1.0"
+description = "Minimap, world map, waypoints and Seed Atlas."
+authors = ["DUzzL"]
+license = "GPL-3.0-or-later"
+api = "0.2"
+side = "client"
+capabilities = ["registries"]
+
+[native]
+game = "26.3"
+horizon = "afe471cf15df56439f23cd991d0d4b85563a14fc"
+mixins = "e59da9094f0c2fdda6c627fe9eff22dec6a906f0"
+
+[[native.module]]
+id = "bridge"
+file = "crates/horizon-client/src/game.rs"
+name = "meridian_bridge"
+source = "src/game_bridge.rs"
+
+[[native.mixin]]
+id = "frame"
+target = "horizon_client::game::native_hooks::render_frame_pre::Game<'_>::native_render_frame_pre"
+kind = "HEAD"
+helper = "src/frame.rs"
+bindings = [{ name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" }]
+
+[[native.mixin]]
+id = "client-block"
+kind = "HEAD"
+target = "horizon_client::game::remote::Game<'_>::set_block"
+helper = "src/client_block.rs"
+bindings = [{ name = "pos", ty = "[i32; 3]", value = "pos" }]
+
+[[native.mixin]]
+id = "world-drawn"
+kind = "HEAD"
+target = "horizon_mod_render::render::world_drawn"
+helper = "src/render_hook.rs"
+bindings = [{ name = "world", ty = "&mut WorldDrawn<'_>", value = "&mut *world" }]
+
+[[native.mixin]]
+id = "server-lifecycle"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::base::Game<'_>::native_world_lifecycle"
+helper = "src/server_lifecycle.rs"
+bindings = [{ name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" }, { name = "phase", ty = "mod_api::WorldPhase", value = "phase" }]
+
+[[native.module]]
+id = "terrain-sampler"
+file = "crates/horizon-client/src/game.rs"
+name = "meridian_terrain_sampler"
+source = "src/game_terrain_sampler.rs"
+
+[[native.mixin]]
+id = "server-started"
+kind = "HEAD"
+target = "horizon_client::game::native_hooks::base::Game<'_>::native_server_started"
+helper = "src/server_started.rs"
+bindings = [{ name = "game", ty = "&mut crate::game::Game<'_>", value = "&mut *self" }]

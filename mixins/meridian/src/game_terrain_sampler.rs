@@ -1,33 +1,28 @@
-//! Seed-only vanilla terrain for the "terrain look" of unexplored map areas:
-//! a port of Seed Atlas's `OverworldTerrainSampler` and `NetherCaveMask`
-//! onto Horizon's own 26.3 world generation.
-//!
-//! Nothing here touches a live world. The Overworld sampler builds its own
-//! generator from the seed (`VanillaTerrain`, the same binding the game uses
-//! for a world, without structures) and asks one of its workers for a noise
-//! column per sample (`GeneratorWorker::surface_column`): the final density at
-//! block resolution through the aquifer, top down, with no chunk, carver,
-//! feature or structure. The Nether sampler needs no generator at all: the
-//! carvers are pure geometry from the seed, so the Nether cave carver
-//! (`worldgen/carvers.json`, `minecraft:nether_cave`) is ported here. It
-//! follows Horizon's port of vanilla's cave carver (`worldgen/carver.rs`,
-//! MIT) step by step, because Horizon's crates are not reachable by name from
-//! a native mod, only through `horizon_client`.
-
-// Nothing in the adapter calls the samplers yet.
-#![allow(dead_code)]
+// Seed-only vanilla terrain for the "terrain look" of unexplored map areas:
+// a port of Seed Atlas's `OverworldTerrainSampler` and `NetherCaveMask`
+// onto Horizon's own 26.3 world generation.
+//
+// Nothing here touches a live world. The Overworld sampler builds its own
+// generator from the seed (`VanillaTerrain`, the same binding the game uses
+// for a world, without structures) and asks one of its workers for a noise
+// column per sample (`GeneratorWorker::surface_column`): the final density at
+// block resolution through the aquifer, top down, with no chunk, carver,
+// feature or structure. The Nether sampler needs no generator at all: the
+// carvers are pure geometry from the seed, so the Nether cave carver
+// (`worldgen/carvers.json`, `minecraft:nether_cave`) is ported here. It
+// follows Horizon's port of vanilla's cave carver (`worldgen/carver.rs`,
+// MIT) step by step, because Horizon's crates are not reachable by name from
+// a native mod, only through `horizon_client`.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Duration;
 
-use horizon_client::assets::Assets;
 use horizon_client::biome::{BiomeInfo, Biomes};
-use horizon_client::game::meridian_bridge as bridge;
-use horizon_client::mod_api::BlockPos;
 use horizon_client::streaming::ChunkGenerator;
 use horizon_client::vanillagen::VanillaTerrain;
+use horizon_core::position::BlockPos;
 
 /// Samples per tile side, and the largest output side, as in the Java.
 const TILE_SIZE: usize = 16;
@@ -46,12 +41,7 @@ const MAX_IDLE_WORKERS: usize = 4;
 /// Row-major arrays of one sampled area (`OverworldTerrainSampler.SurfaceGrid`).
 /// Heights are the highest non-air base block Y (fluid included), floors the
 /// highest solid Y, colours 0xRRGGBB or -1 where unknown.
-#[derive(Clone, Debug, PartialEq)]
-pub struct SurfaceGrid {
-    pub heights: Vec<f32>,
-    pub floors: Vec<f32>,
-    pub colors: Vec<i32>,
-}
+pub use meridian_horizon::terrain_sampler::SurfaceGrid;
 
 fn valid_step(step: i32) -> bool {
     matches!(step, 1 | 2 | 4 | 8 | 16)
@@ -75,7 +65,12 @@ struct Lru<K, V> {
 
 impl<K: Clone + Eq + std::hash::Hash, V: Clone> Lru<K, V> {
     fn new(capacity: usize) -> Self {
-        Self { entries: HashMap::new(), order: BTreeMap::new(), tick: 0, capacity }
+        Self {
+            entries: HashMap::new(),
+            order: BTreeMap::new(),
+            tick: 0,
+            capacity,
+        }
     }
 
     fn get(&mut self, key: &K) -> Option<V> {
@@ -133,7 +128,11 @@ pub fn sample_overworld(
     if !valid_area(origin_x, origin_z, step, width, height) {
         return None;
     }
-    let world = WorldKey { seed, large_biomes };
+    let world = WorldKey {
+        seed,
+        large_biomes,
+        resources: environment()?.generation,
+    };
     let mut result = SurfaceGrid {
         heights: vec![0.0; width * height],
         floors: vec![0.0; width * height],
@@ -178,6 +177,7 @@ pub fn sample_overworld(
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct WorldKey {
+    resources: u64,
     seed: i64,
     large_biomes: bool,
 }
@@ -210,7 +210,10 @@ fn tiles() -> &'static (Mutex<TileState>, Condvar) {
     static TILES: OnceLock<(Mutex<TileState>, Condvar)> = OnceLock::new();
     TILES.get_or_init(|| {
         (
-            Mutex::new(TileState { cache: Lru::new(MAX_CACHED_TILES), generating: HashSet::new() }),
+            Mutex::new(TileState {
+                cache: Lru::new(MAX_CACHED_TILES),
+                generating: HashSet::new(),
+            }),
             Condvar::new(),
         )
     })
@@ -222,7 +225,10 @@ struct Generating(TileKey);
 impl Drop for Generating {
     fn drop(&mut self) {
         let (lock, wake) = tiles();
-        lock.lock().unwrap_or_else(|e| e.into_inner()).generating.remove(&self.0);
+        lock.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .generating
+            .remove(&self.0);
         wake.notify_all();
     }
 }
@@ -241,7 +247,10 @@ fn tile(key: TileKey, still_current: &dyn Fn() -> bool) -> Option<Arc<Tile>> {
             break;
         }
         // Another worker is generating it: wait, but keep watching for staleness.
-        state = wake.wait_timeout(state, Duration::from_millis(50)).unwrap_or_else(|e| e.into_inner()).0;
+        state = wake
+            .wait_timeout(state, Duration::from_millis(50))
+            .unwrap_or_else(|e| e.into_inner())
+            .0;
     }
     drop(state);
     let guard = Generating(key);
@@ -254,56 +263,50 @@ fn tile(key: TileKey, still_current: &dyn Fn() -> bool) -> Option<Arc<Tile>> {
     generated
 }
 
-/// Horizon's prepared resources, loaded once: the block registry the
-/// generator is bound to and the biome table (also the source of the colours).
+/// An owned snapshot of the game's published resource tables. Never reload the
+/// process-global block registry from a sampling worker.
 struct Environment {
     root: PathBuf,
-    assets: &'static Assets,
+    registry: &'static horizon_world::registry::BlockRegistry,
     biomes: Arc<Biomes>,
+    item_data: Arc<horizon_world::item_defaults::ItemData>,
+    data: horizon_assets::resource_source::ResourceSource,
+    generation: u64,
 }
+static ENVIRONMENT: Mutex<Option<Arc<Environment>>> = Mutex::new(None);
 
-fn resources_dir() -> Option<PathBuf> {
-    bridge::resources_dir().or_else(|| std::env::var_os("MERIDIAN_RESOURCES").map(PathBuf::from))
+pub(super) fn install(game: &super::Game<'_>) {
+    let changed = {
+        let mut slot = ENVIRONMENT.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.as_ref().is_some_and(|env| {
+            env.root == game.options.resources
+                && Arc::ptr_eq(&env.biomes, game.res.biomes())
+                && Arc::ptr_eq(&env.item_data, &game.res.core.item_data)
+                && env.data.same_generation(&game.pack.data_changes)
+        }) {
+            false
+        } else {
+            let generation = slot.as_ref().map_or(1, |env| env.generation + 1);
+            *slot = Some(Arc::new(Environment {
+                root: game.options.resources.clone(),
+                registry: game.pack.assets.registry,
+                biomes: game.res.biomes().clone(),
+                item_data: game.res.core.item_data.clone(),
+                data: game.pack.data_changes.clone(),
+                generation,
+            }));
+            true
+        }
+    };
+    if changed {
+        release_caches();
+    }
 }
-
 fn environment() -> Option<Arc<Environment>> {
-    static ENVIRONMENT: Mutex<Option<Arc<Environment>>> = Mutex::new(None);
-    let root = resources_dir()?;
-    let mut slot = ENVIRONMENT.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(env) = slot.as_ref().filter(|env| env.root == root) {
-        return Some(env.clone());
-    }
-    match load_environment(&root) {
-        Ok(env) => {
-            let env = Arc::new(env);
-            *slot = Some(env.clone());
-            Some(env)
-        }
-        Err(e) => {
-            log::warn!("Meridian: terrain sampler resources at {}: {e}", root.display());
-            None
-        }
-    }
-}
-
-fn load_environment(root: &Path) -> Result<Environment, String> {
-    // A registry is leaked per `Assets::load`, and loading one resizes the
-    // chunks' global palette (as the game did once at start). Load one for
-    // the process, and put the palette's width back to what the game has.
-    static ASSETS: OnceLock<Option<Assets>> = OnceLock::new();
-    let assets = ASSETS
-        .get_or_init(|| {
-            let bits = horizon_client::chunk::block_strategy().global_bits;
-            let assets = Assets::load(root).ok();
-            if horizon_client::chunk::block_strategy().global_bits != bits {
-                horizon_client::chunk::set_block_states(1usize << bits);
-            }
-            assets
-        })
-        .as_ref()
-        .ok_or("block registry")?;
-    let biomes = Biomes::load(root).map_err(|e| e.to_string())?;
-    Ok(Environment { root: root.to_owned(), assets, biomes: Arc::new(biomes) })
+    ENVIRONMENT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
 }
 
 /// One seed's generator, with the workers sampling it.
@@ -319,9 +322,19 @@ static CONTEXTS: Mutex<Option<Lru<WorldKey, Arc<Context>>>> = Mutex::new(None);
 /// Atlas released its tiles (the map has been closed a while), and they are
 /// made again when it opens. Work still running keeps what it holds.
 pub fn release_caches() {
-    tiles().0.lock().unwrap_or_else(|e| e.into_inner()).cache.clear();
+    tiles()
+        .0
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .cache
+        .clear();
     *CONTEXTS.lock().unwrap_or_else(|e| e.into_inner()) = None;
-    masks().0.lock().unwrap_or_else(|e| e.into_inner()).cache.clear();
+    masks()
+        .0
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .cache
+        .clear();
 }
 
 fn context(world: WorldKey) -> Option<Arc<Context>> {
@@ -331,11 +344,22 @@ fn context(world: WorldKey) -> Option<Arc<Context>> {
         return Some(context);
     }
     let env = environment()?;
-    let preset = if world.large_biomes { "minecraft:large_biomes" } else { "minecraft:normal" };
+    if env.generation != world.resources {
+        return None;
+    }
+    let preset = if world.large_biomes {
+        "minecraft:large_biomes"
+    } else {
+        "minecraft:normal"
+    };
     let terrain = VanillaTerrain::for_world(
-        &env.root.join("worldgen"),
-        env.assets.registry,
-        &env.biomes,
+        horizon_client::vanillagen::TerrainResources {
+            dir: &env.root.join("worldgen"),
+            registry: env.registry,
+            biomes: &env.biomes,
+            item_data: &env.item_data,
+            data: Some(&env.data),
+        },
         world.seed,
         preset,
         "minecraft:overworld",
@@ -400,8 +424,10 @@ impl Context {
         source: ColumnSource,
     ) -> Option<Tile> {
         let states = self.terrain.generator_data().block_states().clone();
-        let origin_x = i64::from(key.x) * TILE_SIZE as i64 * i64::from(key.step) + i64::from(key.phase_x);
-        let origin_z = i64::from(key.z) * TILE_SIZE as i64 * i64::from(key.step) + i64::from(key.phase_z);
+        let origin_x =
+            i64::from(key.x) * TILE_SIZE as i64 * i64::from(key.step) + i64::from(key.phase_x);
+        let origin_z =
+            i64::from(key.z) * TILE_SIZE as i64 * i64::from(key.step) + i64::from(key.phase_z);
         let columns = TILE_SIZE * TILE_SIZE;
         let mut tops = [MIN_Y - 1; TILE_SIZE * TILE_SIZE];
         let mut floors = [MIN_Y - 1; TILE_SIZE * TILE_SIZE];
@@ -421,7 +447,14 @@ impl Context {
                 columns.into_iter().map(|(_, spans)| spans).collect()
             }
             ColumnSource::Single => (0..columns_len())
-                .map(|i| worker.surface_column(ox + (i % TILE_SIZE) as i32 * step, oz + (i / TILE_SIZE) as i32 * step).1)
+                .map(|i| {
+                    worker
+                        .surface_column(
+                            ox + (i % TILE_SIZE) as i32 * step,
+                            oz + (i / TILE_SIZE) as i32 * step,
+                        )
+                        .1
+                })
                 .collect(),
         };
         for (index, spans) in spans_of.into_iter().enumerate() {
@@ -456,8 +489,9 @@ impl Context {
             }
         }
         // `getNoiseBiome` at the surface's quart, unzoomed.
-        let quarts: Vec<[i32; 3]> =
-            (0..columns).map(|i| [blocks[i][0] >> 2, tops[i] >> 2, blocks[i][1] >> 2]).collect();
+        let quarts: Vec<[i32; 3]> = (0..columns)
+            .map(|i| [blocks[i][0] >> 2, tops[i] >> 2, blocks[i][1] >> 2])
+            .collect();
         let names = worker.noise_biomes(&quarts);
         let mut tile = Tile {
             heights: [0.0; TILE_SIZE * TILE_SIZE],
@@ -523,9 +557,18 @@ struct Canopy {
 }
 
 fn canopy(name: &str) -> Option<Canopy> {
-    let foliage = |texture, density| Canopy { fixed: None, texture, density, variants: &[] };
-    let fixed =
-        |color, texture, density| Canopy { fixed: Some(color), texture, density, variants: &[] };
+    let foliage = |texture, density| Canopy {
+        fixed: None,
+        texture,
+        density,
+        variants: &[],
+    };
+    let fixed = |color, texture, density| Canopy {
+        fixed: Some(color),
+        texture,
+        density,
+        variants: &[],
+    };
     Some(match name.strip_prefix("minecraft:")? {
         "forest" => foliage(0.60, 0.55),
         "flower_forest" => foliage(0.60, 0.35),
@@ -579,12 +622,23 @@ fn surface_color(
     let info = biomes.get(id);
     let ground = ground(biomes, info, id, name, x, y, z, fluid, sea_level);
     // Snow layers also cover leaves.
-    let canopy = if fluid || ground == SNOW { None } else { canopy(name) };
+    let canopy = if fluid || ground == SNOW {
+        None
+    } else {
+        canopy(name)
+    };
     match canopy {
         None => ground,
         Some(canopy) => {
             if !canopy.variants.is_empty() && step < 8 {
-                return crowns_of(ground, canopy.variants, canopy.texture, canopy.density, x, z);
+                return crowns_of(
+                    ground,
+                    canopy.variants,
+                    canopy.texture,
+                    canopy.density,
+                    x,
+                    z,
+                );
             }
             let leaf = leaf(info, &canopy);
             crowns(ground, leaf, canopy.density, x, z, step)
@@ -615,10 +669,15 @@ fn ground(
     match name {
         "minecraft:desert" | "minecraft:beach" => SAND,
         "minecraft:stony_shore" | "minecraft:stony_peaks" | "minecraft:sulfur_caves" => STONE,
-        "minecraft:badlands" | "minecraft:eroded_badlands" | "minecraft:wooded_badlands" => TERRACOTTA,
+        "minecraft:badlands" | "minecraft:eroded_badlands" | "minecraft:wooded_badlands" => {
+            TERRACOTTA
+        }
         "minecraft:mushroom_fields" => MYCELIUM,
         "minecraft:mangrove_swamp" => MUD,
-        _ => scale((biomes.grass(id, f64::from(x), f64::from(z)) & 0xFF_FFFF) as i32, GRASS_TEXTURE),
+        _ => scale(
+            (biomes.grass(id, f64::from(x), f64::from(z)) & 0xFF_FFFF) as i32,
+            GRASS_TEXTURE,
+        ),
     }
 }
 
@@ -631,7 +690,11 @@ fn leaf(info: &BiomeInfo, canopy: &Canopy) -> i32 {
 /// Java's `Math.round(float)`: halves round up.
 fn round(value: f32) -> i32 {
     let floor = value.floor();
-    (if value - floor >= 0.5 { floor + 1.0 } else { floor }) as i32
+    (if value - floor >= 0.5 {
+        floor + 1.0
+    } else {
+        floor
+    }) as i32
 }
 
 fn scale(rgb: i32, factor: f32) -> i32 {
@@ -694,10 +757,12 @@ fn crowns_of(
             if hash % 1000 >= threshold {
                 continue;
             }
-            let centre_x =
-                ((cell_x + dx) * CROWN_CELL) as f32 + 0.5 + (((hash as u64) >> 12) % CROWN_CELL as u64) as f32;
-            let centre_z =
-                ((cell_z + dz) * CROWN_CELL) as f32 + 0.5 + (((hash as u64) >> 20) % CROWN_CELL as u64) as f32;
+            let centre_x = ((cell_x + dx) * CROWN_CELL) as f32
+                + 0.5
+                + (((hash as u64) >> 12) % CROWN_CELL as u64) as f32;
+            let centre_z = ((cell_z + dz) * CROWN_CELL) as f32
+                + 0.5
+                + (((hash as u64) >> 20) % CROWN_CELL as u64) as f32;
             let radius = 1.8 + (((hash as u64) >> 28) % 10) as f32 / 10.0;
             let offset_x = x as f32 + 0.5 - centre_x;
             let offset_z = z as f32 + 0.5 - centre_z;
@@ -777,8 +842,11 @@ pub fn nether_cave_mask(
 
 fn sample_coordinate(origin: i32, index: usize, step: i32) -> i32 {
     let block = i64::from(origin) + index as i64 * i64::from(step);
-    (if step >= 8 { (block + i64::from(step / 2) + 2).div_euclid(4) * 4 } else { block + i64::from((step - 1) / 2) })
-        as i32
+    (if step >= 8 {
+        (block + i64::from(step / 2) + 2).div_euclid(4) * 4
+    } else {
+        block + i64::from((step - 1) / 2)
+    }) as i32
 }
 
 const MAX_CACHED_CHUNKS: usize = 512;
@@ -794,7 +862,13 @@ struct MaskState {
 fn masks() -> &'static (Mutex<MaskState>, Condvar) {
     static MASKS: OnceLock<(Mutex<MaskState>, Condvar)> = OnceLock::new();
     MASKS.get_or_init(|| {
-        (Mutex::new(MaskState { cache: Lru::new(MAX_CACHED_CHUNKS), carving: HashSet::new() }), Condvar::new())
+        (
+            Mutex::new(MaskState {
+                cache: Lru::new(MAX_CACHED_CHUNKS),
+                carving: HashSet::new(),
+            }),
+            Condvar::new(),
+        )
     })
 }
 
@@ -804,7 +878,10 @@ struct Carving(MaskKey);
 impl Drop for Carving {
     fn drop(&mut self) {
         let (lock, wake) = masks();
-        lock.lock().unwrap_or_else(|e| e.into_inner()).carving.remove(&self.0);
+        lock.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .carving
+            .remove(&self.0);
         wake.notify_all();
     }
 }
@@ -828,7 +905,10 @@ fn chunk_mask(seed: i64, chunk_x: i32, chunk_z: i32) -> Arc<[u64; 512]> {
     drop(state);
     let guard = Carving(key);
     let mask = Arc::new(carve_chunk(seed, chunk_x, chunk_z));
-    lock.lock().unwrap_or_else(|e| e.into_inner()).cache.insert(key, mask.clone());
+    lock.lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .cache
+        .insert(key, mask.clone());
     drop(guard);
     mask
 }
@@ -870,7 +950,8 @@ fn large_feature_random(seed: i64, origin: (i32, i32)) -> LegacyRandom {
     let mut random = LegacyRandom::new(seed);
     let a = random.next_long();
     let b = random.next_long();
-    random.set_seed(i64::from(origin.0).wrapping_mul(a) ^ i64::from(origin.1).wrapping_mul(b) ^ seed);
+    random
+        .set_seed(i64::from(origin.0).wrapping_mul(a) ^ i64::from(origin.1).wrapping_mul(b) ^ seed);
     random
 }
 
@@ -885,7 +966,9 @@ impl LegacyRandom {
     const MASK: u64 = (1 << 48) - 1;
 
     fn new(seed: i64) -> Self {
-        Self { state: (seed as u64 ^ Self::MULTIPLIER) & Self::MASK }
+        Self {
+            state: (seed as u64 ^ Self::MULTIPLIER) & Self::MASK,
+        }
     }
 
     fn set_seed(&mut self, seed: i64) {
@@ -926,7 +1009,8 @@ impl LegacyRandom {
     }
 
     fn next_int_between_inclusive(&mut self, min: i32, max: i32) -> i32 {
-        self.next_int_bound(max.wrapping_sub(min).wrapping_add(1)).wrapping_add(min)
+        self.next_int_bound(max.wrapping_sub(min).wrapping_add(1))
+            .wrapping_add(min)
     }
 }
 
@@ -938,7 +1022,11 @@ mod trig {
 
     fn table() -> &'static [f32] {
         static SINE: OnceLock<Box<[f32]>> = OnceLock::new();
-        SINE.get_or_init(|| (0..65536).map(|i| (f64::from(i) / SCALE).sin() as f32).collect())
+        SINE.get_or_init(|| {
+            (0..65536)
+                .map(|i| (f64::from(i) / SCALE).sin() as f32)
+                .collect()
+        })
     }
 
     pub fn sin(angle: f64) -> f32 {
@@ -972,16 +1060,31 @@ mod nether_cave {
     /// Candidate cells one carve may test (Horizon's guard against runaway paths).
     const BUDGET: usize = 1 << 24;
 
-    pub fn carve(random: &mut LegacyRandom, target: (i32, i32), origin: (i32, i32), out: &mut ChunkMask) {
+    pub fn carve(
+        random: &mut LegacyRandom,
+        target: (i32, i32),
+        origin: (i32, i32),
+        out: &mut ChunkMask,
+    ) {
         let mut value = random.next_int_bound(COUNT_MAX + 1);
         value = random.next_int_bound(value.wrapping_add(1));
         value = random.next_int_bound(value.wrapping_add(1));
         let count = value;
         let mut budget = BUDGET;
         for _ in 0..count {
-            let x = f64::from(origin.0.wrapping_shl(4).wrapping_add(random.next_int_bound(16)));
+            let x = f64::from(
+                origin
+                    .0
+                    .wrapping_shl(4)
+                    .wrapping_add(random.next_int_bound(16)),
+            );
             let y = f64::from(random.next_int_between_inclusive(0, Y_MAX));
-            let z = f64::from(origin.1.wrapping_shl(4).wrapping_add(random.next_int_bound(16)));
+            let z = f64::from(
+                origin
+                    .1
+                    .wrapping_shl(4)
+                    .wrapping_add(random.next_int_bound(16)),
+            );
             let mut run = Run {
                 target,
                 out: &mut *out,
@@ -1045,7 +1148,11 @@ mod nether_cave {
     /// `Mth.floor`.
     fn floor(value: f64) -> i32 {
         let i = value as i32;
-        if value < f64::from(i) { i.wrapping_sub(1) } else { i }
+        if value < f64::from(i) {
+            i.wrapping_sub(1)
+        } else {
+            i
+        }
     }
 
     /// Whether a path at (`x`, `z`) can still reach the target chunk.
@@ -1064,14 +1171,22 @@ mod nether_cave {
             let cx = self.target.0.wrapping_shl(4);
             let cz = self.target.1.wrapping_shl(4);
             let reach = 16.0 + horizontal * 2.0;
-            if (x - f64::from(cx.wrapping_add(8))).abs() > reach || (z - f64::from(cz.wrapping_add(8))).abs() > reach {
+            if (x - f64::from(cx.wrapping_add(8))).abs() > reach
+                || (z - f64::from(cz.wrapping_add(8))).abs() > reach
+            {
                 return;
             }
-            let min_x = floor(x - horizontal).wrapping_sub(cx).wrapping_sub(1).max(0);
+            let min_x = floor(x - horizontal)
+                .wrapping_sub(cx)
+                .wrapping_sub(1)
+                .max(0);
             let max_x = floor(x + horizontal).wrapping_sub(cx).min(15);
             let min_y = floor(y - vertical).wrapping_sub(1).max(ChunkMask::MIN_Y);
             let max_y = floor(y + vertical).wrapping_add(1).min(ChunkMask::MAX_Y);
-            let min_z = floor(z - horizontal).wrapping_sub(cz).wrapping_sub(1).max(0);
+            let min_z = floor(z - horizontal)
+                .wrapping_sub(cz)
+                .wrapping_sub(1)
+                .max(0);
             let max_z = floor(z + horizontal).wrapping_sub(cz).min(15);
             for lx in min_x..=max_x {
                 let nx = (f64::from(cx.wrapping_add(lx)) + 0.5 - x) / horizontal;
@@ -1102,7 +1217,10 @@ mod nether_cave {
             let gentle = random.next_int_bound(6) == 0;
             let (mut yaw_change, mut pitch_change) = (0f32, 0f32);
             for step in path.start..path.end {
-                let radius = 1.5 + f64::from(trig::sin(f64::from(PI * step as f32 / path.end as f32)) * path.thickness);
+                let radius = 1.5
+                    + f64::from(
+                        trig::sin(f64::from(PI * step as f32 / path.end as f32)) * path.thickness,
+                    );
                 let vertical = radius * path.vertical_scale;
                 let cos_pitch = trig::cos(f64::from(path.pitch));
                 path.position[0] += f64::from(trig::cos(f64::from(path.yaw)) * cos_pitch);
@@ -1113,8 +1231,10 @@ mod nether_cave {
                 path.yaw += yaw_change * 0.1;
                 pitch_change *= 0.9;
                 yaw_change *= 0.75;
-                pitch_change += (random.next_float() - random.next_float()) * random.next_float() * 2.0;
-                yaw_change += (random.next_float() - random.next_float()) * random.next_float() * 4.0;
+                pitch_change +=
+                    (random.next_float() - random.next_float()) * random.next_float() * 2.0;
+                yaw_change +=
+                    (random.next_float() - random.next_float()) * random.next_float() * 4.0;
                 if step == split && path.thickness > 1.0 {
                     let seed = random.next_long();
                     let thickness = random.next_float() * 0.5 + 0.5;
@@ -1143,10 +1263,18 @@ mod nether_cave {
                 if random.next_int_bound(4) == 0 {
                     continue;
                 }
-                if !can_reach(self.target, path.position[0], path.position[2], step, path.end, path.thickness) {
+                if !can_reach(
+                    self.target,
+                    path.position[0],
+                    path.position[2],
+                    step,
+                    path.end,
+                    path.thickness,
+                ) {
                     return;
                 }
-                let (horizontal, vertical_radius) = (radius * self.horizontal, vertical * self.vertical);
+                let (horizontal, vertical_radius) =
+                    (radius * self.horizontal, vertical * self.vertical);
                 self.ellipsoid(path.position, horizontal, vertical_radius);
             }
         }
@@ -1197,7 +1325,9 @@ mod tests {
     fn nether_masks_carve_at_once_and_survive_a_release() {
         let serial = nether_cave_mask(77, -300, 140, 2, 96, 96);
         release_caches();
-        let threads: Vec<_> = (0..4).map(|_| std::thread::spawn(|| nether_cave_mask(77, -300, 140, 2, 96, 96))).collect();
+        let threads: Vec<_> = (0..4)
+            .map(|_| std::thread::spawn(|| nether_cave_mask(77, -300, 140, 2, 96, 96)))
+            .collect();
         for t in threads {
             assert_eq!(t.join().unwrap(), serial);
         }
@@ -1209,7 +1339,10 @@ mod tests {
     fn nether_mask_has_caves_and_follows_the_seed() {
         // A 64x64 area at step 1 holds carved cells for some seed in a handful.
         let carved = |seed: i64| {
-            nether_cave_mask(seed, 0, 0, 1, 64, 64).iter().map(|w| w.count_ones()).sum::<u32>()
+            nether_cave_mask(seed, 0, 0, 1, 64, 64)
+                .iter()
+                .map(|w| w.count_ones())
+                .sum::<u32>()
         };
         let counts: Vec<u32> = (0..4).map(carved).collect();
         assert!(counts.iter().any(|&n| n > 0), "{counts:?}");
@@ -1246,7 +1379,10 @@ mod tests {
     fn overworld_samples_real_terrain() {
         let started = std::time::Instant::now();
         let grid = sample_overworld(1, false, 0, 0, 1, 16, 16, &|| true).expect("grid");
-        eprintln!("first tile (generator build included): {:?}", started.elapsed());
+        eprintln!(
+            "first tile (generator build included): {:?}",
+            started.elapsed()
+        );
         let started = std::time::Instant::now();
         let more = sample_overworld(1, false, 16, 0, 1, 16, 16, &|| true).expect("grid");
         eprintln!("one more 16x16 tile: {:?}", started.elapsed());
@@ -1255,27 +1391,51 @@ mod tests {
         assert!(grid.colors.iter().all(|&c| c >= 0));
         assert_ne!(grid, more);
         // The cache answers the same area identically.
-        assert_eq!(grid, sample_overworld(1, false, 0, 0, 1, 16, 16, &|| true).unwrap());
+        assert_eq!(
+            grid,
+            sample_overworld(1, false, 0, 0, 1, 16, 16, &|| true).unwrap()
+        );
         // A step-4 grid agrees with the step-1 samples it is made of.
         let coarse = sample_overworld(1, false, 0, 0, 4, 4, 4, &|| true).expect("grid");
         assert_eq!(coarse.heights[0], grid.heights[1 * 16 + 1]);
         // A coarse view: one 16-step tile covers 256x256 blocks.
         let started = std::time::Instant::now();
         let wide = sample_overworld(7, true, -2048, -2048, 16, 64, 64, &|| true).expect("grid");
-        eprintln!("64x64 samples at step 16 (16 tiles): {:?}", started.elapsed());
-        let (low, high) = wide.heights.iter().fold((f32::MAX, f32::MIN), |(l, h), &v| (l.min(v), h.max(v)));
-        let water = wide.heights.iter().zip(&wide.floors).filter(|(h, f)| h > f).count();
+        eprintln!(
+            "64x64 samples at step 16 (16 tiles): {:?}",
+            started.elapsed()
+        );
+        let (low, high) = wide
+            .heights
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(l, h), &v| (l.min(v), h.max(v)));
+        let water = wide
+            .heights
+            .iter()
+            .zip(&wide.floors)
+            .filter(|(h, f)| h > f)
+            .count();
         eprintln!("heights {low}..{high}, {water} of 4096 columns under fluid");
         let mut colors = wide.colors.clone();
         colors.sort_unstable();
         colors.dedup();
-        eprintln!("{} distinct colours, first {:06x?}", colors.len(), &colors[..colors.len().min(6)]);
+        eprintln!(
+            "{} distinct colours, first {:06x?}",
+            colors.len(),
+            &colors[..colors.len().min(6)]
+        );
     }
 
     #[test]
     #[ignore = "needs Horizon's prepared resources"]
     fn lattice_columns_match_single_columns() {
-        let world = WorldKey { seed: 1, large_biomes: false };
+        let world = WorldKey {
+            resources: environment()
+                .expect("running client resource snapshot")
+                .generation,
+            seed: 1,
+            large_biomes: false,
+        };
         let context = context(world).expect("generator");
         let mut worker = context.terrain.worker();
         let mut timing = [std::time::Duration::ZERO; 3];
@@ -1283,15 +1443,28 @@ mod tests {
         let (mut band_height, mut band_near, mut band_color) = (0, 0, 0);
         for step in [1, 2, 4] {
             for t in 0..12 {
-                let key = TileKey { world, step, x: t * 7 - 40, z: 13 - t * 5, phase_x: 0, phase_z: 0 };
+                let key = TileKey {
+                    world,
+                    step,
+                    x: t * 7 - 40,
+                    z: 13 - t * 5,
+                    phase_x: 0,
+                    phase_z: 0,
+                };
                 let started = std::time::Instant::now();
-                let single = context.fill(&mut worker, &key, &|| true, ColumnSource::Single).unwrap();
+                let single = context
+                    .fill(&mut worker, &key, &|| true, ColumnSource::Single)
+                    .unwrap();
                 timing[0] += started.elapsed();
                 let started = std::time::Instant::now();
-                let lattice = context.fill(&mut worker, &key, &|| true, ColumnSource::Lattice).unwrap();
+                let lattice = context
+                    .fill(&mut worker, &key, &|| true, ColumnSource::Lattice)
+                    .unwrap();
                 timing[1] += started.elapsed();
                 let started = std::time::Instant::now();
-                let band = context.fill(&mut worker, &key, &|| true, ColumnSource::Band).unwrap();
+                let band = context
+                    .fill(&mut worker, &key, &|| true, ColumnSource::Band)
+                    .unwrap();
                 timing[2] += started.elapsed();
                 for i in 0..TILE_SIZE * TILE_SIZE {
                     band_height += usize::from(single.heights[i] == band.heights[i]);
@@ -1299,14 +1472,26 @@ mod tests {
                     band_color += usize::from(single.colors[i] == band.colors[i]);
                     columns += 1;
                     same_height += usize::from(single.heights[i] == lattice.heights[i]);
-                    near_height += usize::from((single.heights[i] - lattice.heights[i]).abs() <= 1.0);
+                    near_height +=
+                        usize::from((single.heights[i] - lattice.heights[i]).abs() <= 1.0);
                     same_color += usize::from(single.colors[i] == lattice.colors[i]);
                 }
             }
         }
-        eprintln!("single {:?}, lattice {:?} ({:.1}x)", timing[0], timing[1], timing[0].as_secs_f64() / timing[1].as_secs_f64());
-        eprintln!("{columns} columns: same height {same_height}, within a block {near_height}, same colour {same_color}");
-        eprintln!("band {:?} ({:.1}x): same height {band_height}, within a block {band_near}, same colour {band_color}", timing[2], timing[0].as_secs_f64() / timing[2].as_secs_f64());
+        eprintln!(
+            "single {:?}, lattice {:?} ({:.1}x)",
+            timing[0],
+            timing[1],
+            timing[0].as_secs_f64() / timing[1].as_secs_f64()
+        );
+        eprintln!(
+            "{columns} columns: same height {same_height}, within a block {near_height}, same colour {same_color}"
+        );
+        eprintln!(
+            "band {:?} ({:.1}x): same height {band_height}, within a block {band_near}, same colour {band_color}",
+            timing[2],
+            timing[0].as_secs_f64() / timing[2].as_secs_f64()
+        );
         assert!(timing[1] < timing[0]);
         assert!(near_height * 100 >= columns * 97);
     }

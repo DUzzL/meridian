@@ -1,6 +1,6 @@
 # Seed Atlas engine: guide
 
-`mixins/meridian/engine/seedatlas` (`meridian-seedatlas`) runs the Seed Atlas
+`mixins/meridian/src/seedatlas` (`meridian-seedatlas`) runs the Seed Atlas
 engine itself, not a translation of it: the engine (C, derived from cubiomes)
 and its C ABI for the mods (`seedatlas-sax`, ABI 6), which the Fabric version
 builds as well. So Meridian, the Fabric version and the Seed Atlas app compute
@@ -11,16 +11,14 @@ the same, bit for bit, for every Minecraft version (1.1 to 26.3). Until
 
 - https://github.com/DUzzL/Seed-Atlas: `seedatlas-engine/` (`*.c`, `*.h`,
   `tables/`) and `seedatlas-sax/` (`seedatlas_sax.c`, `.h`), at the commit in
-  `engine/data/seedatlas-c/SEEDATLAS_COMMIT`.
-- The crate compiles a copy in `engine/data/seedatlas-c/`, because the Horizon
-  launcher builds a mod's crates from the bundle alone, and a `.hnmod` carries
-  only Rust, TOML and files under a `data/` folder (`engine/data/` is one, a
-  crate's `seedatlas/data/` is not). `tools/vendor-seedatlas.sh
-  <checkout>` makes the copy from a clean Seed Atlas checkout and records its
-  commit; `tools/vendor-seedatlas.sh --check` (CI) compares the copy with that
-  commit on GitHub. Never edit `seedatlas-c/seedatlas-*` by hand: change Seed Atlas,
-  then copy again.
-- `engine/data/seedatlas-c/shim.c` exports what the engine only offers as inline
+  `data/meridian/seedatlas_c/seedatlas_commit`.
+- The crate compiles a copy in `data/meridian/seedatlas_c/`, because the
+  fork launcher builds from the flat `.hmod` bundle alone.
+  `tools/vendor-seedatlas.sh <checkout>` makes the copy from a clean Seed Atlas
+  checkout and records its commit; `tools/vendor-seedatlas.sh --check` (CI)
+  compares it with that commit on GitHub. Never edit
+  `seedatlas_c/seedatlas-*` by hand: change Seed Atlas, then copy again.
+- `data/meridian/seedatlas_c/shim.c` exports what the engine only offers as inline
   functions (`isSlimeChunk`).
 
 ## Building

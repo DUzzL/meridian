@@ -2,5 +2,5 @@
 **/target
 *.hnmod
 .DS_Store
-mixins/meridian/engine/Cargo.lock
 .claude/worktrees/
+*.hmod

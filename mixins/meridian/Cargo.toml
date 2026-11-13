@@ -1,0 +1,21 @@
+[package]
+name = "meridian-horizon"
+description = "Meridian's adapter to Horizon's native mod API"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# The launcher supplies this exact SDK. Registry dependencies are pinned in
+# this bundle's Cargo.lock and may not alter the SDK's dependency graph.
+horizon-mod-api = { git = "https://github.com/arismoko/horizon", rev = "afe471cf15df56439f23cd991d0d4b85563a14fc" }
+meridian-core = { path = "src/core" }
+meridian-host = { path = "src/host" }
+meridian-seedatlas = { path = "src/seedatlas" }
+png = "=0.18.1"
+log = "=0.4.34"
+parking_lot = "=0.12.5"
+chrono = { version = "=0.4.45", default-features = false, features = ["clock", "std"] }

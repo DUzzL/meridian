@@ -1,3 +1,8 @@
+> Historical upstream audit (2026-11-06). The `port/arismoko-horizon` branch
+> targets the mod API fork; see [FORK_PORT.md](FORK_PORT.md) for its current
+> package, API mapping and validation. The upstream API details below remain
+> as the rationale for the original bridge.
+
 # Horizon: Client-Mod-API (Phase 0)
 
 Untersucht am 2026-11-06.

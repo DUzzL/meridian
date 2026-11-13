@@ -3,52 +3,53 @@
 //! core's [`MapHost`] questions and draws what the core lays out.
 //!
 //! Chunk events and chunk reads (`docs/HORIZON_API.md` E1/E2) come from the
-//! bundle's transitional bridge, `horizon_client::game::meridian_bridge`,
-//! which horizon-mixins adds to the game (`mixins/meridian/bridge/`).
+//! pinned native support module, which writes the mod-owned `bridge` queues.
 #![forbid(unsafe_code)]
 
-mod gpu;
-mod gpu_map;
+pub mod gpu;
+pub mod gpu_map;
 mod icons;
-mod terrain_sampler;
+pub mod terrain_sampler;
+pub use meridian_core as core;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use horizon_client::game::meridian_bridge as bridge;
-use horizon_client::mod_api::{
-    ClientPacketEvent, ClientboundPlayPacket, ClientChatReceivedEvent, ClientDisconnectingEvent, ClientLevelLoadEvent,
-    ClientLevelUnloadEvent, ClientResourcesReloadedEvent, ClientStoppingEvent, CommandEvent,
-    CommandsEvent, Flow, FrameEvent, Hooks, Host, HudBatch, HudEvent, KeyEvent, ModsEvent,
-    NativeMod, RenderHooks, ScreenCharTypedPreEvent, ScreenClosingEvent,
-    ScreenKeyPressedPreEvent, ScreenKeyReleasedPreEvent, ScreenMouseButtonPressedPreEvent, ScreenMouseButtonReleasedPreEvent,
-    ScreenMouseDraggedPreEvent, ScreenMouseScrolledPreEvent, GuiLayerPreEvent, RenderHandEvent,
-    MenuBackgroundEvent, ScreenRenderPostEvent, Text, TintSource, WorldLifecycleEvent, WorldPhase, WorldPrimitivesEvent,
-};
+pub mod bridge;
+mod host_api;
+use host_api::*;
 use meridian_core::MapEngine;
 use meridian_core::config::{ConfigFile, ConfigStore, MinimapSettings};
 use meridian_core::engine::DEFAULT_MAP;
 use meridian_core::geom::RegionPos;
 use meridian_core::keybinds::{KEY_BINDINGS, bindings_for_key};
 use meridian_core::minimap::{self, Align, Controls, DrawOp};
-use meridian_core::screens::{Action, Editor, Env, List, Screen, SettingsScreen};
 use meridian_core::persist::MapPaths;
 use meridian_core::radar;
+use meridian_core::screens::{Action, Editor, Env, List, Screen, SettingsScreen};
 use meridian_core::waypoint::{self, Kind, Spot, Waypoint, WaypointBook};
 use meridian_core::worldmap::{MapAction, MenuItem, Overlay, WorldMap};
-use horizon_client::text::{ClickEvent, Style};
 use meridian_host::{
     BiomeAppearance, BlockAppearance, ChunkPos, ChunkSnapshot, ColumnSample, DimensionId,
     HostEvent, MapHost, PlayerState, ReadMode, Tint, WorldContext, WorldSource,
+};
+use mod_api::text::{TextClick, TextStyle};
+use mod_api::{
+    ClientChatReceivedEvent, ClientDisconnectingEvent, ClientHost, ClientLevelLoadEvent,
+    ClientLevelUnloadEvent, ClientPacketEvent, ClientResourcesReloadedEvent, ClientStoppingEvent,
+    CommandEvent, DrawContext, Flow, GuiLayerPreEvent, Hooks, InputKeyEvent, MenuBackgroundEvent,
+    RegisterClientCommandsEvent, RenderFramePreEvent, RenderGuiPostEvent, RenderHandEvent,
+    RenderLevelStageEvent, ScreenCharTypedPreEvent, ScreenClosingEvent, ScreenKeyPressedPreEvent,
+    ScreenKeyReleasedPreEvent, ScreenMouseButtonPressedPreEvent, ScreenMouseButtonReleasedPreEvent,
+    ScreenMouseDraggedPreEvent, ScreenMouseScrolledPreEvent, ScreenRenderPostEvent, Text,
+    TintSource,
 };
 use parking_lot::Mutex;
 
 /// The mod id: its settings folder, its keys' lines, its data folder.
 pub const MOD_ID: &str = "meridian";
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-/// The bridge shape this adapter was written for.
-const BRIDGE_VERSION: u32 = 12;
 /// How long leaving a world or quitting waits for region saves.
 const SAVE_WAIT: Duration = Duration::from_secs(5);
 
@@ -79,19 +80,29 @@ static TEXTURES: Mutex<Option<Textures>> = Mutex::new(None);
 
 impl Textures {
     /// Maps every block texture file to its sprite once (`texture_sprites`).
-    fn index(&mut self, host: &dyn Host) {
+    fn index(&mut self, host: &dyn ClientHost) {
         if self.indexed {
             return;
         }
         self.indexed = true;
-        let Some(root) = bridge::resources_dir() else { return };
+        let Some(root) = bridge::resources_dir() else {
+            return;
+        };
         let dir = root.join("assets/minecraft/textures/block");
-        let Ok(entries) = std::fs::read_dir(&dir) else { return };
-        let files: Vec<PathBuf> =
-            entries.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "png")).collect();
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return;
+        };
+        let files: Vec<PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "png"))
+            .collect();
         let names: Vec<String> = files
             .iter()
-            .filter_map(|p| p.file_stem().map(|s| format!("minecraft:block/{}", s.to_string_lossy())))
+            .filter_map(|p| {
+                p.file_stem()
+                    .map(|s| format!("minecraft:block/{}", s.to_string_lossy()))
+            })
             .collect();
         let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         for (sprite, file) in host.texture_sprites(&refs).into_iter().zip(files) {
@@ -104,7 +115,9 @@ impl Textures {
     fn mean(&mut self, sprite: (u32, u32)) -> Option<u32> {
         let file = self.files.get(&sprite)?.clone();
         *self.means.entry(file.clone()).or_insert_with(|| {
-            std::fs::read(&file).ok().and_then(|b| meridian_core::texture::mean_color(&b))
+            std::fs::read(&file)
+                .ok()
+                .and_then(|b| meridian_core::texture::mean_color(&b))
         })
     }
 }
@@ -125,20 +138,50 @@ fn decimal_comma() -> bool {
                 .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
                 .unwrap_or_default();
         }
-        let lang = locale.split(['_', '-', '.']).next().unwrap_or("").to_ascii_lowercase();
+        let lang = locale
+            .split(['_', '-', '.'])
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
         matches!(
             lang.as_str(),
-            "de" | "fr" | "es" | "it" | "nl" | "pt" | "ru" | "pl" | "sv" | "da" | "fi" | "nb" | "no" | "cs" | "sk"
-                | "tr" | "uk" | "hu" | "ro" | "el" | "bg" | "hr" | "sl" | "lt" | "lv" | "et" | "id" | "vi"
+            "de" | "fr"
+                | "es"
+                | "it"
+                | "nl"
+                | "pt"
+                | "ru"
+                | "pl"
+                | "sv"
+                | "da"
+                | "fi"
+                | "nb"
+                | "no"
+                | "cs"
+                | "sk"
+                | "tr"
+                | "uk"
+                | "hu"
+                | "ro"
+                | "el"
+                | "bg"
+                | "hr"
+                | "sl"
+                | "lt"
+                | "lv"
+                | "et"
+                | "id"
+                | "vi"
         )
     })
 }
 
-pub fn hooks() -> Box<dyn Hooks> {
-    Box::new(Meridian {
-        state: Mutex::new(None),
-        renderer: gpu::MapRenderer::default(),
-    })
+impl Default for Meridian {
+    fn default() -> Self {
+        Self {
+            state: Mutex::new(None),
+        }
+    }
 }
 
 struct State {
@@ -243,11 +286,19 @@ struct SeedInputs {
 static EXPORT_NOTICE: Mutex<Option<String>> = Mutex::new(None);
 
 /// Dimensions the map can switch between, in order.
-const MAP_DIMENSIONS: [&str; 3] = ["minecraft:overworld", "minecraft:the_nether", "minecraft:the_end"];
+const MAP_DIMENSIONS: [&str; 3] = [
+    "minecraft:overworld",
+    "minecraft:the_nether",
+    "minecraft:the_end",
+];
 
 /// Blocks of the overworld per block of a dimension (the Nether's 8).
 fn dimension_scale(dimension: &str) -> f64 {
-    if dimension == "minecraft:the_nether" { 8.0 } else { 1.0 }
+    if dimension == "minecraft:the_nether" {
+        8.0
+    } else {
+        1.0
+    }
 }
 
 /// The game seen by a map that only reads its files: no player, no chunks.
@@ -292,23 +343,22 @@ enum Pending {
 
 struct Meridian {
     state: Mutex<Option<State>>,
-    renderer: gpu::MapRenderer,
 }
 
 /// Horizon's `Host` seen as a [`MapHost`].
 struct HorizonHost<'a> {
-    host: &'a dyn Host,
+    host: &'a dyn ClientHost,
     dimension: Option<&'a str>,
 }
 
-fn data_dir(host: &dyn Host) -> PathBuf {
+fn data_dir(host: &dyn ClientHost) -> PathBuf {
     host.instance_dir()
         .join("horizon-mods")
         .join(".horizon-mod-data")
         .join(MOD_ID)
 }
 
-fn config_dir(host: &dyn Host) -> PathBuf {
+fn config_dir(host: &dyn ClientHost) -> PathBuf {
     host.config_dir().unwrap_or_else(|e| {
         log::warn!("meridian: no config folder ({e}), using the data folder");
         data_dir(host)
@@ -323,6 +373,7 @@ fn tint_of(source: Option<TintSource>) -> Tint {
         Some(TintSource::DryFoliage) => Tint::DryFoliage,
         Some(TintSource::Water) => Tint::Water,
         Some(TintSource::Fixed(c)) => Tint::Fixed(c & 0x00FF_FFFF),
+        Some(_) => Tint::None,
     }
 }
 
@@ -356,7 +407,10 @@ impl MapHost for HorizonHost<'_> {
         let dimension = DimensionId::new(self.dimension?);
         // Singleplayer also plays through a connection (address "local"):
         // the integrated server's open world is what tells it apart.
-        let address = self.host.client_state().and_then(|s| s.server_address);
+        let address = self
+            .host
+            .meridian_client_state()
+            .and_then(|s| s.server_address);
         let local = address.as_deref().is_none_or(|a| a == "local");
         let source = match (local, SERVER_WORLD.lock().clone()) {
             (true, Some(world)) => WorldSource::Singleplayer { world },
@@ -366,7 +420,7 @@ impl MapHost for HorizonHost<'_> {
     }
 
     fn player(&self) -> Option<PlayerState> {
-        let p = self.host.player()?;
+        let p = self.host.meridian_player()?;
         Some(PlayerState {
             position: [p.x, p.y, p.z],
             yaw: p.yaw,
@@ -390,12 +444,19 @@ impl MapHost for HorizonHost<'_> {
     fn block_appearance(&self, block: &str) -> BlockAppearance {
         let look = bridge::block_look(block).unwrap_or_default();
         // The top face's tint, from Horizon's model library (API 380).
-        let sprites = self.host.block_sprites(&[block]).into_iter().next().flatten();
+        let sprites = self
+            .host
+            .meridian_block_sprites(block)
+            .into_iter()
+            .next()
+            .flatten();
         // The top face, else the model's particle sprite (crossed plants).
         let top = sprites.as_ref().and_then(|s| s.sides[1].first());
         let tint = top.map_or(Tint::None, |f| tint_of(f.tint));
         let tint = if look.fluid == 1 { Tint::Water } else { tint };
-        let sprite = top.map(|f| f.sprite).or_else(|| sprites.as_ref().and_then(|s| s.particle));
+        let sprite = top
+            .map(|f| f.sprite)
+            .or_else(|| sprites.as_ref().and_then(|s| s.particle));
         let mean = sprite.and_then(|sp| {
             let mut guard = TEXTURES.lock();
             let textures = guard.get_or_insert_with(Textures::default);
@@ -404,12 +465,16 @@ impl MapHost for HorizonHost<'_> {
         });
         // Without a texture, tinted blocks use a mid grey under their tint
         // and the rest their map colour.
-        let texture_color = mean.unwrap_or(if tint == Tint::None { look.map_color } else { 0x9A_9A9A });
+        let texture_color = mean.unwrap_or(if tint == Tint::None {
+            look.map_color
+        } else {
+            0x9A_9A9A
+        });
         BlockAppearance {
             map_color: look.map_color,
             texture_color,
             tint,
-            translucent: look.fluid == 1,
+            translucent: matches!(look.fluid, 1 | 3),
             invisible: look.air || (look.map_color == 0 && look.fluid == 0),
         }
     }
@@ -455,7 +520,10 @@ impl State {
     /// Stops the entity copies when no radar asked for a while (the minimap
     /// hidden by F1, F3, a screen, or switched off).
     fn expire_entities(&mut self) {
-        if self.entities_wanted.is_some_and(|t| t.elapsed() > ENTITY_REQUEST_TTL) {
+        if self
+            .entities_wanted
+            .is_some_and(|t| t.elapsed() > ENTITY_REQUEST_TTL)
+        {
             self.want_entities(false);
         }
     }
@@ -482,16 +550,24 @@ impl State {
         }
         self.save_book();
         let paths = MapPaths::new(data_dir, &context.source, &map, &context.dimension);
-        self.book = Some(((context.source.clone(), map), WaypointBook::load(paths.map_dir())));
+        self.book = Some((
+            (context.source.clone(), map),
+            WaypointBook::load(paths.map_dir()),
+        ));
     }
 
     /// Picks the map of the server played on (by world spawn, or as chosen)
     /// and switches the map and its waypoints when it changed.
     fn update_map(&mut self, data_dir: &std::path::Path) {
-        let Some(context) = self.engine.context().cloned() else { return };
-        let spawn = self.spawn_watch.spawn(bridge::world_spawn(), Instant::now());
+        let Some(context) = self.engine.context().cloned() else {
+            return;
+        };
+        let spawn = self
+            .spawn_watch
+            .spawn(bridge::world_spawn(), Instant::now());
         // Nothing is saved until it is known which map the chunks belong to.
-        let by_spawn = self.config.current().world_map.multiplayer_maps == meridian_core::config::MapSelection::WorldSpawn;
+        let by_spawn = self.config.current().world_map.multiplayer_maps
+            == meridian_core::config::MapSelection::WorldSpawn;
         if spawn.is_err() && by_spawn && matches!(context.source, WorldSource::Multiplayer { .. }) {
             self.engine.hold_saves(true);
             return;
@@ -500,7 +576,8 @@ impl State {
         let name = self.map_for(data_dir, &context.source, spawn);
         if self.engine.map() != name {
             log::info!("meridian: showing map {name} (spawn {spawn:?})");
-            self.pending.push(Pending::Notice(format!("Meridian: map {name}")));
+            self.pending
+                .push(Pending::Notice(format!("Meridian: map {name}")));
             // Still held: what the other map got meanwhile is dropped.
             self.engine.set_map(&name);
             gpu_map::forget_regions();
@@ -521,13 +598,25 @@ impl State {
     }
 
     /// The map of a world or server to show now.
-    fn map_for(&mut self, data_dir: &std::path::Path, source: &WorldSource, spawn: Option<[i32; 3]>) -> String {
+    fn map_for(
+        &mut self,
+        data_dir: &std::path::Path,
+        source: &WorldSource,
+        spawn: Option<[i32; 3]>,
+    ) -> String {
         match source {
             WorldSource::Singleplayer { .. } => DEFAULT_MAP.to_owned(),
             WorldSource::Multiplayer { .. } => {
-                if self.server_maps.as_ref().is_none_or(|(src, _)| *src != *source) {
+                if self
+                    .server_maps
+                    .as_ref()
+                    .is_none_or(|(src, _)| *src != *source)
+                {
                     let dir = meridian_core::persist::server_dir(data_dir, source);
-                    self.server_maps = Some((source.clone(), meridian_core::subworld::ServerMaps::load(&dir)));
+                    self.server_maps = Some((
+                        source.clone(),
+                        meridian_core::subworld::ServerMaps::load(&dir),
+                    ));
                 }
                 let mode = self.config.current().world_map.multiplayer_maps;
                 let (_, maps) = self.server_maps.as_mut().expect("loaded above");
@@ -551,7 +640,11 @@ impl State {
         };
         let name = args.get(1..).map(|r| r.join(" ")).unwrap_or_default();
         match args.first().copied() {
-            None | Some("list") => format!("Maps: {} (shown: {})", maps.names().join(", "), self.engine.map()),
+            None | Some("list") => format!(
+                "Maps: {} (shown: {})",
+                maps.names().join(", "),
+                self.engine.map()
+            ),
             Some(op @ ("use" | "new")) => {
                 if !maps.select(&name, op == "new") {
                     return format!("No map named {name}");
@@ -571,18 +664,25 @@ impl State {
                 format!("Showing map {name}{note}")
             }
             Some("rename") => {
-                let Some((old, new)) = name.split_once(' ').map(|(a, b)| (a.trim().to_owned(), b.trim().to_owned())) else {
+                let Some((old, new)) = name
+                    .split_once(' ')
+                    .map(|(a, b)| (a.trim().to_owned(), b.trim().to_owned()))
+                else {
                     return "/meridian map rename <old> <new>".to_owned();
                 };
                 if maps.find(&old).is_some_and(|m| m == self.engine.map()) {
                     return "Switch to another map first (/meridian map use <name>)".to_owned();
                 }
-                let Some(context) = self.engine.context().cloned() else { return "No world open".to_owned() };
-                let Some(data_dir) = self.export_dir.parent().map(std::path::Path::to_path_buf) else {
+                let Some(context) = self.engine.context().cloned() else {
+                    return "No world open".to_owned();
+                };
+                let Some(data_dir) = self.export_dir.parent().map(std::path::Path::to_path_buf)
+                else {
                     return "No data folder".to_owned();
                 };
                 if !maps.writable() {
-                    return "The server's map list could not be read, so it is not changed".to_owned();
+                    return "The server's map list could not be read, so it is not changed"
+                        .to_owned();
                 }
                 let mut renamed = maps.clone();
                 let (old, new) = match renamed.rename(&old, &new) {
@@ -599,7 +699,10 @@ impl State {
                 if let Err(e) = meridian_core::persist::require_writable(&from) {
                     return format!("Cannot rename map: {e}");
                 }
-                if from != to && from.exists() && let Err(e) = std::fs::rename(&from, &to) {
+                if from != to
+                    && from.exists()
+                    && let Err(e) = std::fs::rename(&from, &to)
+                {
                     return format!("Renaming the map's folder failed: {e}");
                 }
                 *maps = renamed;
@@ -607,7 +710,9 @@ impl State {
                     log::warn!("meridian: saving the server's map list failed: {e}");
                 }
                 // So do its seeds, completed structures and game version.
-                let key = |map: &str| meridian_core::seedatlas_state::SeedContext::of_map(&context.source, map).key;
+                let key = |map: &str| {
+                    meridian_core::seedatlas_state::SeedContext::of_map(&context.source, map).key
+                };
                 let (old_key, new_key) = (key(&old), key(&new));
                 if self.seeds.rename_context(&old_key, &new_key) {
                     meridian_core::seedatlas_state::mirror_versions(&self.seeds, &mut self.config);
@@ -623,7 +728,13 @@ impl State {
     /// `/meridian radar hide|show <entity id>`, `/meridian radar hidden`:
     /// entity kinds the radar never shows.
     fn radar_command(&mut self, args: &[&str]) -> String {
-        let id = args.get(1).map(|a| if a.contains(':') { (*a).to_owned() } else { format!("minecraft:{a}") });
+        let id = args.get(1).map(|a| {
+            if a.contains(':') {
+                (*a).to_owned()
+            } else {
+                format!("minecraft:{a}")
+            }
+        });
         let excluded = &mut self.config.current_mut().radar.excluded;
         let reply = match (args.first().copied(), id) {
             (Some("hide"), Some(id)) => {
@@ -640,7 +751,10 @@ impl State {
                 return if excluded.is_empty() {
                     "The radar hides no entity kinds".to_owned()
                 } else {
-                    format!("Hidden: {}", excluded.iter().cloned().collect::<Vec<_>>().join(", "))
+                    format!(
+                        "Hidden: {}",
+                        excluded.iter().cloned().collect::<Vec<_>>().join(", ")
+                    )
                 };
             }
             _ => return "/meridian radar hide|show <entity id>, /meridian radar hidden".to_owned(),
@@ -705,7 +819,7 @@ impl State {
 impl Meridian {
     /// Runs `f` with the state, creating it on first use (the folders are
     /// only known once the game calls a hook).
-    fn with_state<R>(&self, host: &dyn Host, f: impl FnOnce(&mut State) -> R) -> R {
+    fn with_state<R>(&self, host: &dyn ClientHost, f: impl FnOnce(&mut State) -> R) -> R {
         let mut guard = self.state.lock();
         let state = guard.get_or_insert_with(|| {
             // Claim both roots before any loader can quarantine a file or save defaults.
@@ -723,22 +837,16 @@ impl Meridian {
                 log::warn!("meridian: cannot save settings: {e}");
             }
             let engine = MapEngine::new(config.current().clone(), data_dir(host));
-            if bridge::VERSION == BRIDGE_VERSION {
-                bridge::enable();
-                let _ = meridian_core::seedatlas::WORKER_START.set(|| {
-                    bridge::lower_current_thread();
-                });
-                let _ = meridian_core::worker::THREAD_START.set(|| {
-                    bridge::lower_current_thread();
-                });
-            } else {
-                log::error!(
-                    "meridian: bridge version {} (expected {BRIDGE_VERSION}): no map data",
-                    bridge::VERSION
-                );
-            }
+            bridge::enable();
+            let _ = meridian_core::seedatlas::WORKER_START.set(|| {
+                bridge::lower_current_thread();
+            });
+            let _ = meridian_core::worker::THREAD_START.set(|| {
+                bridge::lower_current_thread();
+            });
             log::info!("meridian {VERSION}: settings in {}", store.path().display());
-            let engine_read_only = engine.read_only() || !meridian_core::persist::path_writable(store.path());
+            let engine_read_only =
+                engine.read_only() || !meridian_core::persist::path_writable(store.path());
             load_icons();
             State {
                 config,
@@ -758,7 +866,10 @@ impl Meridian {
                 screen: None,
                 open_screen: None,
                 pending: if engine_read_only {
-                    vec![Pending::Notice("Meridian: data or settings folder is locked; changes there are not saved".to_owned())]
+                    vec![Pending::Notice(
+                        "Meridian: data or settings folder is locked; changes there are not saved"
+                            .to_owned(),
+                    )]
                 } else {
                     Vec::new()
                 },
@@ -794,7 +905,7 @@ impl Meridian {
         f(state)
     }
 
-    fn send(&self, host: &dyn Host, event: HostEvent) {
+    fn send(&self, host: &dyn ClientHost, event: HostEvent) {
         self.with_state(host, |s| {
             let map_host = HorizonHost {
                 host,
@@ -807,14 +918,14 @@ impl Meridian {
 
 /// Draws the core's operations into Horizon's HUD batch. Text at another
 /// scale than the GUI's goes through a pushed pose (`gui_paint`).
-fn paint(host: &dyn Host, batch: &mut HudBatch, ops: &[DrawOp]) {
-    use horizon_client::hud_layout::PoseOp;
-    use horizon_client::mod_api::GuiDraw;
+fn paint(batch: &mut dyn DrawContext, ops: &[DrawOp]) {
+    use mod_api::GuiDraw;
+    use mod_api::client::hud_layout::PoseOp;
     for op in ops {
         match op {
-            DrawOp::Fill { rect, argb } => host.fill(batch, *rect, *argb),
-            DrawOp::Quad { points, argb } => host.quad(batch, *points, *argb),
-            DrawOp::NineSlice { sprite, rect, argb } => host.gui_nine_slice(batch, sprite, *rect, *argb),
+            DrawOp::Fill { rect, argb } => batch.fill(*rect, *argb),
+            DrawOp::Quad { points, argb } => batch.quad(*points, *argb),
+            DrawOp::NineSlice { sprite, rect, argb } => batch.gui_nine_slice(sprite, *rect, *argb),
             DrawOp::Icon { id, rect, dim } => {
                 load_icons();
                 let Some((_, info)) = icon(id) else { continue };
@@ -823,38 +934,71 @@ fn paint(host: &dyn Host, batch: &mut HudBatch, ops: &[DrawOp]) {
                 // under a scaled pose so the edges stay crisp.
                 let (w, h) = (info.width.max(1) as f32, info.height.max(1) as f32);
                 let k = (rect[2] / w).min(rect[3] / h);
-                let (x0, y0) = (rect[0] + (rect[2] - w * k) / 2.0, rect[1] + (rect[3] - h * k) / 2.0);
-                let mut draws = vec![GuiDraw::Push(vec![PoseOp::Translate(x0.round(), y0.round()), PoseOp::Scale(k, k)])];
+                let (x0, y0) = (
+                    rect[0] + (rect[2] - w * k) / 2.0,
+                    rect[1] + (rect[3] - h * k) / 2.0,
+                );
+                let mut draws = vec![GuiDraw::Push(vec![
+                    PoseOp::Translate(x0.round(), y0.round()),
+                    PoseOp::Scale(k, k),
+                ])];
                 for y in 0..info.height {
                     let mut x = 0;
                     while x < info.width {
                         let at = ((y * info.width + x) * 4) as usize;
                         let px = &info.rgba[at..at + 4];
-                        let color = u32::from(px[3]) << 24 | u32::from(px[0]) << 16 | u32::from(px[1]) << 8 | u32::from(px[2]);
+                        let color = u32::from(px[3]) << 24
+                            | u32::from(px[0]) << 16
+                            | u32::from(px[1]) << 8
+                            | u32::from(px[2]);
                         let mut end = x + 1;
-                        while end < info.width && info.rgba[((y * info.width + end) * 4) as usize..][..4] == *px {
+                        while end < info.width
+                            && info.rgba[((y * info.width + end) * 4) as usize..][..4] == *px
+                        {
                             end += 1;
                         }
                         if px[3] != 0 {
-                            draws.push(GuiDraw::Fill { x0: x as i32, y0: y as i32, x1: end as i32, y1: y as i32 + 1, color });
+                            draws.push(GuiDraw::Fill {
+                                x0: x as i32,
+                                y0: y as i32,
+                                x1: end as i32,
+                                y1: y as i32 + 1,
+                                color,
+                            });
                         }
                         x = end;
                     }
                 }
                 if *dim {
-                    draws.push(GuiDraw::Fill { x0: 0, y0: 0, x1: info.width as i32, y1: info.height as i32, color: 0x9030_3030 });
+                    draws.push(GuiDraw::Fill {
+                        x0: 0,
+                        y0: 0,
+                        x1: info.width as i32,
+                        y1: info.height as i32,
+                        color: 0x9030_3030,
+                    });
                 }
                 draws.push(GuiDraw::Pop);
-                host.gui_paint(batch, &draws);
+                let _ = batch.gui_paint(&draws);
             }
-            DrawOp::Paragraph { x, y, width, text, argb } => {
+            DrawOp::Paragraph {
+                x,
+                y,
+                width,
+                text,
+                argb,
+            } => {
                 // Word-wrapped to `width` with the game's font metrics.
                 let mut line = String::new();
                 let mut row = 0.0;
                 for word in text.split_whitespace() {
-                    let candidate = if line.is_empty() { word.to_owned() } else { format!("{line} {word}") };
-                    if !line.is_empty() && host.text_width(&candidate) > *width {
-                        host.text(batch, &line, [x.round(), (y + row).round()], argb & 0x00FF_FFFF, false);
+                    let candidate = if line.is_empty() {
+                        word.to_owned()
+                    } else {
+                        format!("{line} {word}")
+                    };
+                    if !line.is_empty() && batch.text_width(&candidate) > *width {
+                        batch.text(&line, [x.round(), (y + row).round()], *argb, false);
                         row += 9.0;
                         line = word.to_owned();
                     } else {
@@ -862,75 +1006,106 @@ fn paint(host: &dyn Host, batch: &mut HudBatch, ops: &[DrawOp]) {
                     }
                 }
                 if !line.is_empty() {
-                    host.text(batch, &line, [x.round(), (y + row).round()], argb & 0x00FF_FFFF, false);
+                    batch.text(&line, [x.round(), (y + row).round()], *argb, false);
                 }
             }
-            DrawOp::Blit { texture, rect, uv, base, argb } => {
+            DrawOp::Blit {
+                texture,
+                rect,
+                uv,
+                base,
+                argb,
+            } => {
                 // A missing texture (another resource pack) draws nothing.
-                let Some(tex) = texture_size(texture) else { continue };
+                let Some(tex) = texture_size(texture) else {
+                    continue;
+                };
                 // `uv` is in texels of the vanilla texture, `base` wide; a
                 // higher-resolution pack scales it.
                 let k = (tex[0] / i32::from((*base).max(1))).max(1);
                 let [u, v, w, h] = uv.map(|c| c as i32 * k);
                 const SIDE: i32 = 16;
-                host.gui_paint(
-                    batch,
-                    &[
-                        GuiDraw::Push(vec![PoseOp::Translate(rect[0], rect[1]), PoseOp::Scale(rect[2] / SIDE as f32, rect[3] / SIDE as f32)]),
-                        GuiDraw::Blit {
-                            texture: texture.clone().into(),
-                            blend: horizon_client::hud_layout::Blend::Textured,
-                            x: 0,
-                            y: 0,
-                            w: SIDE,
-                            h: SIDE,
-                            uv: [u as f32, v as f32],
-                            src: [w, h],
-                            tex,
-                            color: *argb,
-                        },
-                        GuiDraw::Pop,
-                    ],
-                );
+                let _ = batch.gui_paint(&[
+                    GuiDraw::Push(vec![
+                        PoseOp::Translate(rect[0], rect[1]),
+                        PoseOp::Scale(rect[2] / SIDE as f32, rect[3] / SIDE as f32),
+                    ]),
+                    GuiDraw::Blit {
+                        texture: texture.clone().into(),
+                        blend: mod_api::client::hud_layout::Blend::Textured,
+                        x: 0,
+                        y: 0,
+                        w: SIDE,
+                        h: SIDE,
+                        uv: [u as f32, v as f32],
+                        src: [w, h],
+                        tex,
+                        color: *argb,
+                    },
+                    GuiDraw::Pop,
+                ]);
             }
-            DrawOp::Plate { x, y, text, align, scale, pad, argb } => {
-                let w = host.text_width(text) * scale;
+            DrawOp::Plate {
+                x,
+                y,
+                text,
+                align,
+                scale,
+                pad,
+                argb,
+            } => {
+                let w = batch.text_width(text) * scale;
                 let x = match align {
                     Align::Left => *x,
                     Align::Center => x - w / 2.0,
                     Align::Right => x - w,
                 };
-                host.fill(batch, [x - pad, y - pad, w + 2.0 * pad, 8.0 * scale + 2.0 * pad], *argb);
+                batch.fill(
+                    [x - pad, y - pad, w + 2.0 * pad, 8.0 * scale + 2.0 * pad],
+                    *argb,
+                );
             }
-            DrawOp::Text { x, y, text, argb, align, scale } => {
-                let w = host.text_width(text) * scale;
+            DrawOp::Text {
+                x,
+                y,
+                text,
+                argb,
+                align,
+                scale,
+            } => {
+                let w = batch.text_width(text) * scale;
                 let x = match align {
                     Align::Left => *x,
                     Align::Center => x - w / 2.0,
                     Align::Right => x - w,
                 };
                 if (scale - 1.0).abs() < 1e-3 {
-                    host.text(batch, text, [x.round(), y.round()], argb & 0x00FF_FFFF, true);
+                    batch.text(text, [x.round(), y.round()], *argb, true);
                 } else {
-                    host.gui_paint(
-                        batch,
-                        &[
-                            GuiDraw::Push(vec![PoseOp::Translate(x, *y), PoseOp::Scale(*scale, *scale)]),
-                            GuiDraw::Text { text: Text::literal(text.clone()), x: 0, y: 0, color: *argb, shadow: true },
-                            GuiDraw::Pop,
-                        ],
-                    );
+                    let _ = batch.gui_paint(&[
+                        GuiDraw::Push(vec![
+                            PoseOp::Translate(x, *y),
+                            PoseOp::Scale(*scale, *scale),
+                        ]),
+                        GuiDraw::Text {
+                            text: Text::literal(text.clone()),
+                            x: 0,
+                            y: 0,
+                            color: *argb,
+                            shadow: true,
+                        },
+                        GuiDraw::Pop,
+                    ]);
                 }
             }
         }
     }
 }
 
-
 impl Meridian {
     /// A key of ours went down or up; returns feedback for the action bar.
-    fn on_key(&self, host: &dyn Host, key: &str, pressed: bool) -> Option<String> {
-        let chosen = |id: &str, default: &str| host.mod_key(MOD_ID, id, default);
+    fn on_key(&self, host: &dyn ClientHost, key: &str, pressed: bool) -> Option<String> {
+        let chosen = |id: &str, default: &str| host.meridian_key(MOD_ID, id, default);
         let hits: Vec<&'static str> = bindings_for_key(key, chosen).map(|b| b.id).collect();
         if hits.is_empty() {
             return None;
@@ -963,7 +1138,8 @@ impl Meridian {
                         }
                         "waypoint.new" => {
                             if let Some((book, dim)) = s.book_here() {
-                                let editor = Editor::new(book.dimension_mut(&dim), waypoint::now(), false);
+                                let editor =
+                                    Editor::new(book.dimension_mut(&dim), waypoint::now(), false);
                                 s.open_screen = Some(Screen::Editor(editor));
                             }
                         }
@@ -976,8 +1152,12 @@ impl Meridian {
                             s.map.menu = None;
                             s.open_map = true;
                         }
-                        "worldmap.settings" => s.open_screen = Some(Screen::Settings(SettingsScreen::world_map())),
-                        "settings" => s.open_screen = Some(Screen::Settings(SettingsScreen::default())),
+                        "worldmap.settings" => {
+                            s.open_screen = Some(Screen::Settings(SettingsScreen::world_map()))
+                        }
+                        "settings" => {
+                            s.open_screen = Some(Screen::Settings(SettingsScreen::default()))
+                        }
                         "waypoint.next_set" => {
                             if let Some((book, dim)) = s.book_here() {
                                 let name = book.dimension_mut(&dim).next_set().to_owned();
@@ -998,7 +1178,14 @@ impl Meridian {
                         "cave.toggle_manual" => {
                             if let Some(p) = &player {
                                 s.cave.toggle_manual(p.position[1] + 1.62);
-                                s.notice = Some(if s.cave.manual() { "Cave mode: manual" } else { "Cave mode: auto" }.to_owned());
+                                s.notice = Some(
+                                    if s.cave.manual() {
+                                        "Cave mode: manual"
+                                    } else {
+                                        "Cave mode: auto"
+                                    }
+                                    .to_owned(),
+                                );
                             }
                         }
                         "radar.reverse" => {
@@ -1019,7 +1206,8 @@ impl Meridian {
                                 _ => (&mut m.light_overlay, "Light overlay"),
                             };
                             *flag = !*flag;
-                            s.notice = Some(format!("{name}: {}", if *flag { "on" } else { "off" }));
+                            s.notice =
+                                Some(format!("{name}: {}", if *flag { "on" } else { "off" }));
                             changed = true;
                         }
                         "waypoint.toggle_minimap" => {
@@ -1049,7 +1237,7 @@ impl Meridian {
 
     /// `/meridian ...`; answers what to tell the player and a chat line to
     /// send (a teleport or a shared waypoint).
-    fn on_command(&self, host: &dyn Host, args: &[&str]) -> (String, Option<String>) {
+    fn on_command(&self, host: &dyn ClientHost, args: &[&str]) -> (String, Option<String>) {
         const USAGE: &str = "/meridian waypoint add|remove|tp|share|list [name], /meridian waypoint set [new|use|rename|delete <name>], /meridian waypoint accept [number], /meridian waypoint shared, /meridian waypoint export, /meridian waypoint import <file or folder>";
         self.with_state(host, |s| {
             let export_dir = s.export_dir.clone();
@@ -1250,22 +1438,19 @@ impl Meridian {
     }
 }
 
+#[mod_api::horizon_mod]
 impl Hooks for Meridian {
-    fn render(&self) -> Option<&dyn RenderHooks> {
-        Some(&self.renderer)
-    }
-
-    fn screen_render_post(&self, host: &dyn Host, event: &mut ScreenRenderPostEvent<'_>) {
+    fn screen_render_post(&self, host: &dyn ClientHost, event: &mut ScreenRenderPostEvent<'_>) {
         if event.screen.id == "mod" {
             if self.map_open(host) {
-                self.draw_map(host, event.batch, false);
+                self.draw_map(host, event.draw, false);
             } else {
                 // A menu opened from the map keeps the map behind it, as the
                 // Fabric version's menus do (`SeedAtlasScreen`).
                 if self.map_behind(host) {
-                    self.draw_map(host, event.batch, true);
+                    self.draw_map(host, event.draw, true);
                 }
-                self.draw_screen(host, event.batch);
+                self.draw_screen(host, event.draw);
             }
         }
         if event.screen.id == "dead" {
@@ -1273,7 +1458,11 @@ impl Hooks for Meridian {
         }
     }
 
-    fn screen_mouse_button_pressed_pre(&self, host: &dyn Host, event: &mut ScreenMouseButtonPressedPreEvent<'_>) -> Flow {
+    fn screen_mouse_button_pressed_pre(
+        &self,
+        host: &dyn ClientHost,
+        event: &mut ScreenMouseButtonPressedPreEvent<'_>,
+    ) -> Flow {
         if host.mod_screen() != Some(MOD_ID) || event.button > 1 {
             return Flow::Continue;
         }
@@ -1287,11 +1476,22 @@ impl Hooks for Meridian {
                     let done = m.key.as_ref().is_some_and(|k| s.completed.is_completed(k));
                     let mut entries = Vec::new();
                     if m.key.is_some() {
-                        entries.push((MENU_COMPLETE, if done { "Mark as incomplete" } else { "Mark as completed" }.to_owned()));
+                        entries.push((
+                            MENU_COMPLETE,
+                            if done {
+                                "Mark as incomplete"
+                            } else {
+                                "Mark as completed"
+                            }
+                            .to_owned(),
+                        ));
                     }
                     entries.push((MENU_COPY_COORDINATES, "Copy coordinates".to_owned()));
                     entries.push((MENU_STRUCTURE_WAYPOINT, "Create waypoint".to_owned()));
-                    entries.push((MENU_TEMPORARY_WAYPOINT, "Create temporary waypoint".to_owned()));
+                    entries.push((
+                        MENU_TEMPORARY_WAYPOINT,
+                        "Create temporary waypoint".to_owned(),
+                    ));
                     s.map.element_menu(at, view.unit, m.name, entries);
                     s.menu_marker = Some(m);
                     s.menu_player = None;
@@ -1299,10 +1499,14 @@ impl Hooks for Meridian {
                     // The dimension shown: its heights and its waypoints.
                     let w = s.map.to_world(at, view.gui, view.unit);
                     let (shown, engine) = s.shown_map();
-                    let column = engine.sampler().column(w[0].floor() as i32, w[1].floor() as i32);
-                    let height = meridian_core::worldmap::surface_height(&shown, column.map(|c| c.height));
+                    let column = engine
+                        .sampler()
+                        .column(w[0].floor() as i32, w[1].floor() as i32);
+                    let height =
+                        meridian_core::worldmap::surface_height(&shown, column.map(|c| c.height));
                     let waypoints = map_data.waypoints.iter().collect::<Vec<_>>();
-                    s.map.right_click(at, view.gui, view.unit, height, &waypoints);
+                    s.map
+                        .right_click(at, view.gui, view.unit, height, &waypoints);
                     s.menu_marker = None;
                     // Another player under the cursor (the map of the player's own dimension).
                     s.menu_player = None;
@@ -1320,7 +1524,13 @@ impl Hooks for Meridian {
                             .map(|(_, name)| name);
                         if let (Some(name), Some(menu)) = (&s.menu_player, &mut s.map.menu) {
                             let at = menu.items.len() - 1;
-                            menu.items.insert(at, MenuItem::Extra(MENU_TELEPORT_PLAYER, format!("Teleport To {name}")));
+                            menu.items.insert(
+                                at,
+                                MenuItem::Extra(
+                                    MENU_TELEPORT_PLAYER,
+                                    format!("Teleport To {name}"),
+                                ),
+                            );
                         }
                     }
                 } else {
@@ -1339,7 +1549,11 @@ impl Hooks for Meridian {
         Flow::Cancel
     }
 
-    fn screen_mouse_button_released_pre(&self, host: &dyn Host, event: &mut ScreenMouseButtonReleasedPreEvent<'_>) -> Flow {
+    fn screen_mouse_button_released_pre(
+        &self,
+        host: &dyn ClientHost,
+        event: &mut ScreenMouseButtonReleasedPreEvent<'_>,
+    ) -> Flow {
         if host.mod_screen() != Some(MOD_ID) {
             return Flow::Continue;
         }
@@ -1359,7 +1573,11 @@ impl Hooks for Meridian {
         Flow::Cancel
     }
 
-    fn screen_mouse_dragged_pre(&self, host: &dyn Host, event: &mut ScreenMouseDraggedPreEvent<'_>) -> Flow {
+    fn screen_mouse_dragged_pre(
+        &self,
+        host: &dyn ClientHost,
+        event: &mut ScreenMouseDraggedPreEvent<'_>,
+    ) -> Flow {
         if host.mod_screen() != Some(MOD_ID) {
             return Flow::Continue;
         }
@@ -1385,7 +1603,11 @@ impl Hooks for Meridian {
         Flow::Cancel
     }
 
-    fn screen_char_typed_pre(&self, host: &dyn Host, event: &mut ScreenCharTypedPreEvent<'_>) -> Flow {
+    fn screen_char_typed_pre(
+        &self,
+        host: &dyn ClientHost,
+        event: &mut ScreenCharTypedPreEvent<'_>,
+    ) -> Flow {
         if host.mod_screen() != Some(MOD_ID) {
             return Flow::Continue;
         }
@@ -1397,7 +1619,11 @@ impl Hooks for Meridian {
         Flow::Cancel
     }
 
-    fn screen_key_pressed_pre(&self, host: &dyn Host, event: &mut ScreenKeyPressedPreEvent<'_>) -> Flow {
+    fn screen_key_pressed_pre(
+        &self,
+        host: &dyn ClientHost,
+        event: &mut ScreenKeyPressedPreEvent<'_>,
+    ) -> Flow {
         // Escape still closes the screen as the game does.
         if host.mod_screen() != Some(MOD_ID) || event.key == "key.keyboard.escape" {
             return Flow::Continue;
@@ -1412,14 +1638,29 @@ impl Hooks for Meridian {
         }
         // The quick confirm key answers the screen, unless it is a key that
         // types (it may be bound to a letter).
-        let chosen = |id: &str, default: &str| host.mod_key(MOD_ID, id, default);
-        let types = key.strip_prefix("key.keyboard.").is_some_and(|k| k.chars().count() == 1);
+        let chosen = |id: &str, default: &str| host.meridian_key(MOD_ID, id, default);
+        let types = key
+            .strip_prefix("key.keyboard.")
+            .is_some_and(|k| k.chars().count() == 1);
         let quick = !types && bindings_for_key(&key, chosen).any(|b| b.id == "quick_confirm");
-        self.with_screen(host, |screen, env| ((), if quick { screen.quick_confirm(env) } else { screen.key(&key, env) }));
+        self.with_screen(host, |screen, env| {
+            (
+                (),
+                if quick {
+                    screen.quick_confirm(env)
+                } else {
+                    screen.key(&key, env)
+                },
+            )
+        });
         Flow::Cancel
     }
 
-    fn screen_key_released_pre(&self, host: &dyn Host, event: &mut ScreenKeyReleasedPreEvent<'_>) -> Flow {
+    fn screen_key_released_pre(
+        &self,
+        host: &dyn ClientHost,
+        event: &mut ScreenKeyReleasedPreEvent<'_>,
+    ) -> Flow {
         // Released over any screen (the key may have been pressed while
         // playing, and the key hook only hears it while playing): our keys
         // see the release (hold to enlarge, faces); only our map takes the
@@ -1432,7 +1673,11 @@ impl Hooks for Meridian {
         Flow::Continue
     }
 
-    fn screen_mouse_scrolled_pre(&self, host: &dyn Host, event: &mut ScreenMouseScrolledPreEvent<'_>) -> Flow {
+    fn screen_mouse_scrolled_pre(
+        &self,
+        host: &dyn ClientHost,
+        event: &mut ScreenMouseScrolledPreEvent<'_>,
+    ) -> Flow {
         if host.mod_screen() != Some(MOD_ID) {
             return Flow::Continue;
         }
@@ -1452,26 +1697,40 @@ impl Hooks for Meridian {
         Flow::Cancel
     }
 
-    fn gui_layer_pre(&self, host: &mut dyn Host, _event: &mut GuiLayerPreEvent<'_>) -> Flow {
+    fn gui_layer_pre(&self, host: &dyn ClientHost, _event: &mut GuiLayerPreEvent<'_>) -> Flow {
         // The world map covers the HUD, as an opaque screen would.
-        if host.mod_screen() == Some(MOD_ID) && (self.map_open(&*host) || self.map_behind(&*host)) { Flow::Cancel } else { Flow::Continue }
+        if host.mod_screen() == Some(MOD_ID) && (self.map_open(&*host) || self.map_behind(&*host)) {
+            Flow::Cancel
+        } else {
+            Flow::Continue
+        }
     }
 
-    fn render_hand(&self, host: &dyn Host, _event: &mut RenderHandEvent<'_>) -> Flow {
-        if host.mod_screen() == Some(MOD_ID) && (self.map_open(host) || self.map_behind(host)) { Flow::Cancel } else { Flow::Continue }
+    fn render_hand(&self, host: &dyn ClientHost, _event: &mut RenderHandEvent<'_, '_>) -> Flow {
+        if host.mod_screen() == Some(MOD_ID) && (self.map_open(host) || self.map_behind(host)) {
+            Flow::Cancel
+        } else {
+            Flow::Continue
+        }
     }
 
-    fn menu_background(&self, host: &dyn Host, event: &mut MenuBackgroundEvent<'_>) {
+    fn menu_background(&self, host: &dyn ClientHost, event: &mut MenuBackgroundEvent<'_>) {
         // Our screens blur the world behind them as the game's menus do;
         // the position editor keeps the minimap it moves sharp.
-        let positioning = || self.with_state(host, |s| matches!(s.screen, Some(Screen::Position(_))));
-        if host.mod_screen() == Some(MOD_ID) && event.radius.is_none() && !self.map_open(host) && !positioning() && !self.map_behind(host) {
-            let blur = host.client_state().map_or(5.0, |c| c.menu_blur);
+        let positioning =
+            || self.with_state(host, |s| matches!(s.screen, Some(Screen::Position(_))));
+        if host.mod_screen() == Some(MOD_ID)
+            && event.radius.is_none()
+            && !self.map_open(host)
+            && !positioning()
+            && !self.map_behind(host)
+        {
+            let blur = host.gui_options().menu_blur as f32;
             *event.radius = Some(blur.max(1.0));
         }
     }
 
-    fn screen_closing(&self, host: &dyn Host, event: &mut ScreenClosingEvent<'_>) {
+    fn screen_closing(&self, host: &dyn ClientHost, event: &mut ScreenClosingEvent<'_>) {
         // The host reports a closed screen in the frame after it closed, when
         // ours is no longer the open one: reset unless ours is still open.
         if event.screen.id == "mod" && host.mod_screen() != Some(MOD_ID) {
@@ -1489,27 +1748,34 @@ impl Hooks for Meridian {
         }
     }
 
-    fn mods(&self, _host: &mut dyn Host, event: &mut ModsEvent<'_>) {
-        event.mods.push(NativeMod {
-            id: MOD_ID.to_owned(),
-            title: format!("Meridian {VERSION}"),
-            description: "Minimap, world map, waypoints and Seed Atlas.".to_owned(),
-            keys: KEY_BINDINGS
-                .iter()
-                .map(|b| [b.id.to_owned(), b.label.to_owned(), b.default.to_owned()])
-                .collect(),
-        });
+    fn register(&self, r: &mut dyn mod_api::Registrar, _cx: &mod_api::RegistrationContext) {
+        for binding in KEY_BINDINGS {
+            r.register_key_mapping(
+                mod_api::KeyRegistration::new(binding.id, binding.default)
+                    .label(binding.label)
+                    .category("Meridian"),
+            );
+        }
     }
 
-    fn key(&self, host: &mut dyn Host, event: &mut KeyEvent<'_>) {
-        if !host.playing() && event.pressed {
+    fn input_key(&self, host: &mut dyn ClientHost, event: &mut InputKeyEvent<'_>) {
+        if event.action == mod_api::KeyAction::Repeat {
             return;
         }
-        let notice = self.on_key(&*host, event.key, event.pressed);
-        if let Some(text) = notice {
-            host.client_action_bar(Text::literal(text), false);
+        if !host.playing() && (event.action != mod_api::KeyAction::Release) {
+            return;
         }
-        let (open, open_map) = self.with_state(&*host, |s| (s.open_screen.take(), std::mem::take(&mut s.open_map)));
+        let notice = self.on_key(
+            &*host,
+            event.key,
+            event.action != mod_api::KeyAction::Release,
+        );
+        if let Some(text) = notice {
+            host.meridian_action_bar(Text::literal(text), false);
+        }
+        let (open, open_map) = self.with_state(&*host, |s| {
+            (s.open_screen.take(), std::mem::take(&mut s.open_map))
+        });
         if let Some(screen) = open
             && host.mod_screen_open(MOD_ID)
         {
@@ -1522,26 +1788,60 @@ impl Hooks for Meridian {
         }
     }
 
-    fn commands(&self, _host: &mut dyn Host, event: &mut CommandsEvent<'_>) {
-        bridge::command_versions(meridian_core::seedatlas_commands::version_suggestions()
-            .into_iter().map(str::to_owned).collect());
-        event.commands.push("meridian");
-        event.commands.push("seedatlas");
+    fn register_client_commands(
+        &self,
+        _host: &mut dyn ClientHost,
+        event: &mut RegisterClientCommandsEvent<'_>,
+    ) {
+        for usage in [
+            "meridian [arguments:text]",
+            "seedatlas",
+            "seedatlas seed <seed:text>",
+            "seedatlas dimension-seed nether <seed:text>",
+            "seedatlas dimension-seed end <seed:text>",
+            "seedatlas clear",
+            "seedatlas clear nether",
+            "seedatlas clear end",
+            "seedatlas version",
+            // Command words cannot hold dots ("1.21.4"), so the version is
+            // an argument; `on_seedatlas` checks it and lists the choices.
+            "seedatlas version <version:word>",
+            "seedatlas status",
+            "seedatlas settings",
+        ] {
+            event.commands.push(mod_api::Command::new(usage));
+        }
     }
 
-    fn command(&self, host: &mut dyn Host, event: &mut CommandEvent<'_>) -> Flow {
+    fn command(&self, host: &mut dyn ClientHost, event: &mut CommandEvent<'_>) -> Flow {
         let args: Vec<&str> = event.command.split_whitespace().collect();
         if args.first() == Some(&"seedatlas") {
-            let rest = event.command.trim_start().strip_prefix("seedatlas").unwrap_or("").trim().to_owned();
+            let rest = event
+                .command
+                .trim_start()
+                .strip_prefix("seedatlas")
+                .unwrap_or("")
+                .trim()
+                .to_owned();
             let (reply, open) = self.on_seedatlas(&*host, &rest);
-            bridge::local_chat(reply.into_iter().map(|line| {
-                if line.error { Text::styled(line.text, Style::color(0xFF5555)) }
-                else { Text::literal(line.text) }
-            }).collect());
+            bridge::local_chat(
+                reply
+                    .into_iter()
+                    .map(|line| {
+                        if line.error {
+                            Text::literal(line.text).with_style(text_color(0xFF5555))
+                        } else {
+                            Text::literal(line.text)
+                        }
+                    })
+                    .collect(),
+            );
             if open && host.mod_screen_open(MOD_ID) {
                 self.with_state(&*host, |s| {
                     s.map_open = false;
-                    s.screen = Some(Screen::Settings(SettingsScreen::at(meridian_core::screens::Category::SeedAtlas)));
+                    s.screen = Some(Screen::Settings(SettingsScreen::at(
+                        meridian_core::screens::Category::SeedAtlas,
+                    )));
                 });
             }
             return Flow::Cancel;
@@ -1550,27 +1850,24 @@ impl Hooks for Meridian {
             return Flow::Continue;
         }
         let (reply, chat) = self.on_command(&*host, &args);
-        host.client_action_bar(Text::literal(reply), false);
+        host.meridian_action_bar(Text::literal(reply), false);
         if let Some(line) = chat
             && let Err(e) = host.send_chat(&line)
         {
-            host.client_action_bar(Text::literal(format!("Meridian: {e}")), false);
+            host.meridian_action_bar(Text::literal(format!("Meridian: {e}")), false);
         }
         Flow::Cancel
     }
 
-    fn client_packet(&self, host: &mut dyn Host, event: &mut ClientPacketEvent<'_>) {
-        if let ClientboundPlayPacket::SetDefaultSpawnPosition(packet) = event.packet {
-            // This hook hears every announcement, even an identical spawn.
-            // The frame reads game.spawn after Horizon has applied the packet.
-            log::info!("meridian: spawn announced at {:?}", packet.pos);
+    fn client_packet(&self, host: &mut dyn ClientHost, event: &mut ClientPacketEvent<'_>) {
+        if event.packet.id.to_string() == "minecraft:set_default_spawn_position" {
             self.with_state(&*host, |s| s.spawn_watch.announced());
         }
     }
 
     fn client_chat_received(
         &self,
-        host: &mut dyn Host,
+        host: &mut dyn ClientHost,
         event: &mut ClientChatReceivedEvent<'_>,
     ) -> Flow {
         // A shared waypoint is only remembered: the line gets a link that
@@ -1579,45 +1876,26 @@ impl Hooks for Meridian {
         if event.overlay {
             return Flow::Continue;
         }
-        let Some((waypoint, dimension)) = waypoint::parse_shared(&event.message.plain()) else {
+        let Some((waypoint, dimension)) =
+            waypoint::parse_shared(&host.text_string(event.message).unwrap_or_default())
+        else {
             return Flow::Continue;
         };
         let number = self.with_state(&*host, |s| s.shared.receive(waypoint, dimension));
-        let link = Text::styled(
-            " [Add waypoint]",
-            Style {
-                click: Some(ClickEvent::RunCommand(format!("/meridian waypoint accept {number}"))),
-                hover: Some(Box::new(Text::literal("Adds it as a temporary waypoint"))),
-                ..Style::color(0x55FF55)
-            },
-        );
+        let mut style = text_color(0x55FF55);
+        style.click = Some(TextClick::RunCommand(format!(
+            "/meridian waypoint accept {number}"
+        )));
+        style.hover = Some(mod_api::TextHover::Text(Box::new(Text::literal(
+            "Adds it as a temporary waypoint",
+        ))));
+        let link = Text::literal(" [Add waypoint]").with_style(style);
         *event.message = std::mem::take(event.message).append(link);
         Flow::Continue
     }
 
-    fn world_lifecycle(&self, host: &mut dyn Host, event: &mut WorldLifecycleEvent<'_>) {
-        // Runs on the integrated server's thread in singleplayer.
-        match event.phase {
-            WorldPhase::WorldOpenReady => {
-                let name = host
-                    .world_dir()
-                    .and_then(|d| d.file_name().map(|n| n.to_string_lossy().into_owned()));
-                *SERVER_WORLD.lock() = name;
-                *SERVER_SEED.lock() = host.world_dir().and_then(|d| {
-                    let level = horizon_client::save::Level::read(&d)?;
-                    Some((level.seed, horizon_client::save::WorldGen::preset(&d) == "minecraft:large_biomes"))
-                });
-            }
-            WorldPhase::WorldCloseFinal | WorldPhase::WorldOpenFailed => {
-                *SERVER_WORLD.lock() = None;
-                *SERVER_SEED.lock() = None;
-            }
-            _ => {}
-        }
-    }
-
-    fn client_level_load(&self, host: &mut dyn Host, event: &mut ClientLevelLoadEvent<'_>) {
-        let host: &dyn Host = host;
+    fn client_level_load(&self, host: &mut dyn ClientHost, event: &mut ClientLevelLoadEvent<'_>) {
+        let host: &dyn ClientHost = host;
         self.with_state(host, |s| {
             let dimension = event.dimension.to_owned();
             s.levels += 1;
@@ -1664,7 +1942,11 @@ impl Hooks for Meridian {
         });
     }
 
-    fn client_level_unload(&self, host: &mut dyn Host, _event: &mut ClientLevelUnloadEvent<'_>) {
+    fn client_level_unload(
+        &self,
+        host: &mut dyn ClientHost,
+        _event: &mut ClientLevelUnloadEvent<'_>,
+    ) {
         // Only the last level's unload closes the map: on a dimension change
         // the new level is already open.
         let last = self.with_state(&*host, |s| {
@@ -1676,7 +1958,7 @@ impl Hooks for Meridian {
         }
     }
 
-    fn client_disconnecting(&self, host: &dyn Host, _event: &mut ClientDisconnectingEvent) {
+    fn client_disconnecting(&self, host: &dyn ClientHost, _event: &mut ClientDisconnectingEvent) {
         self.with_state(host, |s| {
             s.close_book();
             s.levels = 0;
@@ -1689,7 +1971,7 @@ impl Hooks for Meridian {
         gpu_map::forget_regions();
     }
 
-    fn client_stopping(&self, host: &dyn Host, _event: &mut ClientStoppingEvent) {
+    fn client_stopping(&self, host: &mut dyn ClientHost, _event: &mut ClientStoppingEvent) {
         self.with_state(host, |s| {
             s.engine.flush_and_wait(SAVE_WAIT);
             s.save_config();
@@ -1699,7 +1981,7 @@ impl Hooks for Meridian {
 
     fn client_resources_reloaded(
         &self,
-        host: &mut dyn Host,
+        host: &mut dyn ClientHost,
         _event: &mut ClientResourcesReloadedEvent,
     ) {
         bridge::clear_looks();
@@ -1708,19 +1990,25 @@ impl Hooks for Meridian {
         self.send(host, HostEvent::ResourcesReloaded);
     }
 
-    fn frame(&self, host: &mut dyn Host, _event: &mut FrameEvent) {
+    fn render_frame_pre(&self, host: &mut dyn ClientHost, _event: &mut RenderFramePreEvent) {
         // A screen or lost focus can consume the event. Reconcile releases
         // from the physical state too, without inventing any new presses.
-        let enlarge = host.mod_key(MOD_ID, "minimap.enlarge", "key.keyboard.z");
-        let faces = host.mod_key(MOD_ID, "radar.faces", "key.keyboard.tab");
+        let enlarge = host.meridian_key(MOD_ID, "minimap.enlarge", "key.keyboard.z");
+        let faces = host.meridian_key(MOD_ID, "radar.faces", "key.keyboard.tab");
         self.with_state(&*host, |s| {
             if !bridge::key_held(&enlarge) {
-                s.controls.key("minimap.enlarge", false, &mut s.config.current_mut().minimap);
+                s.controls.key(
+                    "minimap.enlarge",
+                    false,
+                    &mut s.config.current_mut().minimap,
+                );
             }
-            if !bridge::key_held(&faces) { s.faces_held = false; }
+            if !bridge::key_held(&faces) {
+                s.faces_held = false;
+            }
         });
         if let Some(text) = EXPORT_NOTICE.lock().take() {
-            host.client_action_bar(Text::literal(text), false);
+            host.meridian_action_bar(Text::literal(text), false);
         }
         let pending = self.with_state(&*host, |s| std::mem::take(&mut s.pending));
         for p in pending {
@@ -1744,15 +2032,15 @@ impl Hooks for Meridian {
                         gpu_map::set_frame(None);
                     }
                 }
-                Pending::Notice(line) => host.client_action_bar(Text::literal(line), false),
+                Pending::Notice(line) => host.meridian_action_bar(Text::literal(line), false),
                 Pending::Chat(line) => {
                     if let Err(e) = host.send_chat(&line) {
-                        host.client_action_bar(Text::literal(format!("Meridian: {e}")), false);
+                        host.meridian_action_bar(Text::literal(format!("Meridian: {e}")), false);
                     }
                 }
             }
         }
-        let host: &dyn Host = host;
+        let host: &dyn ClientHost = host;
         self.with_state(host, |s| {
             s.update_map(&data_dir(host));
             s.expire_entities();
@@ -1789,7 +2077,8 @@ impl Hooks for Meridian {
                 }
                 s.map.step(p.position);
                 // Keep the regions around the player in memory.
-                let here = RegionPos::of_block(p.position[0].floor() as i32, p.position[2].floor() as i32);
+                let here =
+                    RegionPos::of_block(p.position[0].floor() as i32, p.position[2].floor() as i32);
                 s.engine
                     .request_area(here.offset(-1, -1), here.offset(1, 1));
             }
@@ -1808,8 +2097,15 @@ impl Hooks for Meridian {
             });
             if let Some(p) = &player {
                 let dim = s.dimension.as_deref().unwrap_or("");
-                let allowed = cave.allowed_dimensions.is_empty() || cave.allowed_dimensions.iter().any(|d| d == dim);
-                let layer = s.cave.update(&cave, allowed, bridge::under_roof(), p.position[1] + 1.62, Instant::now());
+                let allowed = cave.allowed_dimensions.is_empty()
+                    || cave.allowed_dimensions.iter().any(|d| d == dim);
+                let layer = s.cave.update(
+                    &cave,
+                    allowed,
+                    bridge::under_roof(),
+                    p.position[1] + 1.62,
+                    Instant::now(),
+                );
                 if layer != s.engine.layer() {
                     // Reads asked for the old layer are not wanted any more.
                     bridge::clear_requests();
@@ -1820,7 +2116,13 @@ impl Hooks for Meridian {
                 Duration::from_micros(s.config.current().performance.frame_budget_us as u64);
             s.engine.tick(&map_host, budget);
             if let Some((_, viewer)) = &mut s.viewer {
-                viewer.tick(&ViewerHost(HorizonHost { host, dimension: None }), budget / 2);
+                viewer.tick(
+                    &ViewerHost(HorizonHost {
+                        host,
+                        dimension: None,
+                    }),
+                    budget / 2,
+                );
             }
             // Not while dead (the death screen is at the deathpoint), and
             // only once the player has been away from it.
@@ -1837,13 +2139,16 @@ impl Hooks for Meridian {
         });
     }
 
-    fn world_primitives(&self, host: &dyn Host, event: &mut WorldPrimitivesEvent<'_>) {
+    fn render_level_stage(&self, host: &dyn ClientHost, event: &mut RenderLevelStageEvent<'_>) {
+        if event.stage != mod_api::RenderLevelStage::AfterLevel {
+            return;
+        }
         self.with_state(host, |s| {
             let settings = s.config.current().waypoints.clone();
             if !settings.in_world {
                 return;
             }
-            let camera = event.camera;
+            let camera = event.view.camera;
             let Some(dim) = s.dimension.clone() else {
                 return;
             };
@@ -1854,8 +2159,7 @@ impl Hooks for Meridian {
             let alpha = ((settings.opacity_in_world.min(100) as u32 * 255) / 100) << 24;
             for w in waypoints.visible(settings.all_sets) {
                 let distance = w.distance(camera);
-                if !w.global && distance > settings.draw_distance(&dim)
-                {
+                if !w.global && distance > settings.draw_distance(&dim) {
                     continue;
                 }
                 let color = alpha | w.rgb();
@@ -1866,15 +2170,15 @@ impl Hooks for Meridian {
                 ];
                 let flat = ((base[0] - camera[0]).powi(2) + (base[2] - camera[2]).powi(2)).sqrt();
                 if settings.beam && flat > BEAM_HIDE_DISTANCE {
-                    event.primitives.beam(base, 256, color);
+                    draw_beam(event.draw, base, 256.0, color);
                 }
             }
         });
     }
 
-    fn hud(&self, host: &mut dyn Host, event: &mut HudEvent<'_>) {
-        let host: &dyn Host = host;
-        let Some(client) = host.client_state() else {
+    fn render_gui_post(&self, host: &dyn ClientHost, event: &mut RenderGuiPostEvent<'_>) {
+        let host: &dyn ClientHost = host;
+        let Some(client) = host.meridian_client_state() else {
             gpu::set_frame(None);
             return;
         };
@@ -1904,35 +2208,56 @@ impl Hooks for Meridian {
                 gpu::set_frame(None);
                 return;
             }
-            let map_host = HorizonHost { host, dimension: s.dimension.as_deref() };
-            let Some(player) = map_host.player() else { return };
+            let map_host = HorizonHost {
+                host,
+                dimension: s.dimension.as_deref(),
+            };
+            let Some(player) = map_host.player() else {
+                return;
+            };
             let mut ops = Vec::new();
             world_waypoints(host, s, gui, gui_scale, &mut ops);
             let settings = &s.config.current().minimap;
             let under_debug = settings.hide_under_debug && bridge::debug_shown();
             // The position editor shows the minimap it moves.
             let positioning = matches!(s.screen, Some(Screen::Position(_)));
-            if positioning || (settings.enabled && !under_debug && !(settings.hide_under_screens && !host.playing())) {
+            if positioning
+                || (settings.enabled
+                    && !under_debug
+                    && !(settings.hide_under_screens && !host.playing()))
+            {
                 minimap_ops(host, s, &player, gui, gui_scale, &mut ops);
             } else {
                 gpu::set_frame(None);
                 s.want_entities(false);
             }
-            paint(host, event.batch, &ops);
+            paint(event.draw, &ops);
         });
     }
 }
 
 /// Waypoints in the world, drawn over it: a mark in the waypoint's colour,
 /// its name on a dark plate and its distance under it.
-fn world_waypoints(host: &dyn Host, s: &State, gui: [f32; 2], gui_scale: f32, ops: &mut Vec<DrawOp>) {
+fn world_waypoints(
+    host: &dyn ClientHost,
+    s: &State,
+    gui: [f32; 2],
+    gui_scale: f32,
+    ops: &mut Vec<DrawOp>,
+) {
     let settings = &s.config.current().waypoints;
     if !settings.in_world {
         return;
     }
-    let (Some(camera), Some(dim), Some((_, book))) = (host.camera(), &s.dimension, &s.book) else { return };
-    let Some(waypoints) = book.dimension(dim) else { return };
-    let alpha = |opacity: u8, share: f32| (((opacity.min(100) as f32 / 100.0) * share * 255.0) as u32) << 24;
+    let (Some(camera), Some(dim), Some((_, book))) = (host.camera(), &s.dimension, &s.book) else {
+        return;
+    };
+    let Some(waypoints) = book.dimension(dim) else {
+        return;
+    };
+    let alpha = |opacity: u8, share: f32| {
+        (((opacity.min(100) as f32 / 100.0) * share * 255.0) as u32) << 24
+    };
     let u = minimap::unit(gui[1], gui_scale);
     let mark = 9.0 * u;
     for w in waypoints.visible(settings.all_sets) {
@@ -1943,7 +2268,8 @@ fn world_waypoints(host: &dyn Host, s: &State, gui: [f32; 2], gui_scale: f32, op
         // An unknown height shows at eye level.
         let y = w.height().map_or(camera.position[1], |y| y as f64 + 1.0);
         let at = [w.pos[0] as f64 + 0.5, y, w.pos[2] as f64 + 0.5];
-        let Some([x, y]) = minimap::world_to_screen(camera.position, &camera.view, &camera.projection, at, gui)
+        let Some([x, y]) =
+            minimap::world_to_screen(camera.position, &camera.view, &camera.projection, at, gui)
         else {
             continue;
         };
@@ -1952,24 +2278,49 @@ fn world_waypoints(host: &dyn Host, s: &State, gui: [f32; 2], gui_scale: f32, op
         }
         let initial: String = w.initials.chars().take(2).collect();
         // 80 % opacity by default gives D-019's 60 %.
-        ops.extend(minimap::waypoint_mark([x, y], mark, alpha(settings.opacity_in_world, 0.75) | w.rgb(), &initial, u));
+        ops.extend(minimap::waypoint_mark(
+            [x, y],
+            mark,
+            alpha(settings.opacity_in_world, 0.75) | w.rgb(),
+            &initial,
+            u,
+        ));
         let name_scale = 0.64 * u;
         let name_y = y + mark / 2.0 + 2.0 * u;
-        let name_w = host.text_width(&w.name) * name_scale;
+        let name_w = host.meridian_text_width(&w.name) * name_scale;
         ops.push(DrawOp::Fill {
-            rect: [x - name_w / 2.0 - name_scale, name_y - name_scale, name_w + 2.0 * name_scale, 9.0 * name_scale],
+            rect: [
+                x - name_w / 2.0 - name_scale,
+                name_y - name_scale,
+                name_w + 2.0 * name_scale,
+                9.0 * name_scale,
+            ],
             argb: 0x6000_0000,
         });
-        ops.push(DrawOp::Text { x, y: name_y, text: w.name.clone(), argb: 0xFFFF_FFFF, align: Align::Center, scale: name_scale });
+        ops.push(DrawOp::Text {
+            x,
+            y: name_y,
+            text: w.name.clone(),
+            argb: 0xFFFF_FFFF,
+            align: Align::Center,
+            scale: name_scale,
+        });
         let dist = minimap::distance_text(distance, settings.distance_in_km_from, decimal_comma());
-        ops.push(DrawOp::Text { x, y: name_y + 10.0 * name_scale, text: dist, argb: 0xFFFF_FFFF, align: Align::Center, scale: u });
+        ops.push(DrawOp::Text {
+            x,
+            y: name_y + 10.0 * name_scale,
+            text: dist,
+            argb: 0xFFFF_FFFF,
+            align: Align::Center,
+            scale: u,
+        });
     }
 }
 
 /// The minimap: terrain, frame, waypoints, compass, the player's mark and
 /// the info lines.
 fn minimap_ops(
-    host: &dyn Host,
+    host: &dyn ClientHost,
     s: &mut State,
     player: &PlayerState,
     gui: [f32; 2],
@@ -1989,19 +2340,36 @@ fn minimap_ops(
         yaw: player.yaw,
         pitch: player.pitch,
         dimension: player.dimension.as_str().to_owned(),
-        biome: if settings.show_biome { bridge::player_biome() } else { None },
-        weather: if settings.info.weather { host.weather() } else { (0.0, 0.0) },
-        light: if settings.info.light != meridian_core::config::LightInfo::Off { host.light(feet) } else { (0, 0) },
+        biome: if settings.show_biome {
+            bridge::player_biome()
+        } else {
+            None
+        },
+        weather: if settings.info.weather {
+            host.weather()
+        } else {
+            (0.0, 0.0)
+        },
+        light: if settings.info.light != meridian_core::config::LightInfo::Off {
+            host.light(feet)
+        } else {
+            (0, 0)
+        },
         day_time: host.clock().map(|c| c.day_time),
         real_time: Some(now),
         manual_cave: s.cave.manual(),
     };
-    let lines: Vec<(String, u32)> =
-        meridian_core::info::lines(settings, &input).into_iter().map(|l| (l, 0xFFFF_FFFF)).collect();
+    let lines: Vec<(String, u32)> = meridian_core::info::lines(settings, &input)
+        .into_iter()
+        .map(|l| (l, 0xFFFF_FFFF))
+        .collect();
     // In cave mode the minimap zooms in by the extra steps asked for.
     let zoomed;
     let settings = if s.engine.layer().is_some() && settings.cave.extra_zoom > 0 {
-        zoomed = MinimapSettings { zoom: settings.zoom.saturating_sub(settings.cave.extra_zoom), ..settings.clone() };
+        zoomed = MinimapSettings {
+            zoom: settings.zoom.saturating_sub(settings.cave.extra_zoom),
+            ..settings.clone()
+        };
         &zoomed
     } else {
         settings
@@ -2030,7 +2398,9 @@ fn minimap_ops(
         opacity: settings.opacity.min(100) as f32 / 100.0,
         backdrop: [0.06, 0.06, 0.06, undiscovered],
         at: Instant::now(),
-        grid: settings.chunk_grid.then_some(layout.blocks_per_pixel / gui_scale.max(0.25)),
+        grid: settings
+            .chunk_grid
+            .then_some(layout.blocks_per_pixel / gui_scale.max(0.25)),
         origin: image.origin_block(),
     }));
     let radar_on = s.config.current().radar.enabled && !s.config.current().minimap.fair_play;
@@ -2039,7 +2409,13 @@ fn minimap_ops(
         let smooth = s.config.current().radar.smooth;
         let entities = radar_entities(&mut s.face_cache, smooth);
         let radar = radar_now(&s.config.current().radar, s.faces_held);
-        ops.extend(radar::dots(&layout, player.position, player.yaw, &entities, &radar));
+        ops.extend(radar::dots(
+            &layout,
+            player.position,
+            player.yaw,
+            &entities,
+            &radar,
+        ));
     }
     let wp = &s.config.current().waypoints;
     if wp.on_minimap
@@ -2052,12 +2428,22 @@ fn minimap_ops(
             let at = [w.pos[0] as f64 + 0.5, w.pos[2] as f64 + 0.5];
             let (p, _) = minimap::project(&layout, [px, pz], player.yaw, at, size / 2.0);
             let initial: String = w.initials.chars().take(1).collect();
-            ops.extend(minimap::waypoint_mark(p, size, alpha | w.rgb(), &initial, layout.unit));
+            ops.extend(minimap::waypoint_mark(
+                p,
+                size,
+                alpha | w.rgb(),
+                &initial,
+                layout.unit,
+            ));
         }
     }
     ops.extend(minimap::frame(&layout));
     ops.extend(minimap::compass(&layout, player.yaw));
-    ops.extend(minimap::player_mark(&layout, player.yaw, s.config.current().minimap.arrow_scale));
+    ops.extend(minimap::player_mark(
+        &layout,
+        player.yaw,
+        s.config.current().minimap.arrow_scale,
+    ));
     ops.extend(minimap::info(&layout, &lines));
 }
 
@@ -2075,14 +2461,24 @@ fn compose_map(s: &mut State, layout: &minimap::Layout, player: &PlayerState, gu
     let epoch = {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        (s.engine.context(), s.engine.map(), s.engine.layer(), &s.dimension).hash(&mut h);
+        (
+            s.engine.context(),
+            s.engine.map(),
+            s.engine.layer(),
+            &s.dimension,
+        )
+            .hash(&mut h);
         h.finish()
     };
     let view = View {
         center: [player.position[0], player.position[2]],
         side_blocks: layout.size * layout.blocks_per_pixel,
         blocks_per_px: layout.blocks_per_pixel / gui_scale.max(0.25),
-        style: Style { light_overlay: minimap.light_overlay.then_some(minimap.light_overlay_range), slime, epoch },
+        style: Style {
+            light_overlay: minimap.light_overlay.then_some(minimap.light_overlay_range),
+            slime,
+            epoch,
+        },
     };
     let engine = &s.engine;
     s.minimap_image.update(&view, |p| engine.region(p));
@@ -2090,14 +2486,23 @@ fn compose_map(s: &mut State, layout: &minimap::Layout, player: &PlayerState, gu
     let image = &s.minimap_image;
     gpu::send(|u| {
         let cells = (image.size() / CELL).pow(2) as usize;
-        if changes.reset || u.want_full || u.size != image.size() || u.cells.len() + changes.cells.len() > cells {
+        if changes.reset
+            || u.want_full
+            || u.size != image.size()
+            || u.cells.len() + changes.cells.len() > cells
+        {
             // New, asked for, or the render thread fell behind: all of it.
             u.size = image.size();
             u.full = Some(image.pixels().to_vec());
             u.cells.clear();
             u.want_full = false;
         } else {
-            u.cells.extend(changes.cells.iter().map(|c| ([c[0] * CELL, c[1] * CELL], image.cell(*c))));
+            u.cells.extend(
+                changes
+                    .cells
+                    .iter()
+                    .map(|c| ([c[0] * CELL, c[1] * CELL], image.cell(*c))),
+            );
         }
     });
 }
@@ -2119,18 +2524,25 @@ impl Meridian {
     /// it changed and what it asks for. Nothing when our screen isn't open.
     fn with_screen<R: Default>(
         &self,
-        host: &dyn Host,
+        host: &dyn ClientHost,
         f: impl FnOnce(&mut Screen, &mut Env<'_>) -> (R, Action),
     ) -> R {
         if host.mod_screen() != Some(MOD_ID) {
             return R::default();
         }
-        let gui = host.client_state().map_or([0.0, 0.0], |c| c.gui_size);
-        let player_block = HorizonHost { host, dimension: None }
-            .player()
-            .map_or([0, 0, 0], |p| p.position.map(|v| v.floor() as i32));
+        let gui = host
+            .meridian_client_state()
+            .map_or([0.0, 0.0], |c| c.gui_size);
+        let player_block = HorizonHost {
+            host,
+            dimension: None,
+        }
+        .player()
+        .map_or([0, 0, 0], |p| p.position.map(|v| v.floor() as i32));
         self.with_state(host, |s| {
-            let Some(mut screen) = s.screen.take() else { return R::default() };
+            let Some(mut screen) = s.screen.take() else {
+                return R::default();
+            };
             let (world_label, dim_label) = context_labels(s);
             let seed_status = s.seed_status();
             let Some(dim) = s.dimension.clone() else {
@@ -2144,18 +2556,32 @@ impl Meridian {
             // Which world and dimension the waypoint screens show.
             let data = data_dir(host);
             let here_dir = s.book.as_ref().map(|((source, map), _)| {
-                meridian_core::persist::server_dir(&data, source).join(meridian_core::persist::escape_component(map))
+                meridian_core::persist::server_dir(&data, source)
+                    .join(meridian_core::persist::escape_component(map))
             });
             // The folders are read again every two seconds, not every frame.
-            if s.book_places.as_ref().is_none_or(|(at, _)| at.elapsed() >= BOOK_PLACES_TTL) {
+            if s.book_places
+                .as_ref()
+                .is_none_or(|(at, _)| at.elapsed() >= BOOK_PLACES_TTL)
+            {
                 s.book_places = Some((Instant::now(), waypoint::book_places(&data)));
             }
             let others: Vec<waypoint::BookPlace> = s
                 .book_places
                 .as_ref()
-                .map(|(_, places)| places.iter().filter(|p| Some(&p.dir) != here_dir.as_ref()).cloned().collect())
+                .map(|(_, places)| {
+                    places
+                        .iter()
+                        .filter(|p| Some(&p.dir) != here_dir.as_ref())
+                        .cloned()
+                        .collect()
+                })
                 .unwrap_or_default();
-            let other_dir = s.waypoint_place.0.clone().filter(|d| Some(d) != here_dir.as_ref() && others.iter().any(|p| &p.dir == d));
+            let other_dir = s
+                .waypoint_place
+                .0
+                .clone()
+                .filter(|d| Some(d) != here_dir.as_ref() && others.iter().any(|p| &p.dir == d));
             if let Some(dir) = &other_dir
                 && s.other_book.as_ref().is_none_or(|(d, _)| d != dir)
             {
@@ -2172,7 +2598,11 @@ impl Meridian {
                 }
             };
             let mut dims: Vec<String> = book.dimensions.keys().cloned().collect();
-            for d in ["minecraft:overworld", "minecraft:the_nether", "minecraft:the_end"] {
+            for d in [
+                "minecraft:overworld",
+                "minecraft:the_nether",
+                "minecraft:the_end",
+            ] {
                 if !dims.iter().any(|x| x == d) {
                     dims.push(d.to_owned());
                 }
@@ -2180,14 +2610,27 @@ impl Meridian {
             dims.sort();
             let short = |d: &str| d.strip_prefix("minecraft:").unwrap_or(d).to_owned();
             let places = meridian_core::screens::Places {
-                worlds: std::iter::once(world_label.clone()).chain(others.iter().map(|p| p.label.clone())).collect(),
-                world: other_dir.as_ref().and_then(|d| others.iter().position(|p| &p.dir == d)).map_or(0, |i| i + 1),
-                dimensions: std::iter::once(dim_label.clone()).chain(dims.iter().map(|d| short(d))).collect(),
-                dimension: s.waypoint_place.1.as_ref().and_then(|d| dims.iter().position(|x| x == d)).map_or(0, |i| i + 1),
+                worlds: std::iter::once(world_label.clone())
+                    .chain(others.iter().map(|p| p.label.clone()))
+                    .collect(),
+                world: other_dir
+                    .as_ref()
+                    .and_then(|d| others.iter().position(|p| &p.dir == d))
+                    .map_or(0, |i| i + 1),
+                dimensions: std::iter::once(dim_label.clone())
+                    .chain(dims.iter().map(|d| short(d)))
+                    .collect(),
+                dimension: s
+                    .waypoint_place
+                    .1
+                    .as_ref()
+                    .and_then(|d| dims.iter().position(|x| x == d))
+                    .map_or(0, |i| i + 1),
             };
             let shown_world = places.worlds[places.world].clone();
             let shown_dim = places.dimensions[places.dimension].clone();
-            let sa_dim = sa::dimension_of(s.dimension.as_deref().unwrap_or("")).unwrap_or(meridian_seedatlas::Dimension::Overworld);
+            let sa_dim = sa::dimension_of(s.dimension.as_deref().unwrap_or(""))
+                .unwrap_or(meridian_seedatlas::Dimension::Overworld);
             // Completed counts: one pass, and only for the screens showing them.
             let counts = s
                 .seed_key
@@ -2228,9 +2671,7 @@ impl Meridian {
             };
             if waypoints_changed {
                 book.dirty = true;
-                if !here
-                    && let Err(e) = book.save()
-                {
+                if !here && let Err(e) = book.save() {
                     log::warn!("meridian: cannot save waypoints: {e}");
                 }
             }
@@ -2252,13 +2693,19 @@ impl Meridian {
                 Action::None => {}
                 Action::Close => s.pending.push(Pending::CloseScreen),
                 Action::Open(next) => s.screen = Some(next),
-                Action::Save { edit, set, waypoint } => {
-                    let target = if here { s.book.as_mut().map(|(_, b)| b) } else { s.other_book.as_mut().map(|(_, b)| b) };
+                Action::Save {
+                    edit,
+                    set,
+                    waypoint,
+                } => {
+                    let target = if here {
+                        s.book.as_mut().map(|(_, b)| b)
+                    } else {
+                        s.other_book.as_mut().map(|(_, b)| b)
+                    };
                     if let Some(book) = target {
                         book.save_edit(&dim, edit, &set, waypoint, waypoint::now());
-                        if !here
-                            && let Err(e) = book.save()
-                        {
+                        if !here && let Err(e) = book.save() {
                             log::warn!("meridian: cannot save waypoints: {e}");
                         }
                     }
@@ -2274,27 +2721,51 @@ impl Meridian {
                 Action::Teleport(id) => {
                     // Into the shown dimension when it isn't the player's.
                     let player_dim = s.dimension.clone().unwrap_or_default();
-                    if let Some(w) = s.book.as_ref().and_then(|(_, b)| b.dimension(&dim)?.find(id).cloned()) {
-                        let line = waypoint::teleport_command(&w, &dim, &player_dim, waypoint::TeleportFormats::of(s.config.current()));
+                    if let Some(w) = s
+                        .book
+                        .as_ref()
+                        .and_then(|(_, b)| b.dimension(&dim)?.find(id).cloned())
+                    {
+                        let line = waypoint::teleport_command(
+                            &w,
+                            &dim,
+                            &player_dim,
+                            waypoint::TeleportFormats::of(s.config.current()),
+                        );
                         s.pending.push(Pending::CloseScreen);
                         s.pending.push(Pending::Chat(line));
                     }
                 }
                 Action::Share(id) => {
-                    if let Some(w) = s.book.as_ref().and_then(|(_, b)| b.dimension(&dim)?.find(id).cloned()) {
-                        s.pending.push(Pending::Chat(waypoint::share_text(&w, &dim)));
+                    if let Some(w) = s
+                        .book
+                        .as_ref()
+                        .and_then(|(_, b)| b.dimension(&dim)?.find(id).cloned())
+                    {
+                        s.pending
+                            .push(Pending::Chat(waypoint::share_text(&w, &dim)));
                     }
                 }
                 Action::ShowPlace { world, dimension } => {
                     if let Some(i) = world {
-                        s.waypoint_place.0 = i.checked_sub(1).and_then(|i| others.get(i)).map(|p| p.dir.clone());
+                        s.waypoint_place.0 = i
+                            .checked_sub(1)
+                            .and_then(|i| others.get(i))
+                            .map(|p| p.dir.clone());
                     }
                     if let Some(i) = dimension {
                         s.waypoint_place.1 = i.checked_sub(1).and_then(|i| dims.get(i)).cloned();
                     }
                 }
-                Action::FindNearest { kind, waypoint, skip_completed } => {
-                    s.nearest_opts = meridian_core::nearest::NearestOptions { waypoint, skip_completed };
+                Action::FindNearest {
+                    kind,
+                    waypoint,
+                    skip_completed,
+                } => {
+                    s.nearest_opts = meridian_core::nearest::NearestOptions {
+                        waypoint,
+                        skip_completed,
+                    };
                     s.find_nearest(kind, waypoint, skip_completed, sa_dim, player_block);
                 }
                 Action::Profile(op) => {
@@ -2302,7 +2773,9 @@ impl Meridian {
                     let c = &mut s.config;
                     let changed = match op {
                         ProfileOp::Select(name) => c.select_profile(&name),
-                        ProfileOp::Create(name) => c.create_profile(&name) && c.select_profile(&name),
+                        ProfileOp::Create(name) => {
+                            c.create_profile(&name) && c.select_profile(&name)
+                        }
                         ProfileOp::Rename(name) => c.rename_profile(&name),
                         ProfileOp::Delete(name) => c.delete_profile(&name),
                     };
@@ -2313,14 +2786,21 @@ impl Meridian {
                     }
                 }
                 Action::ResetCompleted(kind) => {
-                    let name = kind.as_deref().and_then(|id| sa::MARKERS.iter().find(|m| m.id == id)).map_or("", |m| m.name);
-                    let which = kind.as_deref().map(|id| meridian_core::completed::ResetKind { id, name });
+                    let name = kind
+                        .as_deref()
+                        .and_then(|id| sa::MARKERS.iter().find(|m| m.id == id))
+                        .map_or("", |m| m.name);
+                    let which = kind
+                        .as_deref()
+                        .map(|id| meridian_core::completed::ResetKind { id, name });
                     if let Some(key) = s.seed_key.clone()
                         && let Some(prompt) = s.completed.reset_prompt(&key, &world_label, which)
                     {
                         s.completed.confirm_reset(&prompt);
                     }
-                    s.screen = Some(Screen::Settings(SettingsScreen::at(meridian_core::screens::Category::Structures)));
+                    s.screen = Some(Screen::Settings(SettingsScreen::at(
+                        meridian_core::screens::Category::Structures,
+                    )));
                 }
             }
             result
@@ -2331,25 +2811,33 @@ impl Meridian {
 /// Our screens' drawing and input (Horizon's screen hooks, over every
 /// screen: each checks that ours is the one open).
 impl Meridian {
-    fn draw_screen(&self, host: &dyn Host, batch: &mut HudBatch) {
+    fn draw_screen(&self, host: &dyn ClientHost, batch: &mut dyn DrawContext) {
         let mouse = host.cursor();
         let behind = self.map_behind(host);
-        let (mut ops, tip, gui): (Vec<DrawOp>, Option<String>, [f32; 2]) = self.with_screen(host, |screen, env| {
-            let widgets = screen.widgets(env);
-            // Over the map: its darkening keeps text readable over bright
-            // terrain; elsewhere the game's in-world menu darkening.
-            let shade = if behind { 0x8800_0000 } else { 0x5000_0000 };
-            let mut ops = vec![DrawOp::Fill { rect: [0.0, 0.0, env.gui[0], env.gui[1]], argb: shade }];
-            ops.extend(meridian_core::ui::draw(&widgets, mouse));
-            ((ops, screen.tooltip(mouse, env), env.gui), Action::None)
-        });
+        let (mut ops, tip, gui): (Vec<DrawOp>, Option<String>, [f32; 2]) =
+            self.with_screen(host, |screen, env| {
+                let widgets = screen.widgets(env);
+                // Over the map: its darkening keeps text readable over bright
+                // terrain; elsewhere the game's in-world menu darkening.
+                let shade = if behind { 0x8800_0000 } else { 0x5000_0000 };
+                let mut ops = vec![DrawOp::Fill {
+                    rect: [0.0, 0.0, env.gui[0], env.gui[1]],
+                    argb: shade,
+                }];
+                ops.extend(meridian_core::ui::draw(&widgets, mouse));
+                ((ops, screen.tooltip(mouse, env), env.gui), Action::None)
+            });
         if let Some(text) = tip {
             // Wrapped at the game's tooltip width (170 GUI pixels).
             let mut lines = Vec::new();
             let mut line = String::new();
             for word in text.split_whitespace() {
-                let candidate = if line.is_empty() { word.to_owned() } else { format!("{line} {word}") };
-                if !line.is_empty() && host.text_width(&candidate) > 170.0 {
+                let candidate = if line.is_empty() {
+                    word.to_owned()
+                } else {
+                    format!("{line} {word}")
+                };
+                if !line.is_empty() && host.meridian_text_width(&candidate) > 170.0 {
                     lines.push(std::mem::take(&mut line));
                     line = word.to_owned();
                 } else {
@@ -2361,22 +2849,29 @@ impl Meridian {
             }
             tooltip(&mut ops, mouse, gui, &lines);
         }
-        paint(host, batch, &ops);
+        paint(batch, &ops);
     }
 }
 
 impl Meridian {
     /// The death screen is up: one deathpoint where the player fell, in
     /// singleplayer and on servers alike.
-    fn record_death(&self, host: &dyn Host) {
-        let pos = HorizonHost { host, dimension: None }.player().map(|p| p.position.map(|v| v.floor() as i32));
+    fn record_death(&self, host: &dyn ClientHost) {
+        let pos = HorizonHost {
+            host,
+            dimension: None,
+        }
+        .player()
+        .map(|p| p.position.map(|v| v.floor() as i32));
         self.with_state(host, |s| {
             if s.death_recorded {
                 return;
             }
             s.death_recorded = true;
             let settings = s.config.current().waypoints.clone();
-            let (Some(pos), true) = (pos, settings.deathpoints) else { return };
+            let (Some(pos), true) = (pos, settings.deathpoints) else {
+                return;
+            };
             if let Some((book, dim)) = s.book_here() {
                 book.record_death(&dim, pos, settings.keep_old_deathpoints, waypoint::now());
             }
@@ -2390,7 +2885,10 @@ impl Meridian {
 
 /// The bridge's entities as the radar's, their faces from `faces` (by kind,
 /// or skin for players; filled on first sight).
-fn radar_entities(faces: &mut HashMap<String, Option<std::sync::Arc<radar::Face>>>, smooth: bool) -> Vec<radar::Entity> {
+fn radar_entities(
+    faces: &mut HashMap<String, Option<std::sync::Arc<radar::Face>>>,
+    smooth: bool,
+) -> Vec<radar::Entity> {
     bridge::entities()
         .iter()
         .map(|e| radar::Entity {
@@ -2427,7 +2925,10 @@ fn radar_entities(faces: &mut HashMap<String, Option<std::sync::Arc<radar::Face>
 }
 
 /// The radar settings as drawn now: faces also while the faces key is held.
-fn radar_now(settings: &meridian_core::config::RadarSettings, held: bool) -> meridian_core::config::RadarSettings {
+fn radar_now(
+    settings: &meridian_core::config::RadarSettings,
+    held: bool,
+) -> meridian_core::config::RadarSettings {
     let mut r = settings.clone();
     r.faces = r.faces || (r.faces_while_held && held);
     r
@@ -2443,9 +2944,13 @@ fn texture_size(texture: &str) -> Option<[i32; 2]> {
         return *size;
     }
     let root = bridge::resources_dir()?;
-    let path = root.join("assets/minecraft/textures").join(format!("{texture}.png"));
+    let path = root
+        .join("assets/minecraft/textures")
+        .join(format!("{texture}.png"));
     let size = std::fs::File::open(path).ok().and_then(|f| {
-        let reader = png::Decoder::new(std::io::BufReader::new(f)).read_info().ok()?;
+        let reader = png::Decoder::new(std::io::BufReader::new(f))
+            .read_info()
+            .ok()?;
         let info = reader.info();
         Some([info.width as i32, info.height as i32])
     });
@@ -2482,8 +2987,8 @@ const MAP_DRAW_RADIUS: i32 = 48;
 impl Meridian {
     /// The faces key pressed or released on our screens (the world map):
     /// true when `key` is it. Text fields still get it typed.
-    fn faces_key(&self, host: &dyn Host, key: &str, pressed: bool) -> bool {
-        let bound = host.mod_key(MOD_ID, "radar.faces", "key.keyboard.tab");
+    fn faces_key(&self, host: &dyn ClientHost, key: &str, pressed: bool) -> bool {
+        let bound = host.meridian_key(MOD_ID, "radar.faces", "key.keyboard.tab");
         if key != bound || key == meridian_core::keybinds::UNBOUND {
             return false;
         }
@@ -2494,42 +2999,62 @@ impl Meridian {
         })
     }
 
-    fn map_open(&self, host: &dyn Host) -> bool {
+    fn map_open(&self, host: &dyn ClientHost) -> bool {
         self.with_state(host, |s| s.map_open)
     }
 
-    fn map_view(host: &dyn Host) -> MapView {
-        let gui = host.client_state().map_or([0.0, 0.0], |c| c.gui_size);
+    fn map_view(host: &dyn ClientHost) -> MapView {
+        let gui = host
+            .meridian_client_state()
+            .map_or([0.0, 0.0], |c| c.gui_size);
         let gui_scale = bridge::window_size().map_or(2.0, |w| w[1] as f32 / gui[1].max(1.0));
-        MapView { gui, unit: minimap::unit(gui[1], gui_scale) }
+        MapView {
+            gui,
+            unit: minimap::unit(gui[1], gui_scale),
+        }
     }
 
     /// Runs map input with the state, then carries out what it asks for.
-    fn map_input(&self, host: &dyn Host, f: impl FnOnce(&mut State, MapView, &MapData) -> MapAction) {
+    fn map_input(
+        &self,
+        host: &dyn ClientHost,
+        f: impl FnOnce(&mut State, MapView, &MapData) -> MapAction,
+    ) {
         let view = Self::map_view(host);
         self.with_state(host, |s| {
             let (shown, _) = s.shown_map();
             let waypoints = match &s.book {
                 Some((_, book)) => book
                     .dimension(&shown)
-                    .map(|d| d.visible(s.config.current().waypoints.all_sets).into_iter().cloned().collect())
+                    .map(|d| {
+                        d.visible(s.config.current().waypoints.all_sets)
+                            .into_iter()
+                            .cloned()
+                            .collect()
+                    })
                     .unwrap_or_default(),
                 _ => Vec::new(),
             };
             let data = MapData { waypoints };
             match f(s, view, &data) {
-                MapAction::Button(meridian_core::worldmap::Button::Dimension) => s.next_map_dimension(host),
+                MapAction::Button(meridian_core::worldmap::Button::Dimension) => {
+                    s.next_map_dimension(host)
+                }
                 action => s.map_action(action),
             }
         });
     }
 
     /// A key on the map screen: our bindings first, then panning.
-    fn map_key(&self, host: &dyn Host, key: &str) {
-        let chosen = |id: &str, default: &str| host.mod_key(MOD_ID, id, default);
+    fn map_key(&self, host: &dyn ClientHost, key: &str) {
+        let chosen = |id: &str, default: &str| host.meridian_key(MOD_ID, id, default);
         let hits: Vec<&'static str> = bindings_for_key(key, chosen).map(|b| b.id).collect();
         let at = host.cursor();
-        let player = HorizonHost { host, dimension: None }.player();
+        let player = HorizonHost {
+            host,
+            dimension: None,
+        }
+        .player();
         self.with_state(host, |s| {
             let view = Self::map_view(host);
             let center = [view.gui[0] / 2.0, view.gui[1] / 2.0];
@@ -2537,16 +3062,25 @@ impl Meridian {
                 match *id {
                     "worldmap.open" => s.pending.push(Pending::CloseScreen),
                     "worldmap.toggle_dimension" => s.next_map_dimension(host),
-                    "worldmap.settings" => s.open_from_map(Screen::Settings(SettingsScreen::world_map())),
-                    "worldmap.zoom_in" | "minimap.zoom_in" => s.map.scroll(1.0, center, view.gui, view.unit),
-                    "worldmap.zoom_out" | "minimap.zoom_out" => s.map.scroll(-1.0, center, view.gui, view.unit),
+                    "worldmap.settings" => {
+                        s.open_from_map(Screen::Settings(SettingsScreen::world_map()))
+                    }
+                    "worldmap.zoom_in" | "minimap.zoom_in" => {
+                        s.map.scroll(1.0, center, view.gui, view.unit)
+                    }
+                    "worldmap.zoom_out" | "minimap.zoom_out" => {
+                        s.map.scroll(-1.0, center, view.gui, view.unit)
+                    }
                     "waypoint.new" => {
                         // At the cursor, in the dimension shown; `~` where
                         // its height is unknown.
                         let w = s.map.to_world(at, view.gui, view.unit);
                         let (x, z) = (w[0].floor() as i32, w[1].floor() as i32);
                         let (shown, engine) = s.shown_map();
-                        let height = meridian_core::worldmap::surface_height(&shown, engine.sampler().column(x, z).map(|c| c.height));
+                        let height = meridian_core::worldmap::surface_height(
+                            &shown,
+                            engine.sampler().column(x, z).map(|c| c.height),
+                        );
                         let y = height.map(|h| h as i32 + 1);
                         s.map_action(MapAction::Menu(MenuItem::CreateWaypoint(Spot { x, y, z })));
                     }
@@ -2577,20 +3111,27 @@ impl Meridian {
 
     /// The map screen: terrain on the GPU, everything else over it.
     /// A menu over the map: the map shows behind it.
-    fn map_behind(&self, host: &dyn Host) -> bool {
-        host.mod_screen() == Some(MOD_ID) && self.with_state(host, |s| s.return_to_map && s.screen.is_some())
+    fn map_behind(&self, host: &dyn ClientHost) -> bool {
+        host.mod_screen() == Some(MOD_ID)
+            && self.with_state(host, |s| s.return_to_map && s.screen.is_some())
     }
 
-    fn draw_map(&self, host: &dyn Host, batch: &mut HudBatch, behind: bool) {
+    fn draw_map(&self, host: &dyn ClientHost, batch: &mut dyn DrawContext, behind: bool) {
         let view = Self::map_view(host);
         if view.gui[0] <= 0.0 {
             return;
         }
         // Behind a menu the cursor stays off the map, so nothing reacts.
         let mouse = if behind { [-1.0, -1.0] } else { host.cursor() };
-        let player = HorizonHost { host, dimension: None }.player();
+        let player = HorizonHost {
+            host,
+            dimension: None,
+        }
+        .player();
         let ops = self.with_state(host, |s| {
-            let Some(player) = player else { return Vec::new() };
+            let Some(player) = player else {
+                return Vec::new();
+            };
             let (gui, u) = (view.gui, view.unit);
             let now = Instant::now();
             let dt = now.duration_since(s.map_frame).as_secs_f32().min(0.05);
@@ -2598,7 +3139,8 @@ impl Meridian {
             let wm = &s.config.current().world_map;
             let sa_now = &s.config.current().seed_atlas;
             let seed_layer = sa_now.enabled && sa_now.biome_layer && s.seed_svc.active();
-            s.map.set_unlimited(wm.unlimited_zoom_in, wm.unlimited_zoom_out, seed_layer);
+            s.map
+                .set_unlimited(wm.unlimited_zoom_in, wm.unlimited_zoom_out, seed_layer);
             s.map.tick(dt);
             let here = s.dimension.clone().unwrap_or_default();
             let (shown, engine) = match &mut s.viewer {
@@ -2606,17 +3148,31 @@ impl Meridian {
                 None => (here.clone(), &mut s.engine),
             };
             let factor = dimension_scale(&here) / dimension_scale(&shown);
-            let player_pos = [player.position[0] * factor, player.position[1], player.position[2] * factor];
+            let player_pos = [
+                player.position[0] * factor,
+                player.position[1],
+                player.position[2] * factor,
+            ];
             let (min, max) = s.map.visible_regions(gui, u);
-            let mid = RegionPos::of_block(s.map.center[0].floor() as i32, s.map.center[1].floor() as i32);
+            let mid = RegionPos::of_block(
+                s.map.center[0].floor() as i32,
+                s.map.center[1].floor() as i32,
+            );
             let clamp = |p: RegionPos, r: i32| {
-                RegionPos::new(p.x.clamp(mid.x - r, mid.x + r), p.z.clamp(mid.z - r, mid.z + r))
+                RegionPos::new(
+                    p.x.clamp(mid.x - r, mid.x + r),
+                    p.z.clamp(mid.z - r, mid.z + r),
+                )
             };
             // Up close every visible region is held whole; zoomed out only
             // the middle is, the rest comes from overviews (a quarter of the
             // resolution, which is more than the screen shows there).
             let region_px = 512.0 * s.map.scale(u) as f32;
-            let whole_radius = if region_px < MAP_OVERVIEW_BELOW { MAP_REQUEST_RADIUS_FAR } else { MAP_REQUEST_RADIUS };
+            let whole_radius = if region_px < MAP_OVERVIEW_BELOW {
+                MAP_REQUEST_RADIUS_FAR
+            } else {
+                MAP_REQUEST_RADIUS
+            };
             let near = (clamp(min, whole_radius), clamp(max, whole_radius));
             engine.request_area(near.0, near.1);
             if region_px < MAP_OVERVIEW_BELOW {
@@ -2631,7 +3187,9 @@ impl Meridian {
                     let pos = RegionPos::new(x, z);
                     let (bx, bz) = pos.min_block();
                     let a = s.map.to_screen([bx as f64, bz as f64], gui, u);
-                    let b = s.map.to_screen([(bx + 512) as f64, (bz + 512) as f64], gui, u);
+                    let b = s
+                        .map
+                        .to_screen([(bx + 512) as f64, (bz + 512) as f64], gui, u);
                     let quad = |pixels, revision, size| gpu_map::RegionQuad {
                         pos: [x, z],
                         rect: [a[0], a[1], b[0], b[1]],
@@ -2643,10 +3201,17 @@ impl Meridian {
                     };
                     match (engine.region(pos), engine.overview(pos)) {
                         (Some(r), _) => regions.push(quad(r.shared_pixels(), r.revision, 512)),
-                        (None, Some(o)) => regions.push(quad(Some(o.pixels.clone()), o.revision, meridian_core::engine::OVERVIEW_SIDE as u32)),
+                        (None, Some(o)) => regions.push(quad(
+                            Some(o.pixels.clone()),
+                            o.revision,
+                            meridian_core::engine::OVERVIEW_SIDE as u32,
+                        )),
                         // Never explored, or not loaded yet: the GPU may still
                         // hold it up close, nothing to draw far out.
-                        (None, None) if (x - mid.x).abs() <= whole_radius && (z - mid.z).abs() <= whole_radius => {
+                        (None, None)
+                            if (x - mid.x).abs() <= whole_radius
+                                && (z - mid.z).abs() <= whole_radius =>
+                        {
                             regions.push(quad(None, 0, 512))
                         }
                         (None, None) => {}
@@ -2681,33 +3246,47 @@ impl Meridian {
                     // Tiles of 128 samples at the chosen step, nearest first;
                     // a coarser tile already computed shows under one that is
                     // not ready yet.
-                    let tile_quad = |s: &WorldMap, t: RegionPos, step: i32, tile: Option<sa::Tile>| {
-                        let span = sa::tile_span(step);
-                        let (bx, bz) = (t.x as f64 * span as f64, t.z as f64 * span as f64);
-                        let a = s.to_screen([bx, bz], gui, u);
-                        let b = s.to_screen([bx + span as f64, bz + span as f64], gui, u);
-                        gpu_map::RegionQuad {
-                            pos: [t.x, t.z],
-                            rect: [a[0], a[1], b[0], b[1]],
-                            size: tile.as_ref().map_or(sa::TILE_SAMPLES as u32, |t| t.size),
-                            // The opacity is baked into the texture: another
-                            // one uploads it again.
-                            revision: tile.as_ref().map_or(0, |t| t.revision ^ (u64::from(seed_alpha) << 56)),
-                            pixels: tile.map(|t| t.pixels),
-                            alpha: seed_alpha,
-                            layer: step as u32,
-                        }
-                    };
+                    let tile_quad =
+                        |s: &WorldMap, t: RegionPos, step: i32, tile: Option<sa::Tile>| {
+                            let span = sa::tile_span(step);
+                            let (bx, bz) = (t.x as f64 * span as f64, t.z as f64 * span as f64);
+                            let a = s.to_screen([bx, bz], gui, u);
+                            let b = s.to_screen([bx + span as f64, bz + span as f64], gui, u);
+                            gpu_map::RegionQuad {
+                                pos: [t.x, t.z],
+                                rect: [a[0], a[1], b[0], b[1]],
+                                size: tile.as_ref().map_or(sa::TILE_SAMPLES as u32, |t| t.size),
+                                // The opacity is baked into the texture: another
+                                // one uploads it again.
+                                revision: tile
+                                    .as_ref()
+                                    .map_or(0, |t| t.revision ^ (u64::from(seed_alpha) << 56)),
+                                pixels: tile.map(|t| t.pixels),
+                                alpha: seed_alpha,
+                                layer: step as u32,
+                            }
+                        };
                     let span = sa::tile_span(step);
                     let w0 = s.map.to_world([0.0, 0.0], gui, u);
                     let w1 = s.map.to_world(gui, gui, u);
-                    let t0 = RegionPos::new((w0[0] / span as f64).floor() as i32, (w0[1] / span as f64).floor() as i32);
-                    let t1 = RegionPos::new((w1[0] / span as f64).floor() as i32, (w1[1] / span as f64).floor() as i32);
+                    let t0 = RegionPos::new(
+                        (w0[0] / span as f64).floor() as i32,
+                        (w0[1] / span as f64).floor() as i32,
+                    );
+                    let t1 = RegionPos::new(
+                        (w1[0] / span as f64).floor() as i32,
+                        (w1[1] / span as f64).floor() as i32,
+                    );
                     let centre = s.map.center;
-                    let mut tiles: Vec<RegionPos> = (t0.x..=t1.x).flat_map(|x| (t0.z..=t1.z).map(move |z| RegionPos::new(x, z))).collect();
+                    let mut tiles: Vec<RegionPos> = (t0.x..=t1.x)
+                        .flat_map(|x| (t0.z..=t1.z).map(move |z| RegionPos::new(x, z)))
+                        .collect();
                     tiles.sort_by(|a, b| {
                         let d = |t: &RegionPos| {
-                            let (cx, cz) = ((t.x as f64 + 0.5) * span as f64 - centre[0], (t.z as f64 + 0.5) * span as f64 - centre[1]);
+                            let (cx, cz) = (
+                                (t.x as f64 + 0.5) * span as f64 - centre[0],
+                                (t.z as f64 + 0.5) * span as f64 - centre[1],
+                            );
                             cx * cx + cz * cz
                         };
                         d(a).total_cmp(&d(b))
@@ -2716,7 +3295,13 @@ impl Meridian {
                     let mut fine = Vec::with_capacity(tiles.len());
                     let mut coarse: Vec<gpu_map::RegionQuad> = Vec::new();
                     for t in &tiles {
-                        let job = sa::Job::Tile { dimension: dim, region: *t, step, y, refine: false };
+                        let job = sa::Job::Tile {
+                            dimension: dim,
+                            region: *t,
+                            step,
+                            y,
+                            refine: false,
+                        };
                         let tile = s.seed_svc.tile(job, refine);
                         if tile.is_none() {
                             // Meanwhile what is already computed: the four
@@ -2726,7 +3311,18 @@ impl Meridian {
                                 let fstep = step / 2;
                                 (0..4)
                                     .map(|i| RegionPos::new(t.x * 2 + i % 2, t.z * 2 + i / 2))
-                                    .map(|c| (c, s.seed_svc.cached_tile(sa::Job::Tile { dimension: dim, region: c, step: fstep, y, refine: false })))
+                                    .map(|c| {
+                                        (
+                                            c,
+                                            s.seed_svc.cached_tile(sa::Job::Tile {
+                                                dimension: dim,
+                                                region: c,
+                                                step: fstep,
+                                                y,
+                                                refine: false,
+                                            }),
+                                        )
+                                    })
                                     .collect()
                             } else {
                                 Vec::new()
@@ -2740,10 +3336,19 @@ impl Meridian {
                                 while cstep <= (step * 8).min(1024) {
                                     let f = sa::tile_span(cstep) / span;
                                     let c = RegionPos::new(t.x.div_euclid(f), t.z.div_euclid(f));
-                                    if coarse.iter().any(|q| q.pos == [c.x, c.z] && q.layer == cstep as u32) {
+                                    if coarse
+                                        .iter()
+                                        .any(|q| q.pos == [c.x, c.z] && q.layer == cstep as u32)
+                                    {
                                         break;
                                     }
-                                    if let Some(ct) = s.seed_svc.cached_tile(sa::Job::Tile { dimension: dim, region: c, step: cstep, y, refine: false }) {
+                                    if let Some(ct) = s.seed_svc.cached_tile(sa::Job::Tile {
+                                        dimension: dim,
+                                        region: c,
+                                        step: cstep,
+                                        y,
+                                        refine: false,
+                                    }) {
                                         coarse.push(tile_quad(&s.map, c, cstep, Some(ct)));
                                         break;
                                     }
@@ -2759,8 +3364,18 @@ impl Meridian {
                     // step (`prefetch_radius`), behind what the view needs.
                     if shown == here && sa_settings.prefetch_radius > 0 {
                         let fine_step = i32::from(sa_settings.biome_resolution.clamp(1, 16));
-                        for t in sa::prefetch_ring([player.position[0], player.position[2]], fine_step, sa_settings.prefetch_radius) {
-                            s.seed_svc.prefetch(sa::Job::Tile { dimension: dim, region: t, step: fine_step, y, refine: false });
+                        for t in sa::prefetch_ring(
+                            [player.position[0], player.position[2]],
+                            fine_step,
+                            sa_settings.prefetch_radius,
+                        ) {
+                            s.seed_svc.prefetch(sa::Job::Tile {
+                                dimension: dim,
+                                region: t,
+                                step: fine_step,
+                                y,
+                                refine: false,
+                            });
                         }
                     }
                 }
@@ -2786,16 +3401,24 @@ impl Meridian {
                     let w0 = s.map.to_world([0.0, 0.0], gui, u);
                     let w1 = s.map.to_world(gui, gui, u);
                     let (bbox, radius) = sa::view_box(s.map.center, [w1[0] - w0[0], w1[1] - w0[1]]);
-                    let shows = |k: i32| sa::marker_for(k).is_some_and(|m| sa::visible_at_zoom(m.id, zoom, radius));
+                    let shows = |k: i32| {
+                        sa::marker_for(k).is_some_and(|m| sa::visible_at_zoom(m.id, zoom, radius))
+                    };
                     let hits = s.seed_svc.view_markers(dim, bbox, shows, Instant::now());
                     // What completed markers are looked up by, once a frame.
                     let world = s.seed_key.clone();
-                    let generator = s.seed_svc.atlas_for(dim).map(|a| (a.seed, a.large_biomes, a.mc));
+                    let generator = s
+                        .seed_svc
+                        .atlas_for(dim)
+                        .map(|a| (a.seed, a.large_biomes, a.mc));
                     let dim_id = dimension_id(dim);
                     {
                         for h in hits.iter() {
-                            let Some(m) = sa::marker_for(h.kind) else { continue };
-                            let special = h.kind == meridian_seedatlas::structures::kind::ABANDONED_CAMP
+                            let Some(m) = sa::marker_for(h.kind) else {
+                                continue;
+                            };
+                            let special = h.kind
+                                == meridian_seedatlas::structures::kind::ABANDONED_CAMP
                                 && h.detail >= 0
                                 && h.detail & meridian_seedatlas::atlas::CAMP_SPECIAL_LOOT != 0;
                             let icon_id = if special {
@@ -2805,16 +3428,31 @@ impl Meridian {
                             } else {
                                 m.id
                             };
-                            let Some((icon_index, info)) = icon(icon_id) else { continue };
+                            let Some((icon_index, info)) = icon(icon_id) else {
+                                continue;
+                            };
                             let (dw, dh) = info.display();
                             let (w, hgt) = (dw * px, dh * px);
-                            let c = s.map.to_screen([h.x as f64 + 0.5, h.z as f64 + 0.5], gui, u);
-                            let rect = [c[0] - (dw / 2.0).floor() * px, c[1] - (dh / 2.0).floor() * px, w, hgt];
-                            if rect[0] > gui[0] || rect[1] > gui[1] || rect[0] + w < 0.0 || rect[1] + hgt < 0.0 {
+                            let c = s
+                                .map
+                                .to_screen([h.x as f64 + 0.5, h.z as f64 + 0.5], gui, u);
+                            let rect = [
+                                c[0] - (dw / 2.0).floor() * px,
+                                c[1] - (dh / 2.0).floor() * px,
+                                w,
+                                hgt,
+                            ];
+                            if rect[0] > gui[0]
+                                || rect[1] > gui[1]
+                                || rect[0] + w < 0.0
+                                || rect[1] + hgt < 0.0
+                            {
                                 continue;
                             }
                             let completed = match (&world, generator) {
-                                (Some(w), Some((seed, large, _))) => s.completed.is_completed_at(w, seed, large, dim_id, m.id, h.x, h.z),
+                                (Some(w), Some((seed, large, _))) => s
+                                    .completed
+                                    .is_completed_at(w, seed, large, dim_id, m.id, h.x, h.z),
                                 _ => false,
                             };
                             if completed && completed_alpha <= 0.0 {
@@ -2824,41 +3462,93 @@ impl Meridian {
                             if info.block
                                 && let Some((frame, _)) = icon("frame")
                             {
-                                icons.push(gpu_map::IconQuad { icon: frame, rect: [rect[0] - px, rect[1] - px, w + 2.0 * px, hgt + 2.0 * px], alpha });
+                                icons.push(gpu_map::IconQuad {
+                                    icon: frame,
+                                    rect: [
+                                        rect[0] - px,
+                                        rect[1] - px,
+                                        w + 2.0 * px,
+                                        hgt + 2.0 * px,
+                                    ],
+                                    alpha,
+                                });
                             }
-                            icons.push(gpu_map::IconQuad { icon: icon_index, rect, alpha });
+                            icons.push(gpu_map::IconQuad {
+                                icon: icon_index,
+                                rect,
+                                alpha,
+                            });
                             if completed && let Some((badge, _)) = icon("completed") {
                                 // `CompletedBadge`: 10 icon pixels in the lower right, 3 overhanging.
                                 let b = meridian_core::completed::BADGE_DISPLAY_SIZE as f32 * px;
-                                icons.push(gpu_map::IconQuad { icon: badge, rect: [rect[0] + w - b + 3.0 * px, rect[1] + hgt - b + 3.0 * px, b, b], alpha });
+                                icons.push(gpu_map::IconQuad {
+                                    icon: badge,
+                                    rect: [
+                                        rect[0] + w - b + 3.0 * px,
+                                        rect[1] + hgt - b + 3.0 * px,
+                                        b,
+                                        b,
+                                    ],
+                                    alpha,
+                                });
                             }
                             if inside(rect, mouse) {
-                                let key = structure_key(s.seed_key.as_deref(), &s.seed_svc, m.id, dim, h.x, h.z);
-                                s.hovered_marker = Some(HoveredMarker { name: m.name, x: h.x, y: h.y, z: h.z, key });
-                                let mc = generator.map_or(meridian_seedatlas::mc::MC_NEWEST, |g| g.2);
-                                marker_hover = Some(MarkerHover { lines: vec![sa::marker_tooltip(m, h, mc, completed)] });
+                                let key = structure_key(
+                                    s.seed_key.as_deref(),
+                                    &s.seed_svc,
+                                    m.id,
+                                    dim,
+                                    h.x,
+                                    h.z,
+                                );
+                                s.hovered_marker = Some(HoveredMarker {
+                                    name: m.name,
+                                    x: h.x,
+                                    y: h.y,
+                                    z: h.z,
+                                    key,
+                                });
+                                let mc =
+                                    generator.map_or(meridian_seedatlas::mc::MC_NEWEST, |g| g.2);
+                                marker_hover = Some(MarkerHover {
+                                    lines: vec![sa::marker_tooltip(m, h, mc, completed)],
+                                });
                             }
                         }
                     }
                 }
             }
-            gpu_map::set_frame(Some(gpu_map::WorldMapFrame { gui, world, regions, background, seed_above, icons, at: Instant::now() }));
+            gpu_map::set_frame(Some(gpu_map::WorldMapFrame {
+                gui,
+                world,
+                regions,
+                background,
+                seed_above,
+                icons,
+                at: Instant::now(),
+            }));
             let hovered = s.map.to_world(mouse, gui, u);
             let (hx, hz) = (hovered[0].floor() as i32, hovered[1].floor() as i32);
             let sampler = engine.sampler();
             let hovered_height = sampler.column(hx, hz).map(|c| c.height);
             let hovered_biome = sampler.biome(hx, hz);
             let cave_layer = engine.layer();
-            let radar_on = s.config.current().radar.enabled && !s.config.current().minimap.fair_play;
+            let radar_on =
+                s.config.current().radar.enabled && !s.config.current().minimap.fair_play;
             s.want_entities(radar_on && shown == here);
             let smooth = s.config.current().radar.smooth;
-            let entities = if radar_on && shown == here { radar_entities(&mut s.face_cache, smooth) } else { Vec::new() };
+            let entities = if radar_on && shown == here {
+                radar_entities(&mut s.face_cache, smooth)
+            } else {
+                Vec::new()
+            };
             let settings = s.config.current();
             let radar = radar_now(&settings.radar, s.faces_held);
             let waypoints: Vec<&Waypoint> = match &s.book {
-                Some((_, book)) if settings.waypoints.on_minimap => {
-                    book.dimension(&shown).map(|d| d.visible(settings.waypoints.all_sets)).unwrap_or_default()
-                }
+                Some((_, book)) if settings.waypoints.on_minimap => book
+                    .dimension(&shown)
+                    .map(|d| d.visible(settings.waypoints.all_sets))
+                    .unwrap_or_default(),
                 _ => Vec::new(),
             };
             // The Overworld's waypoints on the Nether's map at an eighth, and
@@ -2866,7 +3556,9 @@ impl Meridian {
             let paired: Vec<Waypoint> = match (&s.book, waypoint::paired_dimension(&shown)) {
                 (Some((_, book)), Some(other)) if settings.waypoints.on_minimap => book
                     .dimension(other)
-                    .map(|d| waypoint::scaled_to(&d.visible(settings.waypoints.all_sets), other, &shown))
+                    .map(|d| {
+                        waypoint::scaled_to(&d.visible(settings.waypoints.all_sets), other, &shown)
+                    })
                     .unwrap_or_default(),
                 _ => Vec::new(),
             };
@@ -2892,7 +3584,8 @@ impl Meridian {
                 show_footsteps: wm.footsteps && shown == here,
                 player_as_arrow: wm.player_as_arrow,
                 cave_layer,
-                other_dimension: (shown != here).then(|| shown.rsplit(':').next().unwrap_or(&shown).to_owned()),
+                other_dimension: (shown != here)
+                    .then(|| shown.rsplit(':').next().unwrap_or(&shown).to_owned()),
             });
             // Seed Atlas: the hovered structure, else the biome under the cursor.
             if sa_settings.enabled {
@@ -2907,18 +3600,24 @@ impl Meridian {
                 {
                     let y = sa::sample_y(&sa_settings, dim);
                     // The name in the seed's version, as the Fabric version's.
-                    let mc = s.seed_svc.atlas_for(dim).map_or(meridian_seedatlas::mc::MC_NEWEST, |a| a.mc);
+                    let mc = s
+                        .seed_svc
+                        .atlas_for(dim)
+                        .map_or(meridian_seedatlas::mc::MC_NEWEST, |a| a.mc);
                     if let Some(id) = s.seed_svc.biome_at(dim, hx, y, hz)
                         && let Some(name) = meridian_seedatlas::biomes::name_in(mc, id)
                     {
-                        let line = format!("{} · Y={y} · X={hx} · Z={hz}", meridian_core::info::title_case(name));
+                        let line = format!(
+                            "{} · Y={y} · X={hx} · Z={hz}",
+                            meridian_core::info::title_case(name)
+                        );
                         tooltip(&mut ops, mouse, gui, &[line]);
                     }
                 }
             }
             ops
         });
-        paint(host, batch, &ops);
+        paint(batch, &ops);
     }
 }
 
@@ -2934,14 +3633,20 @@ impl State {
                     self.engine.set_settings(self.config.current().clone());
                     self.save_config();
                 }
-                Button::SeedSettings => self.open_from_map(Screen::Settings(SettingsScreen::at(meridian_core::screens::Category::SeedAtlas))),
-                Button::Settings => self.open_from_map(Screen::Settings(SettingsScreen::world_map())),
+                Button::SeedSettings => self.open_from_map(Screen::Settings(SettingsScreen::at(
+                    meridian_core::screens::Category::SeedAtlas,
+                ))),
+                Button::Settings => {
+                    self.open_from_map(Screen::Settings(SettingsScreen::world_map()))
+                }
                 Button::Waypoints => self.open_from_map(Screen::List(Default::default())),
                 _ => {}
             }
             return;
         }
-        let MapAction::Menu(item) = action else { return };
+        let MapAction::Menu(item) = action else {
+            return;
+        };
         if item == MenuItem::ExportPng {
             self.export_png();
             return;
@@ -2951,7 +3656,8 @@ impl State {
                 if let Some(name) = self.menu_player.take() {
                     let format = &self.config.current().world_map.player_teleport_format;
                     self.pending.push(Pending::CloseScreen);
-                    self.pending.push(Pending::Chat(format.replace("{name}", &name)));
+                    self.pending
+                        .push(Pending::Chat(format.replace("{name}", &name)));
                 }
                 return;
             }
@@ -2960,11 +3666,19 @@ impl State {
         }
         let other = self.viewer.as_ref().map(|(d, _)| d.clone());
         let wm = &self.config.current().world_map;
-        let tp = if other.is_some() { wm.map_teleport_dimension_format.clone() } else { wm.map_teleport_format.clone() };
+        let tp = if other.is_some() {
+            wm.map_teleport_dimension_format.clone()
+        } else {
+            wm.map_teleport_format.clone()
+        };
         let here = self.dimension.clone().unwrap_or_default();
         let viewing = other.is_some();
-        let Some(dim) = other.or_else(|| self.dimension.clone()) else { return };
-        let Some((_, book)) = self.book.as_mut() else { return };
+        let Some(dim) = other.or_else(|| self.dimension.clone()) else {
+            return;
+        };
+        let Some((_, book)) = self.book.as_mut() else {
+            return;
+        };
         let find = |book: &WaypointBook, id| book.dimension(&dim).and_then(|d| d.find(id).cloned());
         match item {
             MenuItem::Header(_) => {}
@@ -2978,22 +3692,36 @@ impl State {
             MenuItem::TeleportHere(spot) => {
                 let w = Waypoint::at("Here", spot, 0);
                 self.pending.push(Pending::CloseScreen);
-                self.pending.push(Pending::Chat(waypoint::command(&tp, &w, &dim)));
+                self.pending
+                    .push(Pending::Chat(waypoint::command(&tp, &w, &dim)));
             }
             MenuItem::ShareLocation(spot) => {
                 let w = Waypoint::at("Location", spot, 0);
-                self.pending.push(Pending::Chat(waypoint::share_text(&w, &dim)));
+                self.pending
+                    .push(Pending::Chat(waypoint::share_text(&w, &dim)));
             }
             MenuItem::EditWaypoint(id) => {
                 if let Some(w) = find(book, id) {
                     // In its own set, which need not be the current one.
-                    let set = book.dimension(&dim).and_then(|d| d.set_of(id)).unwrap_or_default().to_owned();
-                    self.open_from_map_in(Screen::Editor(Editor::edit(&w, &set, false)), viewing.then_some(dim));
+                    let set = book
+                        .dimension(&dim)
+                        .and_then(|d| d.set_of(id))
+                        .unwrap_or_default()
+                        .to_owned();
+                    self.open_from_map_in(
+                        Screen::Editor(Editor::edit(&w, &set, false)),
+                        viewing.then_some(dim),
+                    );
                 }
             }
             MenuItem::TeleportToWaypoint(id) => {
                 if let Some(w) = find(book, id) {
-                    let line = waypoint::teleport_command(&w, &dim, &here, waypoint::TeleportFormats::of(self.config.current()));
+                    let line = waypoint::teleport_command(
+                        &w,
+                        &dim,
+                        &here,
+                        waypoint::TeleportFormats::of(self.config.current()),
+                    );
                     self.pending.push(Pending::CloseScreen);
                     self.pending.push(Pending::Chat(line));
                 }
@@ -3017,10 +3745,17 @@ impl State {
 
     /// The map shows the next dimension: the player's own through a
     /// read-only map of the others' saved files.
-    fn next_map_dimension(&mut self, host: &dyn Host) {
-        let Some(here) = self.dimension.clone() else { return };
-        let Some(context) = self.engine.context().cloned() else { return };
-        let shown = self.viewer.as_ref().map_or(here.clone(), |(d, _)| d.clone());
+    fn next_map_dimension(&mut self, host: &dyn ClientHost) {
+        let Some(here) = self.dimension.clone() else {
+            return;
+        };
+        let Some(context) = self.engine.context().cloned() else {
+            return;
+        };
+        let shown = self
+            .viewer
+            .as_ref()
+            .map_or(here.clone(), |(d, _)| d.clone());
         let mut order: Vec<String> = MAP_DIMENSIONS.iter().map(|d| d.to_string()).collect();
         if !order.contains(&here) {
             order.push(here.clone());
@@ -3038,8 +3773,14 @@ impl State {
         settings.performance.worker_threads = settings.performance.effective_workers().min(2);
         let mut engine = MapEngine::new(settings, data_dir(host));
         engine.prepare_map(self.engine.map());
-        let viewer_host = ViewerHost(HorizonHost { host, dimension: None });
-        let context = WorldContext { source: context.source, dimension: DimensionId::new(&next) };
+        let viewer_host = ViewerHost(HorizonHost {
+            host,
+            dimension: None,
+        });
+        let context = WorldContext {
+            source: context.source,
+            dimension: DimensionId::new(&next),
+        };
         engine.handle(&viewer_host, HostEvent::LevelLoaded(context));
         // A dimension under a roof shows its most recently mapped cave layer.
         if let Some(surface) = engine.regions_dir()
@@ -3054,15 +3795,26 @@ impl State {
     fn export_png(&mut self) {
         self.engine.flush();
         let engine = self.viewer.as_ref().map_or(&self.engine, |(_, e)| e);
-        let Some(regions) = engine.regions_dir() else { return };
-        let shading = meridian_core::color::Shading::new(&self.config.current().world_map.terrain, None)
-            .in_sky(engine.sky())
-            .for_cave(engine.layer().is_some(), self.config.current().minimap.cave.legible_caves);
+        let Some(regions) = engine.regions_dir() else {
+            return;
+        };
+        let shading =
+            meridian_core::color::Shading::new(&self.config.current().world_map.terrain, None)
+                .in_sky(engine.sky())
+                .for_cave(
+                    engine.layer().is_some(),
+                    self.config.current().minimap.cave.legible_caves,
+                );
         let name = {
             let (world, dim) = context_labels(self);
             let dim = self.viewer.as_ref().map_or(dim, |(d, _)| d.clone());
             let clean = |t: &str| t.replace(" (auto)", "").replace([':', '/', '\\', ' '], "_");
-            format!("{}_{}_{}.png", clean(&world), clean(&dim), chrono::Local::now().format("%Y-%m-%d_%H.%M.%S"))
+            format!(
+                "{}_{}_{}.png",
+                clean(&world),
+                clean(&dim),
+                chrono::Local::now().format("%Y-%m-%d_%H.%M.%S")
+            )
         };
         let out = self.export_dir.join(name);
         self.notice = Some("Exporting the map...".to_owned());
@@ -3072,7 +3824,12 @@ impl State {
             // Let the region saves just started land first.
             std::thread::sleep(Duration::from_millis(500));
             let text = match meridian_core::export::export_png(&regions, &out, &shading, 16384) {
-                Ok(r) => format!("Map exported: {} ({}x{})", r.path.display(), r.width, r.height),
+                Ok(r) => format!(
+                    "Map exported: {} ({}x{})",
+                    r.path.display(),
+                    r.width,
+                    r.height
+                ),
                 Err(e) => format!("Map export failed: {e}"),
             };
             log::info!("meridian: {text}");
@@ -3118,7 +3875,8 @@ fn newest_cave_layer(dimension_dir: &std::path::Path) -> Option<i32> {
 use meridian_core::seedatlas as sa;
 
 /// The marker icons by id, and their order in the renderer's icon list.
-static ICON_INDEX: std::sync::OnceLock<(HashMap<&'static str, usize>, Vec<icons::Icon>)> = std::sync::OnceLock::new();
+static ICON_INDEX: std::sync::OnceLock<(HashMap<&'static str, usize>, Vec<icons::Icon>)> =
+    std::sync::OnceLock::new();
 
 /// Builds the marker icons (Minecraft's textures need the game's resources,
 /// so this waits until they are known) and hands them to the renderer.
@@ -3126,7 +3884,9 @@ fn load_icons() {
     if ICON_INDEX.get().is_some() {
         return;
     }
-    let Some(root) = bridge::resources_dir() else { return };
+    let Some(root) = bridge::resources_dir() else {
+        return;
+    };
     let set = icons::load(Some(&root));
     let mut index = HashMap::new();
     let mut list = Vec::new();
@@ -3152,21 +3912,34 @@ struct MarkerHover {
     lines: Vec<String>,
 }
 
-impl State {
-}
+impl State {}
 
 impl Meridian {
     /// `/seedatlas ...` (the Fabric version's commands); answers the reply
     /// and whether to open the settings.
-    fn on_seedatlas(&self, host: &dyn Host, args: &str) -> (Vec<meridian_core::seedatlas_commands::CommandLine>, bool) {
+    fn on_seedatlas(
+        &self,
+        host: &dyn ClientHost,
+        args: &str,
+    ) -> (Vec<meridian_core::seedatlas_commands::CommandLine>, bool) {
         self.with_state(host, |s| {
             let map = s.engine.map().to_owned();
-            let context = s.engine.context().filter(|c| s.book.is_some() || !matches!(c.source, WorldSource::Multiplayer { .. }))
+            let context = s
+                .engine
+                .context()
+                .filter(|c| {
+                    s.book.is_some() || !matches!(c.source, WorldSource::Multiplayer { .. })
+                })
                 .map(|c| meridian_core::seedatlas_state::SeedContext::of_map(&c.source, &map));
             let detected = s.detected_seed();
             let mut settings = s.config.current().seed_atlas.clone();
             let outcome = {
-                let mut ctx = meridian_core::seedatlas_commands::CommandCtx { book: &mut s.seeds, settings: &mut settings, context, detected };
+                let mut ctx = meridian_core::seedatlas_commands::CommandCtx {
+                    book: &mut s.seeds,
+                    settings: &mut settings,
+                    context,
+                    detected,
+                };
                 meridian_core::seedatlas_commands::seedatlas_command(args, &mut ctx)
             };
             if outcome.settings_changed {
@@ -3213,13 +3986,21 @@ impl meridian_core::seedatlas_look::BiomeLooks for GameLooks {
         self.table.contains_key(name) || self.fallback.known(name)
     }
     fn water_color(&self, name: &str) -> u32 {
-        self.table.get(name).map_or_else(|| self.fallback.water_color(name), |l| l.water & 0xFF_FFFF)
+        self.table
+            .get(name)
+            .map_or_else(|| self.fallback.water_color(name), |l| l.water & 0xFF_FFFF)
     }
     fn grass_color(&self, name: &str, x: i32, z: i32) -> u32 {
-        self.table.get(name).map_or_else(|| self.fallback.grass_color(name, x, z), |l| l.grass & 0xFF_FFFF)
+        self.table.get(name).map_or_else(
+            || self.fallback.grass_color(name, x, z),
+            |l| l.grass & 0xFF_FFFF,
+        )
     }
     fn foliage_color(&self, name: &str) -> u32 {
-        self.table.get(name).map_or_else(|| self.fallback.foliage_color(name), |l| l.foliage & 0xFF_FFFF)
+        self.table.get(name).map_or_else(
+            || self.fallback.foliage_color(name),
+            |l| l.foliage & 0xFF_FFFF,
+        )
     }
     fn cold_enough_to_snow(&self, name: &str, x: i32, y: i32, z: i32, sea_level: i32) -> bool {
         self.fallback.cold_enough_to_snow(name, x, y, z, sea_level)
@@ -3229,7 +4010,9 @@ impl meridian_core::seedatlas_look::BiomeLooks for GameLooks {
 impl State {
     /// A Seed Atlas entry of the map menu.
     fn marker_action(&mut self, id: u32) {
-        let Some(m) = self.menu_marker.take() else { return };
+        let Some(m) = self.menu_marker.take() else {
+            return;
+        };
         match id {
             MENU_COMPLETE => {
                 if let Some(k) = &m.key
@@ -3242,14 +4025,19 @@ impl State {
                 // As the Fabric version copies them: Y only when known.
                 let y = m.y.map_or(String::new(), |y| format!(", Y: {y}"));
                 bridge::copy_to_clipboard(&format!("X: {}{y}, Z: {}", m.x, m.z));
-                self.pending.push(Pending::Notice("Coordinates copied".into()));
+                self.pending
+                    .push(Pending::Notice("Coordinates copied".into()));
             }
             // In the dimension the map shows (the marker's), at the
             // structure's height or `~`.
             MENU_STRUCTURE_WAYPOINT => {
                 let viewing = self.viewer.as_ref().map(|(d, _)| d.clone());
-                let Some(dim) = viewing.clone().or_else(|| self.dimension.clone()) else { return };
-                let Some((_, book)) = self.book.as_mut() else { return };
+                let Some(dim) = viewing.clone().or_else(|| self.dimension.clone()) else {
+                    return;
+                };
+                let Some((_, book)) = self.book.as_mut() else {
+                    return;
+                };
                 // The editor opens filled in, as the Fabric version's does.
                 let mut editor = Editor::new(book.dimension_mut(&dim), waypoint::now(), false);
                 editor.name = m.name.to_owned();
@@ -3260,8 +4048,18 @@ impl State {
             }
             MENU_TEMPORARY_WAYPOINT => {
                 let (dim, _) = self.shown_map();
-                let Some((_, book)) = self.book.as_mut() else { return };
-                let w = Waypoint::at(m.name, Spot { x: m.x, y: m.y, z: m.z }, 11);
+                let Some((_, book)) = self.book.as_mut() else {
+                    return;
+                };
+                let w = Waypoint::at(
+                    m.name,
+                    Spot {
+                        x: m.x,
+                        y: m.y,
+                        z: m.z,
+                    },
+                    11,
+                );
                 book.add_temporary(&dim, w, waypoint::now());
             }
             _ => {}
@@ -3274,15 +4072,24 @@ impl State {
         let Some(key) = self.seed_key.as_deref() else {
             return "No seed configured for this world/server".into();
         };
-        let own: Vec<(&str, i64)> = [(meridian_seedatlas::Dimension::Nether, "Nether"), (meridian_seedatlas::Dimension::End, "End")]
-            .into_iter()
-            .filter_map(|(d, name)| self.seeds.dimension_seed(key, d).map(|v| (name, v.seed)))
-            .collect();
-        let base = self.seed_svc.spec_for(meridian_seedatlas::Dimension::Overworld).map(|s| s.seed);
+        let own: Vec<(&str, i64)> = [
+            (meridian_seedatlas::Dimension::Nether, "Nether"),
+            (meridian_seedatlas::Dimension::End, "End"),
+        ]
+        .into_iter()
+        .filter_map(|(d, name)| self.seeds.dimension_seed(key, d).map(|v| (name, v.seed)))
+        .collect();
+        let base = self
+            .seed_svc
+            .spec_for(meridian_seedatlas::Dimension::Overworld)
+            .map(|s| s.seed);
         if base.is_none() && own.is_empty() {
             return "No seed configured for this world/server".into();
         }
-        let mut status = base.map_or_else(|| "No base seed".to_owned(), |b| format!("Active seed: {b}"));
+        let mut status = base.map_or_else(
+            || "No base seed".to_owned(),
+            |b| format!("Active seed: {b}"),
+        );
         for (name, seed) in own {
             status.push_str(&format!(" · {name}: {seed}"));
         }
@@ -3305,14 +4112,21 @@ impl State {
         if self.looks_ready
             && let Some(i) = &self.seed_inputs
             && i.detected == detected
-            && i.place.as_ref().map(|(source, map)| (source, map.as_str())) == self.engine.context().map(|c| (&c.source, self.engine.map()))
+            && i.place.as_ref().map(|(source, map)| (source, map.as_str()))
+                == self
+                    .engine
+                    .context()
+                    .map(|c| (&c.source, self.engine.map()))
             && i.settings == self.config.current().seed_atlas
         {
             return;
         }
         let sa = self.config.current().seed_atlas.clone();
         let map = self.engine.map().to_owned();
-        let context = self.engine.context().filter(|c| self.book.is_some() || !matches!(c.source, WorldSource::Multiplayer { .. }))
+        let context = self
+            .engine
+            .context()
+            .filter(|c| self.book.is_some() || !matches!(c.source, WorldSource::Multiplayer { .. }))
             .map(|c| meridian_core::seedatlas_state::SeedContext::of_map(&c.source, &map));
         if let Some(c) = &context {
             if self.seed_key.as_deref() != Some(c.key.as_str()) {
@@ -3334,12 +4148,18 @@ impl State {
                 }
             }
             if !table.is_empty() {
-                self.seed_svc.set_looks(std::sync::Arc::new(GameLooks { table, fallback: meridian_core::seedatlas_look::VanillaLooks }));
+                self.seed_svc.set_looks(std::sync::Arc::new(GameLooks {
+                    table,
+                    fallback: meridian_core::seedatlas_look::VanillaLooks,
+                }));
                 self.seed_svc.set_terrain_sources(
                     std::sync::Arc::new(|seed, large, ox, oz, step, w, h| {
-                        terrain_sampler::sample_overworld(seed, large, ox, oz, step, w, h, &|| true).map(|g| {
-                            meridian_core::seedatlas_look::SurfaceGrid { heights: g.heights, floors: g.floors, colors: g.colors }
-                        })
+                        terrain_sampler::sample_overworld(seed, large, ox, oz, step, w, h, &|| true)
+                            .map(|g| meridian_core::seedatlas_look::SurfaceGrid {
+                                heights: g.heights,
+                                floors: g.floors,
+                                colors: g.colors,
+                            })
                     }),
                     std::sync::Arc::new(terrain_sampler::nether_cave_mask),
                     std::sync::Arc::new(terrain_sampler::release_caches),
@@ -3348,17 +4168,21 @@ impl State {
             }
         }
         let specs = match (&context, sa.enabled) {
-            (Some(c), true) => meridian_core::seedatlas_state::resolve_all(&self.seeds, &sa, &c.key, detected),
+            (Some(c), true) => {
+                meridian_core::seedatlas_state::resolve_all(&self.seeds, &sa, &c.key, detected)
+            }
             _ => [None, None, None],
         };
         self.seed_svc.configure_dimensions(specs, &sa);
         self.seed_inputs = Some(SeedInputs {
-            place: self.engine.context().map(|c| (c.source.clone(), self.engine.map().to_owned())),
+            place: self
+                .engine
+                .context()
+                .map(|c| (c.source.clone(), self.engine.map().to_owned())),
             settings: self.config.current().seed_atlas.clone(),
             detected,
         });
     }
-
 }
 
 /// The completed-structure key of a marker in the open world.
@@ -3373,7 +4197,15 @@ fn structure_key(
     {
         let world = seed_key?;
         let atlas = svc.atlas_for(dimension)?;
-        meridian_core::completed::StructureKey::new(world, atlas.seed, atlas.large_biomes, dimension_id(dimension), id, x, z)
+        meridian_core::completed::StructureKey::new(
+            world,
+            atlas.seed,
+            atlas.large_biomes,
+            dimension_id(dimension),
+            id,
+            x,
+            z,
+        )
     }
 }
 
@@ -3385,7 +4217,6 @@ fn dimension_id(dimension: meridian_seedatlas::Dimension) -> &'static str {
         meridian_seedatlas::Dimension::End => "minecraft:the_end",
     }
 }
-
 
 fn inside(r: [f32; 4], p: [f32; 2]) -> bool {
     p[0] >= r[0] && p[0] < r[0] + r[2] && p[1] >= r[1] && p[1] < r[1] + r[3]
@@ -3414,7 +4245,14 @@ fn tooltip(ops: &mut Vec<DrawOp>, mouse: [f32; 2], gui: [f32; 2], lines: &[Strin
         });
     }
     for (i, line) in lines.iter().enumerate() {
-        ops.push(DrawOp::Text { x, y: y + 3.0 + i as f32 * 10.0, text: line.clone(), argb: 0xFFFF_FFFF, align: Align::Left, scale: 1.0 });
+        ops.push(DrawOp::Text {
+            x,
+            y: y + 3.0 + i as f32 * 10.0,
+            text: line.clone(),
+            argb: 0xFFFF_FFFF,
+            align: Align::Left,
+            scale: 1.0,
+        });
     }
 }
 
@@ -3440,7 +4278,9 @@ impl State {
         from: [i32; 3],
     ) {
         use meridian_core::screens_seedatlas::NearestKind;
-        let Some(atlas) = self.seed_svc.atlas_for(dim).cloned() else { return };
+        let Some(atlas) = self.seed_svc.atlas_for(dim).cloned() else {
+            return;
+        };
         let y = sa::sample_y(&self.config.current().seed_atlas, dim);
         let dim_id = dimension_id(dim);
         let world = self.seed_key.clone().unwrap_or_default();
@@ -3449,7 +4289,12 @@ impl State {
             NearestKind::Structure { marker, .. } if skip_completed => self
                 .completed
                 .keys()
-                .filter(|k| k.world == world && k.dimension == dim_id && k.kind == *marker && k.seed == atlas.seed)
+                .filter(|k| {
+                    k.world == world
+                        && k.dimension == dim_id
+                        && k.kind == *marker
+                        && k.seed == atlas.seed
+                })
                 .map(|k| (k.x, k.z))
                 .collect(),
             _ => Vec::new(),
@@ -3458,11 +4303,20 @@ impl State {
             bridge::lower_current_thread();
             let tolerance = meridian_core::seedatlas_state::COMPLETED_TOLERANCE;
             let (found, name) = match kind {
-                NearestKind::Biome { id, name } => (meridian_core::nearest::nearest_biome(&atlas, dim, id, y, from[0], from[2]), name),
+                NearestKind::Biome { id, name } => (
+                    meridian_core::nearest::nearest_biome(&atlas, dim, id, y, from[0], from[2]),
+                    name,
+                ),
                 NearestKind::Structure { marker, name } => {
                     let found = sa::MARKERS.iter().find(|m| m.id == marker).and_then(|m| {
-                        let skip = |x: i32, z: i32| done.iter().any(|&(cx, cz)| (cx - x).abs() <= tolerance && (cz - z).abs() <= tolerance);
-                        meridian_core::nearest::nearest_structure(&atlas, dim, m, from[0], from[2], &skip)
+                        let skip = |x: i32, z: i32| {
+                            done.iter().any(|&(cx, cz)| {
+                                (cx - x).abs() <= tolerance && (cz - z).abs() <= tolerance
+                            })
+                        };
+                        meridian_core::nearest::nearest_structure(
+                            &atlas, dim, m, from[0], from[2], &skip,
+                        )
                     });
                     (found, name)
                 }
@@ -3476,11 +4330,17 @@ impl State {
     fn poll_nearest(&mut self) {
         use meridian_core::nearest::WaypointMode;
         use meridian_core::screens_seedatlas::NearestOutcome;
-        let Some((found, name, mode, world, dim)) = NEAREST_DONE.lock().take() else { return };
+        let Some((found, name, mode, world, dim)) = NEAREST_DONE.lock().take() else {
+            return;
+        };
         // Dropped when the screen was left or the world changed meanwhile,
         // as in the Fabric version.
-        let here = sa::dimension_of(self.dimension.as_deref().unwrap_or("")).unwrap_or(meridian_seedatlas::Dimension::Overworld);
-        if !matches!(self.screen, Some(Screen::Nearest(_))) || self.seed_key.as_deref() != Some(world.as_str()) || here != dim {
+        let here = sa::dimension_of(self.dimension.as_deref().unwrap_or(""))
+            .unwrap_or(meridian_seedatlas::Dimension::Overworld);
+        if !matches!(self.screen, Some(Screen::Nearest(_)))
+            || self.seed_key.as_deref() != Some(world.as_str())
+            || here != dim
+        {
             return;
         }
         let outcome = match found {
@@ -3504,5 +4364,92 @@ impl State {
         if let Some(Screen::Nearest(n)) = &mut self.screen {
             n.finish(outcome);
         }
+    }
+}
+
+/// Called only from the integrated server's pinned lifecycle mixin.
+pub fn server_state(world: Option<String>, seed: Option<(i64, bool)>) {
+    *SERVER_WORLD.lock() = world;
+    *SERVER_SEED.lock() = seed;
+}
+
+fn text_color(rgb: u32) -> TextStyle {
+    let mut style = TextStyle::default();
+    style.color = Some(format!("#{:06x}", rgb & 0xFFFFFF));
+    style
+}
+fn draw_beam(draw: &mut dyn mod_api::WorldDrawContext, base: [f64; 3], height: f64, color: u32) {
+    use mod_api::{WorldDepth, WorldQuad};
+    let [x, y, z] = base;
+    let r = 0.1;
+    let corners = [
+        [x - r, y, z - r],
+        [x + r, y, z - r],
+        [x + r, y, z + r],
+        [x - r, y, z + r],
+    ];
+    let quads: Vec<_> = (0..4)
+        .map(|i| {
+            let a = corners[i];
+            let b = corners[(i + 1) % 4];
+            WorldQuad::new(
+                [a, b, [b[0], y + height, b[2]], [a[0], y + height, a[2]]],
+                color,
+                WorldDepth::ThroughWalls,
+            )
+        })
+        .collect();
+    let _ = draw.quads(&quads);
+}
+
+#[cfg(test)]
+mod fork_drawing_tests {
+    use super::*;
+    #[derive(Default)]
+    struct Draw {
+        text_colors: Vec<u32>,
+        scaled_colors: Vec<u32>,
+    }
+    impl DrawContext for Draw {
+        fn text_width(&self, text: &str) -> f32 {
+            text.len() as f32 * 6.0
+        }
+        fn text(&mut self, _text: &str, _at: [f32; 2], argb: u32, _shadow: bool) {
+            self.text_colors.push(argb);
+        }
+        fn gui_paint(&mut self, calls: &[mod_api::GuiDraw]) -> Result<(), mod_api::TextFormError> {
+            for call in calls {
+                if let mod_api::GuiDraw::Text { color, .. } = call {
+                    self.scaled_colors.push(*color);
+                }
+            }
+            Ok(())
+        }
+    }
+    #[test]
+    fn drawing_preserves_argb_alpha_for_text_and_wrapped_paragraphs() {
+        let text = |scale| DrawOp::Text {
+            x: 0.0,
+            y: 0.0,
+            text: "label".into(),
+            argb: 0x80445566,
+            align: Align::Left,
+            scale,
+        };
+        let ops = [
+            text(1.0),
+            text(2.0),
+            DrawOp::Paragraph {
+                x: 0.0,
+                y: 10.0,
+                width: 25.0,
+                text: "one two".into(),
+                argb: 0xC0112233,
+            },
+        ];
+        let mut draw = Draw::default();
+        paint(&mut draw, &ops);
+        assert_eq!(draw.text_colors, [0x80445566, 0xC0112233, 0xC0112233]);
+        assert_eq!(draw.scaled_colors, [0x80445566]);
     }
 }

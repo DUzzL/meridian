@@ -1,0 +1,43 @@
+diff --git a/crates/horizon-mod-api-gen/src/patch.rs b/crates/horizon-mod-api-gen/src/patch.rs
+index 93c5d1de..be20a4b3 100644
+--- a/crates/horizon-mod-api-gen/src/patch.rs
++++ b/crates/horizon-mod-api-gen/src/patch.rs
+@@ -808,7 +808,9 @@ pub fn generate(
+             None => {
+                 node.own.insert(name.to_string());
+                 node.own.insert(install.to_string());
+-                let original: syn::Path = syn::parse_str(&found.module).expect("a module path");
++                let original: syn::Path =
++                    syn::parse_str(&original_path(&source.libraries, &found.module))
++                        .expect("a module path");
+                 (
+                     quote! {
+                         #(#attrs)*
+@@ -1671,6 +1673,27 @@ mod tests {
+         assert_eq!(codes, ["E_MIXIN_TARGET_MISSING", "E_MIXIN_NOT_REPLACEABLE"]);
+     }
+ 
++    #[test]
++    fn free_function_installer_uses_the_lower_library_name() {
++        let generated = generate(
++            &root(),
++            "horizon_patch",
++            &["horizon_mod_render::render::world_drawn".into()],
++            &Extras::default(),
++        )
++        .unwrap();
++        let source = &generated
++            .libs
++            .iter()
++            .find(|(name, _)| name == "horizon_patch_mod_render")
++            .unwrap()
++            .1;
++        assert!(
++            source.contains("::mod_render::render::__fnr_world_drawn"),
++            "{source}"
++        );
++    }
++
+     #[test]
+     fn a_lower_crate_function_gets_a_patch_crate_of_its_own() {
+         let crate_ = generate(

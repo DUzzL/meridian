@@ -668,3 +668,27 @@ Quelle: die Biom-, Feature- und Oberflächenregeldateien (`data/minecraft/worldg
 - **Mangrove Swamp**: Gras-Modifikator `swamp`; die Blätter nehmen die Laubfarbe des Bioms (#8DB127). #92C648 ist nur der Wert des Inventar-Items (`items/mangrove_leaves.json`, `BlockColors` registriert den Block mit dem Laubton).
 - **Sulfur Caves** (26.2) fiel in die Standardwerte; jetzt Gras #ABA64F, Wasser #34BF89, Boden Stein (Oberflächenregel).
 - Nicht angefasst, weil geschätzt oder nur Flecken: Kronenanteile (`own(…)`/`fixed(…)`), Stein- und Kiesflecken in Windswept Hills und Savanna, Podsol in alten Taigen, Grobkies/Grobdreck-Flecken.
+
+
+## D-045: Port to arismoko/horizon on a separate branch (2026-11-13)
+
+The user requested a fork port, testing and issue reports. Branch:
+`port/arismoko-horizon`, based on `xaero-look` at `adaa608`.
+
+- The package is flat: `horizon-mod.toml`, root Cargo manifests, `src/`,
+  `assets/meridian/` and `data/meridian/`.
+- The adapter depends on `horizon-mod-api`, with `ClientHost` and call-scoped
+  draw contexts. Keys register through `Registrar`; client command completion
+  uses `register_client_commands`.
+- Registry identities are pinned by the mod's own Cargo.lock. The initial pins
+  retain the exact game's registry graph to avoid moving SDK dependencies.
+- Game-private sampling stays in explicit, revision-pinned native support
+  modules. They write mod-owned plain-data queues rather than exporting a
+  game module for the mod crate to import.
+- The raw GPU renderer lives inside the native `world_drawn` replacement. Its
+  textures, pipelines and wgpu types do not cross into the public adapter.
+- The terrain sampler follows the same pattern, with typed callback functions
+  installed before the adapter runs its frame hook.
+
+The exact validation results and reported issues belong in `FORK_PORT.md`.
+Earlier decisions describe the upstream implementation and its history.

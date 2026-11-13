@@ -58,8 +58,18 @@ enum Source {
 fn sources() -> Vec<(&'static str, Source)> {
     use Source::*;
     vec![
-        ("camp", Own(include_bytes!("data/assets/seedatlas/camp.png"))),
-        ("camp_special", Own(include_bytes!("data/assets/seedatlas/camp_special.png"))),
+        (
+            "camp",
+            Own(include_bytes!(
+                "../assets/meridian/textures/seedatlas/camp.png"
+            )),
+        ),
+        (
+            "camp_special",
+            Own(include_bytes!(
+                "../assets/meridian/textures/seedatlas/camp_special.png"
+            )),
+        ),
         ("ancient_city", Composed(warden_head, false)),
         ("bastion", Block("cracked_polished_blackstone_bricks", true)),
         ("chambers", Item("trial_key")),
@@ -69,8 +79,18 @@ fn sources() -> Vec<(&'static str, Source)> {
         ("fortress", Block("nether_bricks", true)),
         ("gateway", Item("ender_pearl")),
         ("geode", Item("amethyst_shard")),
-        ("hut", Own(include_bytes!("data/assets/seedatlas/hut.png"))),
-        ("igloo", Own(include_bytes!("data/assets/seedatlas/igloo.png"))),
+        (
+            "hut",
+            Own(include_bytes!(
+                "../assets/meridian/textures/seedatlas/hut.png"
+            )),
+        ),
+        (
+            "igloo",
+            Own(include_bytes!(
+                "../assets/meridian/textures/seedatlas/igloo.png"
+            )),
+        ),
         ("jungle", Block("mossy_cobblestone", true)),
         ("mansion", Item("totem_of_undying")),
         // The rail is transparent between its sleepers: no frame.
@@ -81,14 +101,24 @@ fn sources() -> Vec<(&'static str, Source)> {
         ("outpost", Item("crossbow_standby")),
         ("portal", Block("crying_obsidian", true)),
         ("ruins", Composed(cracked_mossy_stone_bricks, true)),
-        ("shipwreck", Own(include_bytes!("data/assets/seedatlas/shipwreck.png"))),
+        (
+            "shipwreck",
+            Own(include_bytes!(
+                "../assets/meridian/textures/seedatlas/shipwreck.png"
+            )),
+        ),
         ("slime", Item("slime_ball")),
         ("spawn", Item("compass_00")),
         ("stronghold", Item("ender_eye")),
         ("trails", Item("brush")),
         ("treasure", Composed(chest, false)),
         ("village", Composed(villager_head, false)),
-        ("well", Own(include_bytes!("data/assets/seedatlas/well.png"))),
+        (
+            "well",
+            Own(include_bytes!(
+                "../assets/meridian/textures/seedatlas/well.png"
+            )),
+        ),
     ]
 }
 
@@ -102,7 +132,11 @@ struct Image {
 
 impl Image {
     fn new(w: u32, h: u32) -> Self {
-        Self { w, h, px: vec![0; (w * h * 4) as usize] }
+        Self {
+            w,
+            h,
+            px: vec![0; (w * h * 4) as usize],
+        }
     }
     fn get(&self, x: u32, y: u32) -> [u8; 4] {
         let i = ((y * self.w + x) * 4) as usize;
@@ -123,21 +157,48 @@ fn decode(bytes: &[u8]) -> Option<Image> {
     let data = &buf[..info.buffer_size()];
     let px: Vec<u8> = match info.color_type {
         png::ColorType::Rgba => data.to_vec(),
-        png::ColorType::Rgb => data.chunks_exact(3).flat_map(|c| [c[0], c[1], c[2], 255]).collect(),
-        png::ColorType::GrayscaleAlpha => data.chunks_exact(2).flat_map(|c| [c[0], c[0], c[0], c[1]]).collect(),
+        png::ColorType::Rgb => data
+            .chunks_exact(3)
+            .flat_map(|c| [c[0], c[1], c[2], 255])
+            .collect(),
+        png::ColorType::GrayscaleAlpha => data
+            .chunks_exact(2)
+            .flat_map(|c| [c[0], c[0], c[0], c[1]])
+            .collect(),
         _ => data.iter().flat_map(|&g| [g, g, g, 255]).collect(),
     };
-    Some(Image { w: info.width, h: info.height, px })
+    Some(Image {
+        w: info.width,
+        h: info.height,
+        px,
+    })
 }
 
 fn texture(root: &Path, path: &str) -> Option<Image> {
-    decode(&std::fs::read(root.join("assets/minecraft/textures").join(format!("{path}.png"))).ok()?)
+    decode(
+        &std::fs::read(
+            root.join("assets/minecraft/textures")
+                .join(format!("{path}.png")),
+        )
+        .ok()?,
+    )
 }
 
 /// Copies a `w` x `h` rectangle in 1/k texture units, skipping transparent
 /// pixels so overlays layer (`StructureIcons.copy`).
 #[allow(clippy::too_many_arguments)]
-fn copy(src: &Image, u: u32, v: u32, w: u32, h: u32, k: u32, flip: bool, dst: &mut Image, x: u32, y: u32) {
+fn copy(
+    src: &Image,
+    u: u32,
+    v: u32,
+    w: u32,
+    h: u32,
+    k: u32,
+    flip: bool,
+    dst: &mut Image,
+    x: u32,
+    y: u32,
+) {
     for dy in 0..h * k {
         let sy = v * k + if flip { h * k - 1 - dy } else { dy };
         for dx in 0..w * k {
@@ -207,7 +268,11 @@ fn chest(root: &Path) -> Option<Image> {
 /// The first frame of an animated texture, cropped to its visible pixels
 /// (alpha 8 and up, as `IconLayout.measure`).
 fn crop(img: &Image) -> Image {
-    let frame_h = if img.h > img.w && img.h % img.w == 0 { img.w } else { img.h };
+    let frame_h = if img.h > img.w && img.h % img.w == 0 {
+        img.w
+    } else {
+        img.h
+    };
     let (mut l, mut t, mut r, mut b) = (img.w, frame_h, 0u32, 0u32);
     let mut any = false;
     for y in 0..frame_h {
@@ -241,15 +306,52 @@ pub fn load(root: Option<&Path>) -> HashMap<&'static str, Icon> {
     for (id, source) in sources() {
         let (img, block) = match source {
             Source::Own(bytes) => (decode(bytes), false),
-            Source::Item(name) => (root.and_then(|r| texture(r, &format!("item/{name}"))), false),
-            Source::Block(name, frame) => (root.and_then(|r| texture(r, &format!("block/{name}"))), frame),
+            Source::Item(name) => (
+                root.and_then(|r| texture(r, &format!("item/{name}"))),
+                false,
+            ),
+            Source::Block(name, frame) => (
+                root.and_then(|r| texture(r, &format!("block/{name}"))),
+                frame,
+            ),
             Source::Composed(f, frame) => (root.and_then(f), frame),
         };
         let img = img.map(|i| crop(&i)).unwrap_or_else(|| Image::new(1, 1));
-        out.insert(id, Icon { width: img.w, height: img.h, rgba: img.px, block, size: display_size(id) });
+        out.insert(
+            id,
+            Icon {
+                width: img.w,
+                height: img.h,
+                rgba: img.px,
+                block,
+                size: display_size(id),
+            },
+        );
     }
-    let done = decode(include_bytes!("data/assets/seedatlas/completed.png")).map(|i| crop(&i)).unwrap_or_else(|| Image::new(1, 1));
-    out.insert("completed", Icon { width: done.w, height: done.h, rgba: done.px, block: false, size: DISPLAY_SIZE });
-    out.insert("frame", Icon { width: 1, height: 1, rgba: vec![0x14, 0x14, 0x14, 0xC0], block: false, size: DISPLAY_SIZE });
+    let done = decode(include_bytes!(
+        "../assets/meridian/textures/seedatlas/completed.png"
+    ))
+    .map(|i| crop(&i))
+    .unwrap_or_else(|| Image::new(1, 1));
+    out.insert(
+        "completed",
+        Icon {
+            width: done.w,
+            height: done.h,
+            rgba: done.px,
+            block: false,
+            size: DISPLAY_SIZE,
+        },
+    );
+    out.insert(
+        "frame",
+        Icon {
+            width: 1,
+            height: 1,
+            rgba: vec![0x14, 0x14, 0x14, 0xC0],
+            block: false,
+            size: DISPLAY_SIZE,
+        },
+    );
     out
 }
