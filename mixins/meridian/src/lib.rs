@@ -22,7 +22,7 @@ pub mod bridge;
 mod host_api;
 use host_api::*;
 use meridian_core::MapEngine;
-use meridian_core::config::{ConfigFile, ConfigStore, MinimapSettings};
+use meridian_core::config::{SettingsFile, ConfigStore, MinimapSettings};
 use meridian_core::engine::DEFAULT_MAP;
 use meridian_core::geom::RegionPos;
 use meridian_core::keybinds::{KEY_BINDINGS, bindings_for_key};
@@ -31,7 +31,7 @@ use meridian_core::persist::MapPaths;
 use meridian_core::radar;
 use meridian_core::screens::{Action, Editor, Env, List, Screen, SettingsScreen};
 use meridian_core::waypoint::{self, Kind, Spot, Waypoint, WaypointBook};
-use meridian_core::worldmap::{MapAction, MenuItem, Overlay, WorldMap};
+use meridian_core::worldmap::{MapAction, MenuItem, MapOverlay, WorldMap};
 use meridian_host::{
     BiomeAppearance, BlockAppearance, ChunkPos, ChunkSnapshot, ColumnSample, DimensionId,
     HostEvent, MapHost, PlayerState, ReadMode, Tint, WorldContext, WorldSource,
@@ -194,7 +194,7 @@ impl Default for Meridian {
 }
 
 struct State {
-    config: ConfigFile,
+    config: SettingsFile,
     store: ConfigStore,
     engine: MapEngine,
     controls: Controls,
@@ -1118,7 +1118,7 @@ fn paint_with(
                     *argb,
                 );
             }
-            DrawOp::Text {
+            DrawOp::Label {
                 x,
                 y,
                 text,
@@ -1140,6 +1140,10 @@ fn paint_with(
                             PoseOp::Translate(x, *y),
                             PoseOp::Scale(*scale, *scale),
                         ]),
+                        // A pose pushed in one `gui_paint` ends with that
+                        // call, so the text goes in the same batch. `fits`
+                        // reads this variant as building the API's `Text`
+                        // record (docs/HORIZON_PORT.md).
                         GuiDraw::Text {
                             text: Text::literal(text.clone()),
                             x: 0,
@@ -1993,7 +1997,10 @@ impl Hooks for Meridian {
         style.click = Some(TextClick::RunCommand(format!(
             "/meridian waypoint accept {number}"
         )));
-        style.hover = Some(mod_api::TextHover::Text(Box::new(Text::literal(
+        // The variant as a function, not a literal: `fits` would read
+        // `TextHover::Text(..)` as building the API's `Text` record.
+        let hover: fn(Box<Text>) -> mod_api::TextHover = mod_api::TextHover::Text;
+        style.hover = Some(hover(Box::new(Text::literal(
             "Adds it as a temporary waypoint",
         ))));
         let link = Text::literal(" [Add waypoint]").with_style(style);
@@ -2422,7 +2429,7 @@ fn world_waypoints(
             ],
             argb: 0x6000_0000,
         });
-        ops.push(DrawOp::Text {
+        ops.push(DrawOp::Label {
             x,
             y: name_y,
             text: w.name.clone(),
@@ -2431,7 +2438,7 @@ fn world_waypoints(
             scale: name_scale,
         });
         let dist = minimap::distance_text(distance, settings.distance_in_km_from, decimal_comma());
-        ops.push(DrawOp::Text {
+        ops.push(DrawOp::Label {
             x,
             y: name_y + 10.0 * name_scale,
             text: dist,
@@ -3184,7 +3191,7 @@ impl Meridian {
             };
             let data = MapData { waypoints };
             match f(s, view, &data) {
-                MapAction::Button(meridian_core::worldmap::Button::Dimension) => {
+                MapAction::Press(meridian_core::worldmap::MapButton::Dimension) => {
                     s.next_map_dimension(host)
                 }
                 action => s.map_action(action),
@@ -3714,7 +3721,7 @@ impl Meridian {
             };
             let wm = &settings.world_map;
             s.map.seed_atlas = sa_settings.enabled;
-            let mut ops = s.map.overlay(&Overlay {
+            let mut ops = s.map.overlay(&MapOverlay {
                 gui,
                 unit: u,
                 mouse,
@@ -3774,8 +3781,8 @@ impl Meridian {
 impl State {
     /// Carries out what the map asked for.
     fn map_action(&mut self, action: MapAction) {
-        if let MapAction::Button(b) = action {
-            use meridian_core::worldmap::Button;
+        if let MapAction::Press(b) = action {
+            use meridian_core::worldmap::MapButton as Button;
             match b {
                 Button::SeedLayer => {
                     let sa = &mut self.config.current_mut().seed_atlas;
@@ -4388,7 +4395,7 @@ fn tooltip(ops: &mut Vec<DrawOp>, mouse: [f32; 2], gui: [f32; 2], lines: &[Strin
         });
     }
     for (i, line) in lines.iter().enumerate() {
-        ops.push(DrawOp::Text {
+        ops.push(DrawOp::Label {
             x,
             y: y + 3.0 + i as f32 * 10.0,
             text: line.clone(),
@@ -4600,7 +4607,7 @@ mod drawing_tests {
     }
     #[test]
     fn drawing_preserves_argb_alpha_for_text_and_wrapped_paragraphs() {
-        let text = |scale| DrawOp::Text {
+        let text = |scale| DrawOp::Label {
             x: 0.0,
             y: 0.0,
             text: "label".into(),

@@ -1093,7 +1093,7 @@ mod tests {
         );
         assert!(
             ws.iter()
-                .any(|w| w.id == "clear" && w.kind == ui::Kind::Button { enabled: false })
+                .any(|w| w.id == "clear" && w.kind == ui::Kind::PushButton { enabled: false })
         );
         click(&mut screen, "highlight", &mut e);
         assert!(e.settings.seed_atlas.biome_highlight && e.settings_changed);
@@ -1140,7 +1140,7 @@ mod tests {
         let ws = screen.widgets(&e);
         assert!(
             ws.iter()
-                .any(|w| w.id == "highlight" && w.kind == ui::Kind::Button { enabled: false })
+                .any(|w| w.id == "highlight" && w.kind == ui::Kind::PushButton { enabled: false })
         );
         assert!(ws.iter().any(|w| w.text.starts_with("Set a seed first")));
         assert!(!ws.iter().any(|w| w.id.starts_with("btn:")));
@@ -1180,7 +1180,7 @@ mod tests {
         assert!(!ws.iter().any(|w| w.id == "ver:26"));
         assert!(
             ws.iter()
-                .any(|w| w.id == "next" && w.kind == ui::Kind::Button { enabled: false })
+                .any(|w| w.id == "next" && w.kind == ui::Kind::PushButton { enabled: false })
         );
         click(&mut screen, "ver:25", &mut e);
         assert_eq!(e.settings.seed_atlas.game_versions["sp-w"], "1.1");

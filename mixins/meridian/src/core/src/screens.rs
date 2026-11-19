@@ -1221,7 +1221,7 @@ pub enum Group {
     Information,
     Misc,
     BlockMap,
-    Overlay,
+    MapOverlay,
     Waypoints,
     SeedAtlas,
     WorldMap,
@@ -1585,12 +1585,12 @@ pub fn options() -> Vec<Opt> {
             BlockMap,
             world_map.terrain.adjust_short_blocks
         ),
-        toggle!("Chunk Grid", Overlay, minimap.chunk_grid),
-        toggle!("Slime Chunks", Overlay, minimap.slime_chunks),
-        toggle!("Light Overlay", Overlay, minimap.light_overlay),
+        toggle!("Chunk Grid", MapOverlay, minimap.chunk_grid),
+        toggle!("Slime Chunks", MapOverlay, minimap.slime_chunks),
+        toggle!("Light MapOverlay", MapOverlay, minimap.light_overlay),
         Opt {
-            label: "Light Overlay Min",
-            group: Overlay,
+            label: "Light MapOverlay Min",
+            group: MapOverlay,
             value: |s| format!("{}", s.minimap.light_overlay_range[0]),
             step: |s, b| {
                 let v = s.minimap.light_overlay_range[0] as i32 + if b { -1 } else { 1 };
@@ -1598,8 +1598,8 @@ pub fn options() -> Vec<Opt> {
             },
         },
         Opt {
-            label: "Light Overlay Max",
-            group: Overlay,
+            label: "Light MapOverlay Max",
+            group: MapOverlay,
             value: |s| format!("{}", s.minimap.light_overlay_range[1]),
             step: |s, b| {
                 let v = s.minimap.light_overlay_range[1] as i32 + if b { -1 } else { 1 };
@@ -1890,7 +1890,11 @@ fn seed_atlas_options() -> Vec<Opt> {
                 s.seed_atlas.biome_opacity = ((next * 255 + 50) / 100) as u8;
             },
         },
-        toggle!("Overlay explored", SeedAtlas, seed_atlas.overlay_explored),
+        toggle!(
+            "MapOverlay explored",
+            SeedAtlas,
+            seed_atlas.overlay_explored
+        ),
         toggle!("Biome highlighting", SeedAtlas, seed_atlas.biome_highlight),
         toggle!("Structures", SeedAtlas, seed_atlas.structures),
         Opt {
@@ -2171,7 +2175,7 @@ mod tests {
         let confirm_enabled = |sc: &Screen, e: &Env<'_>| {
             sc.widgets(e)
                 .iter()
-                .any(|w| w.id == "confirm" && w.kind == ui::Kind::Button { enabled: true })
+                .any(|w| w.id == "confirm" && w.kind == ui::Kind::PushButton { enabled: true })
         };
         assert!(!confirm_enabled(&screen, &e), "no name yet");
         for c in "Home".chars() {
@@ -2251,7 +2255,7 @@ mod tests {
         let ws = screen.widgets(&e);
         assert!(
             ws.iter()
-                .any(|w| w.id == "teleport" && w.kind == ui::Kind::Button { enabled: false })
+                .any(|w| w.id == "teleport" && w.kind == ui::Kind::PushButton { enabled: false })
         );
         click(&mut screen, "row:9", &mut e);
         assert_eq!(click(&mut screen, "teleport", &mut e), Action::Teleport(9));
@@ -2360,7 +2364,7 @@ mod tests {
             screen
                 .widgets(e)
                 .iter()
-                .any(|w| w.id == id && w.kind == ui::Kind::Button { enabled: true })
+                .any(|w| w.id == id && w.kind == ui::Kind::PushButton { enabled: true })
         };
         assert!(
             !enabled(&screen, &e, "teleport"),
@@ -2479,7 +2483,7 @@ mod tests {
         let mut s = Settings::default();
         assert_eq!((find("Completed").value)(&s), "100%");
         assert_eq!((find("Marker size").value)(&s), "150%");
-        assert_eq!((find("Overlay explored").value)(&s), "OFF");
+        assert_eq!((find("MapOverlay explored").value)(&s), "OFF");
         assert_eq!((find("Biome highlighting").value)(&s), "OFF");
         assert_eq!((find("World").value)(&s), "Normal, Auto (26.3)");
 

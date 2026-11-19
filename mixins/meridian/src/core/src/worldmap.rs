@@ -123,12 +123,12 @@ pub enum MapAction {
     Close,
     Menu(MenuItem),
     /// A toolbar button the host carries out (settings, layers, lists).
-    Button(Button),
+    Press(MapButton),
 }
 
 /// What the overlay draws from the game this frame.
 #[derive(Debug)]
-pub struct Overlay<'a> {
+pub struct MapOverlay<'a> {
     pub gui: [f32; 2],
     /// GUI pixels per minimap unit (`minimap::unit`).
     pub unit: f32,
@@ -490,15 +490,15 @@ impl WorldMap {
             };
         }
         match button_at(p, gui, self.seed_atlas) {
-            Some(Button::ZoomIn) => self.scroll(1.0, [gui[0] / 2.0, gui[1] / 2.0], gui, unit),
-            Some(Button::ZoomOut) => self.scroll(-1.0, [gui[0] / 2.0, gui[1] / 2.0], gui, unit),
-            Some(Button::Center) => {
+            Some(MapButton::ZoomIn) => self.scroll(1.0, [gui[0] / 2.0, gui[1] / 2.0], gui, unit),
+            Some(MapButton::ZoomOut) => self.scroll(-1.0, [gui[0] / 2.0, gui[1] / 2.0], gui, unit),
+            Some(MapButton::Center) => {
                 if let Some(p) = self.player_at {
                     self.center = p;
                 }
             }
-            Some(Button::Help) | None => {}
-            Some(b) => return MapAction::Button(b),
+            Some(MapButton::Help) | None => {}
+            Some(b) => return MapAction::Press(b),
         }
         MapAction::None
     }
@@ -509,7 +509,7 @@ impl WorldMap {
     }
 
     /// Everything drawn over the terrain, in order.
-    pub fn overlay(&self, o: &Overlay<'_>) -> Vec<DrawOp> {
+    pub fn overlay(&self, o: &MapOverlay<'_>) -> Vec<DrawOp> {
         let mut ops = Vec::new();
         let (gui, u) = (o.gui, o.unit);
         if o.show_footsteps {
@@ -607,7 +607,7 @@ impl WorldMap {
         for (i, line) in top.iter().enumerate() {
             let y = 2.0 * u + i as f32 * 9.0 * ts;
             ops.push(plate(gui[0] / 2.0, y, line, ts));
-            ops.push(DrawOp::Text {
+            ops.push(DrawOp::Label {
                 x: gui[0] / 2.0,
                 y,
                 text: line.clone(),
@@ -621,7 +621,7 @@ impl WorldMap {
             let text = zoom_label(self.zoom);
             let y = gui[1] - 8.0 * ts - 4.0 * u;
             ops.push(plate(gui[0] / 2.0, y, &text, ts));
-            ops.push(DrawOp::Text {
+            ops.push(DrawOp::Label {
                 x: gui[0] / 2.0,
                 y,
                 text,
@@ -634,7 +634,7 @@ impl WorldMap {
             let text = crate::info::title_case(dim);
             let at = 2.0 * u + 2.0 * 9.0 * ts;
             ops.push(plate(gui[0] / 2.0, at, &text, ts));
-            ops.push(DrawOp::Text {
+            ops.push(DrawOp::Label {
                 x: gui[0] / 2.0,
                 y: at,
                 text,
@@ -646,7 +646,7 @@ impl WorldMap {
         if let Some(y) = o.cave_layer {
             let text = format!("Cave layer: Y {y}");
             let at = gui[1] - 8.0 * ts - 4.0 * u;
-            ops.push(DrawOp::Text {
+            ops.push(DrawOp::Label {
                 x: 4.0 * u,
                 y: at,
                 text,
@@ -677,7 +677,7 @@ impl WorldMap {
             });
             let (cx, cy) = (rect[0] + rect[2] / 2.0, rect[1] + rect[3] / 2.0);
             match b.icon() {
-                Icon::Text(t) => ops.push(DrawOp::Text {
+                Icon::Glyph(t) => ops.push(DrawOp::Label {
                     x: cx + 0.5,
                     y: cy - 4.0,
                     text: t.into(),
@@ -685,8 +685,8 @@ impl WorldMap {
                     align: Align::Center,
                     scale: 1.0,
                 }),
-                Icon::Item(texture) => {
-                    let off = *b == Button::SeedLayer && !o.seed_layer;
+                Icon::ItemTexture(texture) => {
+                    let off = *b == MapButton::SeedLayer && !o.seed_layer;
                     ops.push(DrawOp::Blit {
                         texture: texture.into(),
                         rect: [cx - 8.0, cy - 8.0, 16.0, 16.0],
@@ -700,12 +700,12 @@ impl WorldMap {
         if let Some(b) = hovered {
             let i = buttons.iter().position(|x| *x == b).unwrap_or(0);
             let rect = toolbar_rect(i, buttons.len(), gui);
-            let lines: Vec<String> = if b == Button::Help {
+            let lines: Vec<String> = if b == MapButton::Help {
                 CONTROLS.iter().map(|l| (*l).to_owned()).collect()
             } else {
                 vec![b.tooltip(o.seed_layer).to_owned()]
             };
-            ops.extend(side_tooltip(&lines, rect, gui, b == Button::Help));
+            ops.extend(side_tooltip(&lines, rect, gui, b == MapButton::Help));
         }
         // The right-click menu last, over everything.
         if let Some(menu) = &self.menu {
@@ -728,7 +728,7 @@ impl WorldMap {
                         argb: 0x40FF_FFFF,
                     });
                 }
-                ops.push(DrawOp::Text {
+                ops.push(DrawOp::Label {
                     x: x + 3.0 * menu.scale,
                     y: row_y + 1.5 * menu.scale,
                     text: item.label(),
@@ -799,7 +799,7 @@ pub fn pin(tip: [f32; 2], u: f32, argb: u32, initials: &str) -> Vec<DrawOp> {
         }
     }
     let ts = 1.6 * u;
-    ops.push(DrawOp::Text {
+    ops.push(DrawOp::Label {
         x: x + 0.5 * u,
         y: top + (body - 7.0 * ts) / 2.0 + 0.5 * u,
         text: initials.chars().take(1).collect(),
@@ -870,7 +870,7 @@ fn compass(gui: [f32; 2], u: f32) -> Vec<DrawOp> {
         ("S", [0.0, 1.0]),
         ("W", [-1.0, 0.0]),
     ] {
-        ops.push(DrawOp::Text {
+        ops.push(DrawOp::Label {
             x: c[0] + off[0] * 19.0 * u,
             y: c[1] + off[1] * 19.0 * u - 3.5 * ts,
             text: label.into(),
@@ -908,7 +908,7 @@ pub const CONTROLS: &[&str] = &[
 
 /// The toolbar's buttons, top to bottom.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Button {
+pub enum MapButton {
     ZoomIn,
     ZoomOut,
     Center,
@@ -923,54 +923,54 @@ pub enum Button {
 
 /// What a toolbar button shows.
 enum Icon {
-    Text(&'static str),
+    Glyph(&'static str),
     /// An item texture (16x16) of the game.
-    Item(&'static str),
+    ItemTexture(&'static str),
 }
 
-impl Button {
+impl MapButton {
     fn icon(self) -> Icon {
         match self {
-            Button::ZoomIn => Icon::Text("+"),
-            Button::ZoomOut => Icon::Text("-"),
-            Button::Center => Icon::Item("item/compass_00"),
-            Button::Dimension => Icon::Item("item/ender_pearl"),
-            Button::SeedLayer => Icon::Item("item/filled_map"),
-            Button::SeedSettings => Icon::Item("item/ender_eye"),
-            Button::Waypoints => Icon::Item("item/name_tag"),
-            Button::Settings => Icon::Item("item/writable_book"),
-            Button::Help => Icon::Text("?"),
+            MapButton::ZoomIn => Icon::Glyph("+"),
+            MapButton::ZoomOut => Icon::Glyph("-"),
+            MapButton::Center => Icon::ItemTexture("item/compass_00"),
+            MapButton::Dimension => Icon::ItemTexture("item/ender_pearl"),
+            MapButton::SeedLayer => Icon::ItemTexture("item/filled_map"),
+            MapButton::SeedSettings => Icon::ItemTexture("item/ender_eye"),
+            MapButton::Waypoints => Icon::ItemTexture("item/name_tag"),
+            MapButton::Settings => Icon::ItemTexture("item/writable_book"),
+            MapButton::Help => Icon::Glyph("?"),
         }
     }
 
     fn tooltip(self, seed_layer: bool) -> &'static str {
         match self {
-            Button::ZoomIn => "Zoom in",
-            Button::ZoomOut => "Zoom out",
-            Button::Center => "Centre on the player (Space)",
-            Button::Dimension => "Switch dimension: Overworld, Nether, End",
-            Button::SeedLayer if seed_layer => "Seed map layer: On",
-            Button::SeedLayer => "Seed map layer: Off",
-            Button::SeedSettings => "Seed Atlas settings",
-            Button::Waypoints => "Waypoints",
-            Button::Settings => "Map settings",
-            Button::Help => "Controls",
+            MapButton::ZoomIn => "Zoom in",
+            MapButton::ZoomOut => "Zoom out",
+            MapButton::Center => "Centre on the player (Space)",
+            MapButton::Dimension => "Switch dimension: Overworld, Nether, End",
+            MapButton::SeedLayer if seed_layer => "Seed map layer: On",
+            MapButton::SeedLayer => "Seed map layer: Off",
+            MapButton::SeedSettings => "Seed Atlas settings",
+            MapButton::Waypoints => "Waypoints",
+            MapButton::Settings => "Map settings",
+            MapButton::Help => "Controls",
         }
     }
 }
 
 /// The toolbar, top to bottom (the Seed Atlas buttons while it is on).
-pub fn toolbar(seed_atlas: bool) -> Vec<Button> {
+pub fn toolbar(seed_atlas: bool) -> Vec<MapButton> {
     let mut b = vec![
-        Button::ZoomIn,
-        Button::ZoomOut,
-        Button::Center,
-        Button::Dimension,
+        MapButton::ZoomIn,
+        MapButton::ZoomOut,
+        MapButton::Center,
+        MapButton::Dimension,
     ];
     if seed_atlas {
-        b.extend([Button::SeedLayer, Button::SeedSettings]);
+        b.extend([MapButton::SeedLayer, MapButton::SeedSettings]);
     }
-    b.extend([Button::Waypoints, Button::Settings, Button::Help]);
+    b.extend([MapButton::Waypoints, MapButton::Settings, MapButton::Help]);
     b
 }
 
@@ -991,7 +991,7 @@ fn toolbar_rect(i: usize, n: usize, gui: [f32; 2]) -> [f32; 4] {
 }
 
 /// The toolbar button under `p`.
-pub fn button_at(p: [f32; 2], gui: [f32; 2], seed_atlas: bool) -> Option<Button> {
+pub fn button_at(p: [f32; 2], gui: [f32; 2], seed_atlas: bool) -> Option<MapButton> {
     let buttons = toolbar(seed_atlas);
     buttons.iter().enumerate().find_map(|(i, b)| {
         let [x, y, w, h] = toolbar_rect(i, buttons.len(), gui);
@@ -1018,7 +1018,7 @@ fn side_tooltip(
         argb: 0xF010_0010,
     }];
     for (i, line) in lines.iter().enumerate() {
-        ops.push(DrawOp::Text {
+        ops.push(DrawOp::Label {
             x,
             y: y + 3.0 + i as f32 * 10.0,
             text: line.clone(),
@@ -1060,7 +1060,7 @@ mod tests {
             entity(3, [6.0, 94.0, 0.0]),
         ];
         let colors = |radar: &crate::config::RadarSettings| {
-            let o = Overlay {
+            let o = MapOverlay {
                 gui: GUI,
                 unit: 1.0,
                 mouse: [-1.0, -1.0],
@@ -1212,33 +1212,36 @@ mod tests {
     #[test]
     fn zoom_buttons() {
         let mut m = WorldMap::new([0.0; 3]);
-        let at = |b: Button, sa: bool| {
+        let at = |b: MapButton, sa: bool| {
             let all = toolbar(sa);
             let i = all.iter().position(|x| *x == b).unwrap();
             let [x, y, w, h] = toolbar_rect(i, all.len(), GUI);
             [x + w / 2.0, y + h / 2.0]
         };
-        let p = at(Button::ZoomIn, false);
+        let p = at(MapButton::ZoomIn, false);
         m.press(p);
         m.release(p, GUI, 1.0);
         assert!(m.zoom > DEFAULT_ZOOM);
         // The centre button goes back to the player.
         m.center = [500.0, 500.0];
         m.step([10.0, 64.0, 20.0]);
-        let p = at(Button::Center, false);
+        let p = at(MapButton::Center, false);
         m.press(p);
         assert_eq!(m.release(p, GUI, 1.0), MapAction::None);
         assert_eq!(m.center, [10.0, 20.0]);
         // Seed Atlas buttons only while it is on; the host carries them out.
         assert_eq!(
-            button_at(at(Button::Settings, false), GUI, false),
-            Some(Button::Settings)
+            button_at(at(MapButton::Settings, false), GUI, false),
+            Some(MapButton::Settings)
         );
-        assert!(!toolbar(false).contains(&Button::SeedLayer));
+        assert!(!toolbar(false).contains(&MapButton::SeedLayer));
         m.seed_atlas = true;
-        let p = at(Button::SeedLayer, true);
+        let p = at(MapButton::SeedLayer, true);
         m.press(p);
-        assert_eq!(m.release(p, GUI, 1.0), MapAction::Button(Button::SeedLayer));
+        assert_eq!(
+            m.release(p, GUI, 1.0),
+            MapAction::Press(MapButton::SeedLayer)
+        );
         // The column stays on screen and clear of the top line.
         let all = toolbar(true);
         for i in 0..all.len() {
@@ -1385,12 +1388,15 @@ mod tests {
     #[test]
     fn the_toolbar_switches_dimensions() {
         let all = toolbar(false);
-        let i = all.iter().position(|b| *b == Button::Dimension).unwrap();
+        let i = all.iter().position(|b| *b == MapButton::Dimension).unwrap();
         let [x, y, w, h] = toolbar_rect(i, all.len(), GUI);
         let p = [x + w / 2.0, y + h / 2.0];
         let mut m = WorldMap::new([0.0; 3]);
         m.press(p);
-        assert_eq!(m.release(p, GUI, 1.0), MapAction::Button(Button::Dimension));
+        assert_eq!(
+            m.release(p, GUI, 1.0),
+            MapAction::Press(MapButton::Dimension)
+        );
     }
 
     #[test]

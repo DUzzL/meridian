@@ -48,9 +48,9 @@ impl Icon {
 #[derive(Clone, Copy)]
 enum Source {
     Own(&'static [u8]),
-    Item(&'static str),
+    ItemTexture(&'static str),
     /// A block texture, and whether it gets a dark frame.
-    Block(&'static str, bool),
+    BlockTexture(&'static str, bool),
     /// A composed image, and whether it gets a dark frame.
     Composed(fn(&Read<'_>) -> Option<Image>, bool),
 }
@@ -72,14 +72,14 @@ fn sources() -> Vec<(&'static str, Source)> {
             )),
         ),
         ("ancient_city", Composed(warden_head, false)),
-        ("bastion", Block("cracked_polished_blackstone_bricks", true)),
-        ("chambers", Item("trial_key")),
-        ("desert", Block("chiseled_sandstone", true)),
-        ("endcity", Block("purpur_block", true)),
-        ("end_ship", Item("elytra")),
-        ("fortress", Block("nether_bricks", true)),
-        ("gateway", Item("ender_pearl")),
-        ("geode", Item("amethyst_shard")),
+        ("bastion", BlockTexture("cracked_polished_blackstone_bricks", true)),
+        ("chambers", ItemTexture("trial_key")),
+        ("desert", BlockTexture("chiseled_sandstone", true)),
+        ("endcity", BlockTexture("purpur_block", true)),
+        ("end_ship", ItemTexture("elytra")),
+        ("fortress", BlockTexture("nether_bricks", true)),
+        ("gateway", ItemTexture("ender_pearl")),
+        ("geode", ItemTexture("amethyst_shard")),
         (
             "hut",
             Own(include_bytes!(
@@ -92,15 +92,15 @@ fn sources() -> Vec<(&'static str, Source)> {
                 "../assets/meridian/textures/seedatlas/igloo.png"
             )),
         ),
-        ("jungle", Block("mossy_cobblestone", true)),
-        ("mansion", Item("totem_of_undying")),
+        ("jungle", BlockTexture("mossy_cobblestone", true)),
+        ("mansion", ItemTexture("totem_of_undying")),
         // The rail is transparent between its sleepers: no frame.
-        ("mineshaft", Block("rail", false)),
-        ("monument", Block("prismarine_bricks", true)),
-        ("orevein", Item("raw_iron")),
-        ("orevein_copper", Item("raw_copper")),
-        ("outpost", Item("crossbow_standby")),
-        ("portal", Block("crying_obsidian", true)),
+        ("mineshaft", BlockTexture("rail", false)),
+        ("monument", BlockTexture("prismarine_bricks", true)),
+        ("orevein", ItemTexture("raw_iron")),
+        ("orevein_copper", ItemTexture("raw_copper")),
+        ("outpost", ItemTexture("crossbow_standby")),
+        ("portal", BlockTexture("crying_obsidian", true)),
         ("ruins", Composed(cracked_mossy_stone_bricks, true)),
         (
             "shipwreck",
@@ -108,10 +108,10 @@ fn sources() -> Vec<(&'static str, Source)> {
                 "../assets/meridian/textures/seedatlas/shipwreck.png"
             )),
         ),
-        ("slime", Item("slime_ball")),
-        ("spawn", Item("compass_00")),
-        ("stronghold", Item("ender_eye")),
-        ("trails", Item("brush")),
+        ("slime", ItemTexture("slime_ball")),
+        ("spawn", ItemTexture("compass_00")),
+        ("stronghold", ItemTexture("ender_eye")),
+        ("trails", ItemTexture("brush")),
         ("treasure", Composed(chest, false)),
         ("village", Composed(villager_head, false)),
         (
@@ -300,11 +300,11 @@ pub fn load(read: &Read<'_>) -> HashMap<&'static str, Icon> {
     for (id, source) in sources() {
         let (img, block) = match source {
             Source::Own(bytes) => (decode(bytes), false),
-            Source::Item(name) => (
+            Source::ItemTexture(name) => (
                 texture(read, &format!("item/{name}")),
                 false,
             ),
-            Source::Block(name, frame) => (
+            Source::BlockTexture(name, frame) => (
                 texture(read, &format!("block/{name}")),
                 frame,
             ),

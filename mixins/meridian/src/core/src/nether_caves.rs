@@ -225,8 +225,8 @@ impl ChunkMask {
 }
 
 /// `WorldgenRandom.setLargeFeatureSeed` over a legacy random source.
-fn large_feature_random(seed: i64, origin: (i32, i32)) -> LegacyRandom {
-    let mut random = LegacyRandom::new(seed);
+fn large_feature_random(seed: i64, origin: (i32, i32)) -> JavaRandom {
+    let mut random = JavaRandom::new(seed);
     let a = random.next_long();
     let b = random.next_long();
     random
@@ -236,11 +236,11 @@ fn large_feature_random(seed: i64, origin: (i32, i32)) -> LegacyRandom {
 
 /// `java.util.Random` as vanilla's `LegacyRandomSource`.
 #[derive(Clone, Debug)]
-struct LegacyRandom {
+struct JavaRandom {
     state: u64,
 }
 
-impl LegacyRandom {
+impl JavaRandom {
     const MULTIPLIER: u64 = 0x5_DEEC_E66D;
     const MASK: u64 = (1 << 48) - 1;
 
@@ -321,7 +321,7 @@ mod trig {
 /// carver. Its parameters are inlined; the generation context is the Nether's
 /// (min Y 0, height 128, so `y` is uniform in 0..=126).
 mod nether_cave {
-    use super::{ChunkMask, LegacyRandom, trig};
+    use super::{ChunkMask, JavaRandom, trig};
     use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
     pub const PROBABILITY: f32 = 0.2;
@@ -340,7 +340,7 @@ mod nether_cave {
     const BUDGET: usize = 1 << 24;
 
     pub fn carve(
-        random: &mut LegacyRandom,
+        random: &mut JavaRandom,
         target: (i32, i32),
         origin: (i32, i32),
         out: &mut ChunkMask,
@@ -491,7 +491,7 @@ mod nether_cave {
         }
 
         fn tunnel(&mut self, mut path: Tunnel) {
-            let mut random = LegacyRandom::new(path.seed);
+            let mut random = JavaRandom::new(path.seed);
             let split = random.next_int_bound(path.end / 2) + path.end / 4;
             let gentle = random.next_int_bound(6) == 0;
             let (mut yaw_change, mut pitch_change) = (0f32, 0f32);
@@ -576,10 +576,10 @@ mod tests {
 
     #[test]
     fn legacy_random_matches_java() {
-        let mut random = LegacyRandom::new(0);
+        let mut random = JavaRandom::new(0);
         assert_eq!(random.bits(32), -1_155_484_576);
         assert_eq!(random.bits(32), -723_955_400);
-        assert_eq!(LegacyRandom::new(0).next_long(), -4_962_768_465_676_381_896);
+        assert_eq!(JavaRandom::new(0).next_long(), -4_962_768_465_676_381_896);
     }
 
     #[test]

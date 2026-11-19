@@ -48,7 +48,7 @@ pub enum DrawOp {
         points: [[f32; 2]; 4],
         argb: u32,
     },
-    Text {
+    Label {
         x: f32,
         y: f32,
         text: String,
@@ -472,7 +472,7 @@ pub fn compass(layout: &Layout, yaw: f32) -> Vec<DrawOp> {
             argb: 0xE06C_6CE8,
         });
         let scale = 0.75 * u;
-        ops.push(DrawOp::Text {
+        ops.push(DrawOp::Label {
             x: x + 0.5 * scale,
             y: y - 3.5 * scale,
             text: label.to_owned(),
@@ -547,7 +547,7 @@ pub fn info(layout: &Layout, lines: &[(String, u32)]) -> Vec<DrawOp> {
             } else {
                 layout.y - gap - (lines.len() - i) as f32 * line
             };
-            DrawOp::Text {
+            DrawOp::Label {
                 x: cx,
                 y,
                 text: text.clone(),
@@ -575,7 +575,7 @@ pub fn waypoint_mark(
             rect: [x - half, y - half, size, size],
             argb,
         },
-        DrawOp::Text {
+        DrawOp::Label {
             x: x + 0.5 * text_scale,
             y: y - 3.5 * text_scale,
             text: initial.to_owned(),
@@ -718,7 +718,7 @@ mod tests {
         assert!((1280.0 - right_edge).abs() <= 1.0, "{right_edge}");
         assert!(!l.info_below, "info goes above a bottom map");
         let lines = info(&l, &[("a".into(), 0), ("b".into(), 0)]);
-        let DrawOp::Text { y, .. } = &lines[1] else {
+        let DrawOp::Label { y, .. } = &lines[1] else {
             panic!()
         };
         assert!(*y < l.y);
@@ -868,12 +868,12 @@ mod tests {
         };
         // Facing north (yaw 180): N is at the top.
         let n = &compass(&l, 180.0)[1];
-        let DrawOp::Text { x, y, .. } = n else {
+        let DrawOp::Label { x, y, .. } = n else {
             panic!()
         };
         assert!((x - 50.0).abs() <= 1.0 && *y < 20.0);
         // Facing south: N at the bottom.
-        let DrawOp::Text { y, .. } = &compass(&l, 0.0)[1] else {
+        let DrawOp::Label { y, .. } = &compass(&l, 0.0)[1] else {
             panic!()
         };
         assert!(*y > 80.0);

@@ -91,9 +91,9 @@ enum Control {
     /// A text field: the value as text, and how typed text is set (false
     /// when it is not valid: the old value stays). Enter or a click
     /// elsewhere sets it, Escape drops it.
-    Text(fn(&Settings) -> String, fn(&mut Settings, &str) -> bool),
+    TextEntry(fn(&Settings) -> String, fn(&mut Settings, &str) -> bool),
     /// A button with this id and its text.
-    Button(&'static str, fn(&Env<'_>) -> String),
+    PressButton(&'static str, fn(&Env<'_>) -> String),
     /// A structure kind: on/off, its completed count, a reset button.
     Marker(&'static str),
     /// Text only.
@@ -126,7 +126,7 @@ fn display_label(label: &str) -> &str {
     match label {
         "Fair Play (No Radar, No Caves)" => "Fair Play",
         "Seed map layer" => "Seed Map Layer",
-        "Overlay explored" => "Over Explored Terrain",
+        "MapOverlay explored" => "Over Explored Terrain",
         "Biome highlighting" => "Biome Highlighting",
         "Biome resolution" => "Biome Resolution",
         "Worker threads" => "Worker Threads",
@@ -217,13 +217,13 @@ fn rows(c: Category) -> Vec<Row> {
     match c {
         General => vec![
             row(General, "Minimap", "Shows the minimap in the corner of the screen.", Switch(|s| s.minimap.enabled, |s, v| s.minimap.enabled = v)),
-            row(General, "Minimap Position", "Drag the minimap to where it should be; it snaps to the nearest corner.", Button("position", |_| "Change...".into())),
-            row(General, "Waypoints", "Lists, edits and shares the waypoints of this world.", Button("waypoints", |_| "Open...".into())),
+            row(General, "Minimap Position", "Drag the minimap to where it should be; it snaps to the nearest corner.", PressButton("position", |_| "Change...".into())),
+            row(General, "Waypoints", "Lists, edits and shares the waypoints of this world.", PressButton("waypoints", |_| "Open...".into())),
             opt(General, "Fair Play (No Radar, No Caves)", "Turns off the entity radar and cave maps, as servers that forbid them expect."),
-            row(General, "Profile", "Settings profile in use. Click for the next one, right click for the previous one.", Button("profile", |e| profile_title(&e.profile))),
-            row(General, "New Profile", "Copies the current settings into a new profile and switches to it.", Button("new_profile", |_| "Create".into())),
-            row(General, "Rename Profile", "Gives the current profile a new name.", Button("rename_profile", |e| e.profile.clone())),
-            row(General, "Delete Profile", "Removes the current profile (the last one stays).", Button("delete_profile", |_| "Delete".into())),
+            row(General, "Profile", "Settings profile in use. Click for the next one, right click for the previous one.", PressButton("profile", |e| profile_title(&e.profile))),
+            row(General, "New Profile", "Copies the current settings into a new profile and switches to it.", PressButton("new_profile", |_| "Create".into())),
+            row(General, "Rename Profile", "Gives the current profile a new name.", PressButton("rename_profile", |e| e.profile.clone())),
+            row(General, "Delete Profile", "Removes the current profile (the last one stays).", PressButton("delete_profile", |_| "Delete".into())),
         ],
         Minimap => vec![
             opt(Minimap, "Minimap Shape", "Square or round."),
@@ -254,7 +254,7 @@ fn rows(c: Category) -> Vec<Row> {
         ],
         Radar => vec![
             opt(Radar, "Entity Radar", "Shows the entities around you on the minimap and the world map."),
-            row(Radar, "Icons", "Faces instead of dots: never, while the faces key (Tab) is held, or always.", Button("icons", |e| icons_label(e.settings).into())),
+            row(Radar, "Icons", "Faces instead of dots: never, while the faces key (Tab) is held, or always.", PressButton("icons", |e| icons_label(e.settings).into())),
             opt(Radar, "Entity Names", "Whose names are written under their mark."),
             opt(Radar, "Display Players", "Other players, white by default."),
             opt(Radar, "Display Hostile Mobs", "Monsters, yellow by default."),
@@ -273,7 +273,7 @@ fn rows(c: Category) -> Vec<Row> {
             opt(Radar, "Smooth Entity Dots", "Moves marks smoothly between game ticks instead of tick by tick."),
             opt(Radar, "Reverse Filter", "Shows what the filters hide and hides what they show."),
             row(Radar, "Name Scale", "Size of the names under the marks.", Slider(|s| scale_value(s.radar.name_scale), |s| format!("{:.1}x", s.radar.name_scale), |s, v| s.radar.name_scale = to_scale(v))),
-            row(Radar, "Max Entities", "Entities shown at most; the nearest ones stay.", Text(|s| s.radar.max_entities.to_string(), |s, t| number(t, 1..=100_000).map(|v| s.radar.max_entities = v).is_some())),
+            row(Radar, "Max Entities", "Entities shown at most; the nearest ones stay.", TextEntry(|s| s.radar.max_entities.to_string(), |s, t| number(t, 1..=100_000).map(|v| s.radar.max_entities = v).is_some())),
         ],
         Waypoints => vec![
             opt(Waypoints, "Waypoints In World", "Names and distances of waypoints in the world."),
@@ -287,8 +287,8 @@ fn rows(c: Category) -> Vec<Row> {
             opt(Waypoints, "Delete Reached Deathpoints", "Removes a deathpoint once you get back to it."),
             row(Waypoints, "Waypoint Opacity In World", "How see-through waypoints in the world are.", Slider(|s| pct(s.waypoints.opacity_in_world), |s| pct_text(pct(s.waypoints.opacity_in_world)), |s, v| s.waypoints.opacity_in_world = to_pct(v))),
             row(Waypoints, "Waypoint Opacity On Minimap", "How see-through waypoints on the minimap are.", Slider(|s| pct(s.waypoints.opacity_on_minimap), |s| pct_text(pct(s.waypoints.opacity_on_minimap)), |s, v| s.waypoints.opacity_on_minimap = to_pct(v))),
-            row(Waypoints, "Distance In km From", "Distances from this many blocks on are shown in km; 0 never.", Text(|s| s.waypoints.distance_in_km_from.to_string(), |s, t| number(t, 0..=u32::MAX).map(|v| s.waypoints.distance_in_km_from = v).is_some())),
-            row(Waypoints, "Waypoint Teleport Command", "The command Teleport sends: {x} {y} {z} are the waypoint's coordinates.", Text(|s| s.waypoints.teleport_format.clone(), |s, t| command(t).map(|c| s.waypoints.teleport_format = c).is_some())),
+            row(Waypoints, "Distance In km From", "Distances from this many blocks on are shown in km; 0 never.", TextEntry(|s| s.waypoints.distance_in_km_from.to_string(), |s, t| number(t, 0..=u32::MAX).map(|v| s.waypoints.distance_in_km_from = v).is_some())),
+            row(Waypoints, "Waypoint Teleport Command", "The command Teleport sends: {x} {y} {z} are the waypoint's coordinates.", TextEntry(|s| s.waypoints.teleport_format.clone(), |s, t| command(t).map(|c| s.waypoints.teleport_format = c).is_some())),
         ],
         Terrain => vec![
             opt(Terrain, "Block Colors", "Accurate uses the block textures and biome tints; Vanilla the colours of paper maps."),
@@ -306,16 +306,16 @@ fn rows(c: Category) -> Vec<Row> {
         Overlays => vec![
             opt(Overlays, "Chunk Grid", "Chunk borders on the minimap."),
             opt(Overlays, "Slime Chunks", "Chunks where slimes spawn, in green (needs the seed)."),
-            opt(Overlays, "Light Overlay", "Marks blocks dark enough for monsters to spawn."),
-            opt(Overlays, "Light Overlay Min", "The lowest light level the overlay marks."),
-            opt(Overlays, "Light Overlay Max", "The highest light level the overlay marks."),
+            opt(Overlays, "Light MapOverlay", "Marks blocks dark enough for monsters to spawn."),
+            opt(Overlays, "Light MapOverlay Min", "The lowest light level the overlay marks."),
+            opt(Overlays, "Light MapOverlay Max", "The highest light level the overlay marks."),
             opt(Overlays, "Cave Mode", "Allows cave maps when you are underground."),
             opt(Overlays, "Auto Cave Mode", "How large the roof above you must be before the cave map shows."),
             opt(Overlays, "Cave Mode Toggle Delay", "How long you must be under a roof (or out) before the map switches."),
             opt(Overlays, "Legible Cave Maps", "Brighter cave maps that are easier to read."),
             opt(Overlays, "Cave Mode Extra Zoom", "Zooms the minimap in further in caves."),
             opt(Overlays, "Cave Mode Depth", "How far below where you are the cave map shows the ground."),
-            row(Overlays, "Cave Mode Dimensions", "Dimensions where cave maps may show, comma separated (overworld, the_nether); empty for all.", Text(|s| dimension_list(&s.minimap.cave.allowed_dimensions), |s, t| parse_dimensions(t).map(|d| s.minimap.cave.allowed_dimensions = d).is_some())),
+            row(Overlays, "Cave Mode Dimensions", "Dimensions where cave maps may show, comma separated (overworld, the_nether); empty for all.", TextEntry(|s| dimension_list(&s.minimap.cave.allowed_dimensions), |s, t| parse_dimensions(t).map(|d| s.minimap.cave.allowed_dimensions = d).is_some())),
         ],
         WorldMap => vec![
             opt(WorldMap, "World Map", "The world map (M)."),
@@ -330,27 +330,27 @@ fn rows(c: Category) -> Vec<Row> {
             opt(WorldMap, "Unlimited Zoom In", "Zoom in further than 1 block a pixel steps."),
             opt(WorldMap, "Unlimited Zoom Out", "Zoom out to 1/64."),
             opt(WorldMap, "Multiplayer Maps", "How the maps of a server with several worlds are kept apart."),
-            row(WorldMap, "Map Teleport Command", "The command Teleport Here sends: {x} {y} {z} are the coordinates.", Text(|s| s.world_map.map_teleport_format.clone(), |s, t| command(t).map(|c| s.world_map.map_teleport_format = c).is_some())),
-            row(WorldMap, "Map Teleport Command (Dimension)", "Teleport Here on another dimension's map; {d} is the dimension.", Text(|s| s.world_map.map_teleport_dimension_format.clone(), |s, t| command(t).map(|c| s.world_map.map_teleport_dimension_format = c).is_some())),
-            row(WorldMap, "Player Teleport Command", "The command Teleport To sends for another player; {name} is their name.", Text(|s| s.world_map.player_teleport_format.clone(), |s, t| command(t).map(|c| s.world_map.player_teleport_format = c).is_some())),
+            row(WorldMap, "Map Teleport Command", "The command Teleport Here sends: {x} {y} {z} are the coordinates.", TextEntry(|s| s.world_map.map_teleport_format.clone(), |s, t| command(t).map(|c| s.world_map.map_teleport_format = c).is_some())),
+            row(WorldMap, "Map Teleport Command (Dimension)", "Teleport Here on another dimension's map; {d} is the dimension.", TextEntry(|s| s.world_map.map_teleport_dimension_format.clone(), |s, t| command(t).map(|c| s.world_map.map_teleport_dimension_format = c).is_some())),
+            row(WorldMap, "Player Teleport Command", "The command Teleport To sends for another player; {name} is their name.", TextEntry(|s| s.world_map.player_teleport_format.clone(), |s, t| command(t).map(|c| s.world_map.player_teleport_format = c).is_some())),
         ],
         SeedAtlas => vec![
             row(SeedAtlas, "Seed", "The seed the Seed Atlas uses for this world or server.", Info(|e| e.seed_atlas.seed_status.clone())),
             opt(SeedAtlas, "Seed Atlas", "Computes biomes and structures from the world's seed."),
             opt(SeedAtlas, "Seed map layer", "The computed biome map under the explored terrain."),
             row(SeedAtlas, "Layer Opacity", "How strongly the computed map shows.", Slider(|s| s.seed_atlas.biome_opacity as f32 / 255.0, |s| pct_text(s.seed_atlas.biome_opacity as f32 / 255.0), |s, v| s.seed_atlas.biome_opacity = (v * 255.0).round() as u8)),
-            opt(SeedAtlas, "Overlay explored", "Draws the computed map over terrain you explored too."),
+            opt(SeedAtlas, "MapOverlay explored", "Draws the computed map over terrain you explored too."),
             row(SeedAtlas, "Terrain Look", "Relief and surface colours instead of flat biome colours (1.18 and later).", Switch(|s| s.seed_atlas.terrain_look, |s, v| s.seed_atlas.terrain_look = v)),
-            row(SeedAtlas, "World & Seed", "The seed, game version and world type of this world or server.", Button("sa:world", |_| "Change...".into())),
+            row(SeedAtlas, "World & Seed", "The seed, game version and world type of this world or server.", PressButton("sa:world", |_| "Change...".into())),
             opt(SeedAtlas, "World", "Game version of the open world (the generation differs between versions)."),
             opt(SeedAtlas, "World type", "Normal or Large Biomes."),
-            row(SeedAtlas, "Overworld Y", "Height the Overworld's biomes are taken at (-2048 to 2048).", Text(|s| s.seed_atlas.overworld_y.to_string(), |s, t| number(t, -2048..=2048).map(|v| s.seed_atlas.overworld_y = v).is_some())),
-            row(SeedAtlas, "Nether Y", "Height the Nether's biomes are taken at (-2048 to 2048).", Text(|s| s.seed_atlas.nether_y.to_string(), |s, t| number(t, -2048..=2048).map(|v| s.seed_atlas.nether_y = v).is_some())),
-            row(SeedAtlas, "End Y", "Height the End's biomes are taken at (-2048 to 2048).", Text(|s| s.seed_atlas.end_y.to_string(), |s, t| number(t, -2048..=2048).map(|v| s.seed_atlas.end_y = v).is_some())),
+            row(SeedAtlas, "Overworld Y", "Height the Overworld's biomes are taken at (-2048 to 2048).", TextEntry(|s| s.seed_atlas.overworld_y.to_string(), |s, t| number(t, -2048..=2048).map(|v| s.seed_atlas.overworld_y = v).is_some())),
+            row(SeedAtlas, "Nether Y", "Height the Nether's biomes are taken at (-2048 to 2048).", TextEntry(|s| s.seed_atlas.nether_y.to_string(), |s, t| number(t, -2048..=2048).map(|v| s.seed_atlas.nether_y = v).is_some())),
+            row(SeedAtlas, "End Y", "Height the End's biomes are taken at (-2048 to 2048).", TextEntry(|s| s.seed_atlas.end_y.to_string(), |s, t| number(t, -2048..=2048).map(|v| s.seed_atlas.end_y = v).is_some())),
             opt(SeedAtlas, "Biome highlighting", "Dims every biome but the chosen ones, over explored terrain too."),
-            row(SeedAtlas, "Highlighted Biomes", "Chooses the biomes biome highlighting keeps bright.", Button("sa:highlight", |_| "Choose...".into())),
-            row(SeedAtlas, "Nearest Biome", "Finds the closest biome of a kind and shows it on the map.", Button("sa:biome", |_| "Find...".into())),
-            row(SeedAtlas, "Nearest Structure", "Finds the closest structure of a kind and shows it on the map.", Button("sa:structure", |_| "Find...".into())),
+            row(SeedAtlas, "Highlighted Biomes", "Chooses the biomes biome highlighting keeps bright.", PressButton("sa:highlight", |_| "Choose...".into())),
+            row(SeedAtlas, "Nearest Biome", "Finds the closest biome of a kind and shows it on the map.", PressButton("sa:biome", |_| "Find...".into())),
+            row(SeedAtlas, "Nearest Structure", "Finds the closest structure of a kind and shows it on the map.", PressButton("sa:structure", |_| "Find...".into())),
         ],
         Structures => {
             let mut v = vec![
@@ -360,7 +360,7 @@ fn rows(c: Category) -> Vec<Row> {
                     s.seed_atlas.hide_completed = false;
                     s.seed_atlas.completed_opacity = (v * 100.0).round() as u8;
                 })),
-                row(Structures, "Reset Completed", "Marks every completed structure of this world or server as not completed.", Button("mk:reset", |e| format!("Reset ({})", e.seed_atlas.completed_count.unwrap_or(0)))),
+                row(Structures, "Reset Completed", "Marks every completed structure of this world or server as not completed.", PressButton("mk:reset", |e| format!("Reset ({})", e.seed_atlas.completed_count.unwrap_or(0)))),
             ];
             v.extend(MARKERS.iter().map(|m| row(Structures, m.name, "", Marker(m.id))));
             v
@@ -661,7 +661,7 @@ impl SettingsScreen {
         let [x, y, cw, _] = rect;
         // Text fields take more room: commands are long.
         let control_w = match r.control {
-            Control::Text(..) => (cw * 0.5).clamp(l.control_w, (cw - 90.0).max(l.control_w)),
+            Control::TextEntry(..) => (cw * 0.5).clamp(l.control_w, (cw - 90.0).max(l.control_w)),
             _ => l.control_w,
         };
         let ctl = [x + cw - control_w - 2.0, y + 2.0, control_w, 20.0];
@@ -700,7 +700,7 @@ impl SettingsScreen {
                     value(env.settings),
                 ));
             }
-            Control::Text(get, _) => {
+            Control::TextEntry(get, _) => {
                 let shown = match &self.editing {
                     Some((label, text)) if *label == r.label => Some(tail(text, ctl[2] - 14.0)),
                     _ => None,
@@ -709,7 +709,7 @@ impl SettingsScreen {
                 let text = shown.unwrap_or_else(|| fit(&get(env.settings), ctl[2] - 8.0));
                 ws.push(Widget::field(&id, ctl, &text, "", focused));
             }
-            Control::Button(action, text) => {
+            Control::PressButton(action, text) => {
                 let enabled = action != "delete_profile" || env.profiles.len() > 1;
                 if action == "rename_profile"
                     && let Some(name) = &self.profile_name
@@ -912,12 +912,12 @@ impl SettingsScreen {
                 env.settings_changed = true;
             }
             Control::Info(_) => {}
-            Control::Text(get, _) => {
+            Control::TextEntry(get, _) => {
                 if self.editing.is_none() {
                     self.editing = Some((r.label.clone(), get(env.settings)));
                 }
             }
-            Control::Button(action, _) => return self.button(action, right, env),
+            Control::PressButton(action, _) => return self.button(action, right, env),
         }
         Action::None
     }
@@ -994,7 +994,7 @@ impl SettingsScreen {
             .flat_map(|c| rows(*c))
             .find(|r| r.label == label);
         if let Some(Row {
-            control: Control::Text(get, set),
+            control: Control::TextEntry(get, set),
             ..
         }) = row
             && get(env.settings) != text

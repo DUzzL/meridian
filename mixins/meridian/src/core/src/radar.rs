@@ -380,7 +380,7 @@ pub fn dots(
         };
         if named && let Some(name) = &e.name {
             let scale = 0.5 * s.name_scale.clamp(0.25, 4.0) * (u / 1.5).max(0.5);
-            ops.push(DrawOp::Text {
+            ops.push(DrawOp::Label {
                 x,
                 y: y + r + u,
                 text: name.clone(),
@@ -693,7 +693,7 @@ mod tests {
         let texts = |ops: &[DrawOp]| {
             ops.iter()
                 .filter_map(|o| {
-                    if let DrawOp::Text { text, .. } = o {
+                    if let DrawOp::Label { text, .. } = o {
                         Some(text.clone())
                     } else {
                         None

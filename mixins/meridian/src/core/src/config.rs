@@ -688,13 +688,13 @@ pub struct Settings {
 /// The settings file: named profiles and the one in use.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct ConfigFile {
+pub struct SettingsFile {
     pub version: u32,
     pub current_profile: String,
     pub profiles: BTreeMap<String, Settings>,
 }
 
-impl Default for ConfigFile {
+impl Default for SettingsFile {
     fn default() -> Self {
         let mut profiles = BTreeMap::new();
         profiles.insert(DEFAULT_PROFILE.to_owned(), Settings::default());
@@ -706,7 +706,7 @@ impl Default for ConfigFile {
     }
 }
 
-impl ConfigFile {
+impl SettingsFile {
     /// The profile in use; repairs a dangling name by falling back to the
     /// default profile.
     pub fn current(&self) -> &Settings {
@@ -785,7 +785,7 @@ impl ConfigFile {
     }
 }
 
-/// Loads and saves [`ConfigFile`] in a folder.
+/// Loads and saves [`SettingsFile`] in a folder.
 #[derive(Debug, Clone)]
 pub struct ConfigStore {
     path: PathBuf,
@@ -810,14 +810,14 @@ impl ConfigStore {
     /// moved aside to `meridian.toml.broken.<time>` and also gives the
     /// defaults, so a typo never stops the game. A file that cannot be read
     /// gives the defaults for this session and is never saved over.
-    pub fn load(&self) -> ConfigFile {
+    pub fn load(&self) -> SettingsFile {
         let (file, writable) = persist::load_or_set_aside(&self.path, "settings", |bytes| {
             if let Some(v) = persist::toml_version(bytes).filter(|&v| v > 1) {
                 return Err(persist::LoadError::Newer(format!("version {v}")));
             }
             std::str::from_utf8(bytes)
                 .map_err(|e| e.to_string())
-                .and_then(|t| toml::from_str::<ConfigFile>(t).map_err(|e| e.to_string()))
+                .and_then(|t| toml::from_str::<SettingsFile>(t).map_err(|e| e.to_string()))
                 .map_err(persist::LoadError::Broken)
         })
         .split();
@@ -829,7 +829,7 @@ impl ConfigStore {
     }
 
     /// Writes the file (not when it could not be read at load).
-    pub fn save(&self, file: &ConfigFile) -> Result<(), PersistError> {
+    pub fn save(&self, file: &SettingsFile) -> Result<(), PersistError> {
         if self.read_only.load(std::sync::atomic::Ordering::Relaxed) {
             return Ok(());
         }
@@ -880,7 +880,7 @@ mod tests {
     fn round_trip_through_file() {
         let dir = test_dir("config_round_trip");
         let store = ConfigStore::new(&dir);
-        let mut file = ConfigFile::default();
+        let mut file = SettingsFile::default();
         file.current_mut().minimap.shape = MinimapShape::Round;
         assert!(file.create_profile("pvp"));
         assert!(file.select_profile("pvp"));
@@ -916,7 +916,7 @@ mod tests {
         let dir = test_dir("config_broken");
         let store = ConfigStore::new(&dir);
         std::fs::write(store.path(), "this is = = not toml").unwrap();
-        assert_eq!(store.load(), ConfigFile::default());
+        assert_eq!(store.load(), SettingsFile::default());
         let aside = std::fs::read_dir(&dir)
             .unwrap()
             .flatten()
@@ -930,9 +930,9 @@ mod tests {
         assert!(!store.path().exists());
         // Invalid UTF-8 is broken too, not a reason to stop saving.
         std::fs::write(store.path(), b"zoom = \"\xFF\"").unwrap();
-        assert_eq!(store.load(), ConfigFile::default());
-        store.save(&ConfigFile::default()).unwrap();
-        assert!(store.load() == ConfigFile::default());
+        assert_eq!(store.load(), SettingsFile::default());
+        store.save(&SettingsFile::default()).unwrap();
+        assert!(store.load() == SettingsFile::default());
     }
 
     #[test]
@@ -940,20 +940,20 @@ mod tests {
         let dir = test_dir("config_unreadable");
         let store = ConfigStore::new(&dir);
         std::fs::create_dir_all(store.path()).unwrap();
-        assert_eq!(store.load(), ConfigFile::default());
-        store.save(&ConfigFile::default()).unwrap();
+        assert_eq!(store.load(), SettingsFile::default());
+        store.save(&SettingsFile::default()).unwrap();
         assert!(store.path().is_dir());
     }
 
     #[test]
     fn missing_file_gives_defaults() {
         let dir = test_dir("config_missing");
-        assert_eq!(ConfigStore::new(&dir).load(), ConfigFile::default());
+        assert_eq!(ConfigStore::new(&dir).load(), SettingsFile::default());
     }
 
     #[test]
     fn profile_rules() {
-        let mut file = ConfigFile::default();
+        let mut file = SettingsFile::default();
         assert!(!file.create_profile(" "));
         assert!(!file.create_profile(DEFAULT_PROFILE));
         assert!(
@@ -972,14 +972,14 @@ mod tests {
         // The old field never worked: neither value of it counts.
         for old in ["legible = false", "legible = true"] {
             let text = format!("[profiles.default.minimap.cave]\n{old}\n");
-            let f: ConfigFile = toml::from_str(&text).unwrap();
+            let f: SettingsFile = toml::from_str(&text).unwrap();
             assert!(
                 !f.profiles["default"].minimap.cave.legible_caves,
                 "the default, as O2's"
             );
         }
         let saved = "[profiles.default.minimap.cave]\nlegible = false\nlegible_caves = true\n";
-        let f: ConfigFile = toml::from_str(saved).unwrap();
+        let f: SettingsFile = toml::from_str(saved).unwrap();
         assert!(
             f.profiles["default"].minimap.cave.legible_caves,
             "a saved choice stays"
@@ -991,14 +991,14 @@ mod tests {
         let old = "[profiles.default.minimap]\nframe = 2\nshare_world_map_tiles = false\nzoom = 2\n\
                    [profiles.default.minimap.terrain]\nlighting = false\n\
                    [profiles.default.world_map.cave]\ndepth = 9\n";
-        let f: ConfigFile = toml::from_str(old).unwrap();
+        let f: SettingsFile = toml::from_str(old).unwrap();
         assert_eq!(f.profiles["default"].minimap.zoom, 2);
         assert!(f.profiles["default"].world_map.terrain.lighting);
     }
 
     #[test]
     fn rename_keeps_the_settings() {
-        let mut f = ConfigFile::default();
+        let mut f = SettingsFile::default();
         f.current_mut().minimap.zoom = 3;
         assert!(f.create_profile("pvp"));
         assert!(!f.rename_profile("pvp"), "taken");
@@ -1010,9 +1010,9 @@ mod tests {
 
     #[test]
     fn dangling_current_profile_is_repaired() {
-        let mut file = ConfigFile {
+        let mut file = SettingsFile {
             current_profile: "gone".into(),
-            ..ConfigFile::default()
+            ..SettingsFile::default()
         };
         assert_eq!(file.current(), &Settings::default());
         file.current_mut().minimap.zoom = 4;

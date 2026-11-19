@@ -12,7 +12,7 @@ use meridian_host::WorldSource;
 use meridian_seedatlas::Dimension;
 use meridian_seedatlas::mc;
 
-use crate::config::{ConfigFile, SeedAtlasSettings};
+use crate::config::{SeedAtlasSettings, SettingsFile};
 use crate::persist;
 use crate::seedatlas::{SeedBook, SeedSpec, dim_index};
 
@@ -262,7 +262,7 @@ pub fn resolve_all(
 /// version), and mirrors the book to every profile. True when a profile
 /// had versions and the book or a profile changed: the settings file should
 /// be saved again.
-pub fn adopt_profile_versions(book: &mut SeedBook, config: &mut ConfigFile) -> bool {
+pub fn adopt_profile_versions(book: &mut SeedBook, config: &mut SettingsFile) -> bool {
     let mut versions = book.versions().clone();
     let current = config.current_profile.clone();
     let mut found = false;
@@ -291,7 +291,7 @@ pub fn adopt_profile_versions(book: &mut SeedBook, config: &mut ConfigFile) -> b
 
 /// Gives every profile the book's versions, so switching profiles keeps
 /// each world's version.
-pub fn mirror_versions(book: &SeedBook, config: &mut ConfigFile) -> bool {
+pub fn mirror_versions(book: &SeedBook, config: &mut SettingsFile) -> bool {
     let mut changed = false;
     for settings in config.profiles.values_mut() {
         if settings.seed_atlas.game_versions != *book.versions() {
@@ -304,7 +304,7 @@ pub fn mirror_versions(book: &SeedBook, config: &mut ConfigFile) -> bool {
 
 /// Stores the versions the current profile's settings were edited to (by
 /// a screen or a command) in the book, and mirrors them to every profile.
-pub fn store_versions(book: &mut SeedBook, config: &mut ConfigFile) {
+pub fn store_versions(book: &mut SeedBook, config: &mut SettingsFile) {
     let edited = config.current().seed_atlas.game_versions.clone();
     book.set_versions(&edited);
     mirror_versions(book, config);
@@ -627,7 +627,7 @@ mod tests {
     fn versions_belong_to_the_world_not_the_profile() {
         let dir = temp_dir("versions");
         // An older settings file: each profile had its own versions.
-        let mut config: ConfigFile = toml::from_str(
+        let mut config: SettingsFile = toml::from_str(
             "current_profile = \"b\"\n\
              [profiles.a.seed_atlas.game_versions]\nsp-w = \"1.12.2\"\nsp-x = \"1.16.5\"\n\
              [profiles.b.seed_atlas.game_versions]\nsp-w = \"1.20.6\"\n",

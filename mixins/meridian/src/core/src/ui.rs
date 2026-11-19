@@ -20,7 +20,7 @@ const EDGE_FOCUSED: u32 = 0xFFFF_FFFF;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Kind {
-    Button {
+    PushButton {
         enabled: bool,
     },
     /// A text field; `text` is its content.
@@ -85,7 +85,7 @@ impl Widget {
             id: id.into(),
             rect,
             text: text.into(),
-            kind: Kind::Button { enabled },
+            kind: Kind::PushButton { enabled },
         }
     }
 
@@ -194,7 +194,7 @@ impl Widget {
 
     fn interactive(&self) -> bool {
         match &self.kind {
-            Kind::Button { enabled } => *enabled,
+            Kind::PushButton { enabled } => *enabled,
             Kind::Field { .. }
             | Kind::Selector { .. }
             | Kind::Row { .. }
@@ -225,7 +225,7 @@ pub fn draw(widgets: &[Widget], mouse: [f32; 2]) -> Vec<DrawOp> {
         let [x, y, width, height] = w.rect;
         let hover = w.interactive() && w.contains(mouse);
         let center_text = |ops: &mut Vec<DrawOp>, color: u32| {
-            ops.push(DrawOp::Text {
+            ops.push(DrawOp::Label {
                 x: x + width / 2.0,
                 y: y + (height - 8.0) / 2.0,
                 text: w.text.clone(),
@@ -235,7 +235,7 @@ pub fn draw(widgets: &[Widget], mouse: [f32; 2]) -> Vec<DrawOp> {
             });
         };
         match &w.kind {
-            Kind::Button { enabled } => {
+            Kind::PushButton { enabled } => {
                 let sprite = match (enabled, hover) {
                     (false, _) => "gui/sprites/widget/button_disabled",
                     (true, true) => "gui/sprites/widget/button_highlighted",
@@ -268,7 +268,7 @@ pub fn draw(widgets: &[Widget], mouse: [f32; 2]) -> Vec<DrawOp> {
                 } else {
                     (w.text.clone(), *color)
                 };
-                ops.push(DrawOp::Text {
+                ops.push(DrawOp::Label {
                     x: x + 4.0,
                     y: y + (height - 8.0) / 2.0,
                     text,
@@ -286,7 +286,7 @@ pub fn draw(widgets: &[Widget], mouse: [f32; 2]) -> Vec<DrawOp> {
                     rect: [x + 1.0, y + 1.0, width - 2.0, height - 2.0],
                     argb: 0xFF00_0000,
                 });
-                ops.push(DrawOp::Text {
+                ops.push(DrawOp::Label {
                     x: x + width / 2.0,
                     y: y + (height - 8.0) / 2.0 + 0.5,
                     text: w.text.clone(),
@@ -296,7 +296,7 @@ pub fn draw(widgets: &[Widget], mouse: [f32; 2]) -> Vec<DrawOp> {
                 });
             }
             Kind::Label { color, align } => {
-                ops.push(DrawOp::Text {
+                ops.push(DrawOp::Label {
                     x,
                     y,
                     text: w.text.clone(),
@@ -327,7 +327,7 @@ pub fn draw(widgets: &[Widget], mouse: [f32; 2]) -> Vec<DrawOp> {
                     rect: w.rect,
                     argb: *color,
                 });
-                ops.push(DrawOp::Text {
+                ops.push(DrawOp::Label {
                     x: x + width / 2.0 + 0.5,
                     y: y + (height - 8.0) / 2.0 + 0.5,
                     text: w.text.clone(),
@@ -497,7 +497,7 @@ mod tests {
         );
         assert!(
             idle.iter().any(
-                |o| matches!(o, DrawOp::Text { text, argb: PLACEHOLDER, .. } if text == "name")
+                |o| matches!(o, DrawOp::Label { text, argb: PLACEHOLDER, .. } if text == "name")
             )
         );
         let typing = draw(
@@ -513,7 +513,7 @@ mod tests {
         assert!(
             typing
                 .iter()
-                .any(|o| matches!(o, DrawOp::Text { text, .. } if text == "Ho_"))
+                .any(|o| matches!(o, DrawOp::Label { text, .. } if text == "Ho_"))
         );
     }
 
