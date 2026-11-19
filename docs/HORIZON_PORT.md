@@ -77,12 +77,15 @@ player, driven with `horizon-ctl` and screenshots):
 
 - Minimap: terrain, water, shading, radar dots, compass, coordinates; it
   turns with the player; cave mode under a roof (the `/fill` roof switched it).
-- Block changes: a `/fill` of red wool appears on the minimap and world map.
+- Block changes: a `/fill` of gold blocks twelve blocks away appears on the
+  minimap while the player stands still (the block part's notice alone, no
+  re-read); a red wool roof appears on the world map.
 - World map (M): explored terrain, toolbar, zoom, drag; the Seed Atlas layer
   beyond the explored area (oceans with depth, biomes); about 450 FPS with the
   map open and while dragging, about 500 in the world.
 - Nether: dimension change, the Seed Atlas layer with the carved floors.
-- `/seedatlas status` (seed detected from the world), `/meridian waypoint add`,
+- `/seedatlas status` (seed 4242 detected in a world made with it),
+  `/meridian waypoint add`,
   `export`, `set list`; notices drawn over the hotbar.
 - Restart: map data and waypoints persist; `meridian.log` is written. Data
   of earlier versions in `horizon-mods/.horizon-mod-data/meridian` moves
