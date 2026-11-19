@@ -1143,16 +1143,17 @@ impl SeedService {
         self.invalidate();
     }
 
-    /// Sets the game's terrain sources for detailed tiles (the vanilla
-    /// surface and the Nether cave carvers), and what frees their caches
-    /// when the tiles are released.
+    /// Sets the terrain sources for detailed tiles (a vanilla surface, when
+    /// the host has one, and the Nether cave carvers), and what frees their
+    /// caches when the tiles are released. Without a surface, Overworld tiles
+    /// take their relief from the engine's height estimate.
     pub fn set_terrain_sources(
         &mut self,
-        surface: Arc<SurfaceSampler>,
+        surface: Option<Arc<SurfaceSampler>>,
         cave_mask: Arc<CaveMasker>,
         release: Arc<Release>,
     ) {
-        self.look.surface = Some(surface);
+        self.look.surface = surface;
         self.look.cave_mask = Some(cave_mask);
         self.release = Some(release);
         self.invalidate();

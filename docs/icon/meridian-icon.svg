@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1F3B4D"/>
+      <stop offset="1" stop-color="#132634"/>
+    </linearGradient>
+    <clipPath id="globe"><circle cx="256" cy="256" r="150"/></clipPath>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+  <g clip-path="url(#globe)">
+    <circle cx="256" cy="256" r="150" fill="#2C6E63"/>
+    <path d="M106 300 Q170 270 230 300 T360 290 T420 300 V420 H106 Z" fill="#3F8F6E"/>
+    <path d="M106 205 Q160 185 210 210 T330 200 T420 190 V106 H106 Z" fill="#24596A"/>
+  </g>
+  <g fill="none" stroke="#E9EEF0" stroke-width="12" stroke-linecap="round">
+    <circle cx="256" cy="256" r="150"/>
+    <ellipse cx="256" cy="256" rx="62" ry="150" opacity="0.55" stroke-width="8"/>
+    <line x1="256" y1="106" x2="256" y2="406"/>
+  </g>
+  <path d="M256 44 L282 98 L256 86 L230 98 Z" fill="#FF5A4A"/>
+  <circle cx="256" cy="256" r="18" fill="#FF5A4A" stroke="#E9EEF0" stroke-width="8"/>
+</svg>

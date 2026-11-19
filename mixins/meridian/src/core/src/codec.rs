@@ -322,3 +322,27 @@ mod tests {
         ));
     }
 }
+
+/// The bytes of a gzip file (a world's NBT data), or `None` if it is not one.
+pub fn gunzip(bytes: &[u8]) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut out = Vec::new();
+    flate2::read::GzDecoder::new(bytes)
+        .take(64 << 20)
+        .read_to_end(&mut out)
+        .ok()?;
+    Some(out)
+}
+
+#[cfg(test)]
+mod gunzip_tests {
+    #[test]
+    fn gunzip_reads_gzip_and_refuses_other_bytes() {
+        use std::io::Write;
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gz.write_all(b"minecraft:large_biomes").unwrap();
+        let bytes = gz.finish().unwrap();
+        assert_eq!(super::gunzip(&bytes).unwrap(), b"minecraft:large_biomes");
+        assert!(super::gunzip(b"not gzip").is_none());
+    }
+}

@@ -742,3 +742,43 @@ mod tests {
         );
     }
 }
+
+/// A player's default skin (`DefaultPlayerSkin.get(uuid)`): the texture under
+/// `textures/` the game draws when it has no skin of the player's own.
+pub fn default_skin(uuid: u128) -> &'static str {
+    const SKINS: [&str; 18] = [
+        "entity/player/slim/alex",
+        "entity/player/slim/ari",
+        "entity/player/slim/efe",
+        "entity/player/slim/kai",
+        "entity/player/slim/makena",
+        "entity/player/slim/noor",
+        "entity/player/slim/steve",
+        "entity/player/slim/sunny",
+        "entity/player/slim/zuri",
+        "entity/player/wide/alex",
+        "entity/player/wide/ari",
+        "entity/player/wide/efe",
+        "entity/player/wide/kai",
+        "entity/player/wide/makena",
+        "entity/player/wide/noor",
+        "entity/player/wide/steve",
+        "entity/player/wide/sunny",
+        "entity/player/wide/zuri",
+    ];
+    // `UUID.hashCode`, then `Math.floorMod` over the list.
+    let hilo = ((uuid >> 64) as u64) ^ (uuid as u64);
+    let hash = ((hilo >> 32) as i32) ^ (hilo as i32);
+    SKINS[hash.rem_euclid(SKINS.len() as i32) as usize]
+}
+
+#[cfg(test)]
+mod default_skin_tests {
+    #[test]
+    fn default_skins_follow_the_uuid_hash() {
+        // hashCode 0 -> the first; -1 -> floorMod(-1, 18) = 17.
+        assert_eq!(super::default_skin(0), "entity/player/slim/alex");
+        assert_eq!(super::default_skin(0xFFFF_FFFF), "entity/player/wide/zuri");
+        assert_eq!(super::default_skin(6), "entity/player/slim/steve");
+    }
+}

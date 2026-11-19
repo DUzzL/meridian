@@ -7,7 +7,8 @@
 //! animated textures show their first frame.
 
 use std::collections::HashMap;
-use std::path::Path;
+/// Reads a texture of the client's resources by name (`block/stone`), PNG bytes.
+pub type Read<'a> = dyn Fn(&str) -> Option<Vec<u8>> + 'a;
 
 /// Icon pixels per marker at the default size (`IconLayout.DISPLAY_SIZE`).
 pub const DISPLAY_SIZE: f32 = 18.0;
@@ -51,7 +52,7 @@ enum Source {
     /// A block texture, and whether it gets a dark frame.
     Block(&'static str, bool),
     /// A composed image, and whether it gets a dark frame.
-    Composed(fn(&Path) -> Option<Image>, bool),
+    Composed(fn(&Read<'_>) -> Option<Image>, bool),
 }
 
 /// The icon of every marker id (and `orevein_copper`, `camp_special`).
@@ -174,14 +175,8 @@ fn decode(bytes: &[u8]) -> Option<Image> {
     })
 }
 
-fn texture(root: &Path, path: &str) -> Option<Image> {
-    decode(
-        &std::fs::read(
-            root.join("assets/minecraft/textures")
-                .join(format!("{path}.png")),
-        )
-        .ok()?,
-    )
+fn texture(read: &Read<'_>, path: &str) -> Option<Image> {
+    decode(&read(path)?)
 }
 
 /// Copies a `w` x `h` rectangle in 1/k texture units, skipping transparent
@@ -214,7 +209,7 @@ fn copy(
     }
 }
 
-fn cracked_mossy_stone_bricks(root: &Path) -> Option<Image> {
+fn cracked_mossy_stone_bricks(root: &Read<'_>) -> Option<Image> {
     let cracked = texture(root, "block/cracked_stone_bricks")?;
     let mossy = texture(root, "block/mossy_stone_bricks");
     let plain = texture(root, "block/stone_bricks");
@@ -236,7 +231,7 @@ fn cracked_mossy_stone_bricks(root: &Path) -> Option<Image> {
     Some(out)
 }
 
-fn villager_head(root: &Path) -> Option<Image> {
+fn villager_head(root: &Read<'_>) -> Option<Image> {
     let skin = texture(root, "entity/villager/villager")?;
     let k = (skin.w / 64).max(1);
     let mut out = Image::new(8 * k, 11 * k);
@@ -245,7 +240,7 @@ fn villager_head(root: &Path) -> Option<Image> {
     Some(out)
 }
 
-fn warden_head(root: &Path) -> Option<Image> {
+fn warden_head(root: &Read<'_>) -> Option<Image> {
     let skin = texture(root, "entity/warden/warden")?;
     let k = (skin.w / 128).max(1);
     let mut out = Image::new(28 * k, 20 * k);
@@ -255,7 +250,7 @@ fn warden_head(root: &Path) -> Option<Image> {
     Some(out)
 }
 
-fn chest(root: &Path) -> Option<Image> {
+fn chest(root: &Read<'_>) -> Option<Image> {
     let skin = texture(root, "entity/chest/normal")?;
     let k = (skin.w / 64).max(1);
     let mut out = Image::new(14 * k, 15 * k);
@@ -268,7 +263,7 @@ fn chest(root: &Path) -> Option<Image> {
 /// The first frame of an animated texture, cropped to its visible pixels
 /// (alpha 8 and up, as `IconLayout.measure`).
 fn crop(img: &Image) -> Image {
-    let frame_h = if img.h > img.w && img.h % img.w == 0 {
+    let frame_h = if img.h > img.w && img.h.is_multiple_of(img.w) {
         img.w
     } else {
         img.h
@@ -298,23 +293,22 @@ fn crop(img: &Image) -> Image {
     out
 }
 
-/// Loads every icon from the game's resources (`root`, the folder holding
-/// `assets/`), Seed Atlas's own icons from the mod. A texture the game
-/// lacks falls back to an empty icon.
-pub fn load(root: Option<&Path>) -> HashMap<&'static str, Icon> {
+/// Loads every icon from the client's resources (`read`), Seed Atlas's own
+/// icons from the mod. A texture the game lacks falls back to an empty icon.
+pub fn load(read: &Read<'_>) -> HashMap<&'static str, Icon> {
     let mut out = HashMap::new();
     for (id, source) in sources() {
         let (img, block) = match source {
             Source::Own(bytes) => (decode(bytes), false),
             Source::Item(name) => (
-                root.and_then(|r| texture(r, &format!("item/{name}"))),
+                texture(read, &format!("item/{name}")),
                 false,
             ),
             Source::Block(name, frame) => (
-                root.and_then(|r| texture(r, &format!("block/{name}"))),
+                texture(read, &format!("block/{name}")),
                 frame,
             ),
-            Source::Composed(f, frame) => (root.and_then(f), frame),
+            Source::Composed(f, frame) => (f(read), frame),
         };
         let img = img.map(|i| crop(&i)).unwrap_or_else(|| Image::new(1, 1));
         out.insert(

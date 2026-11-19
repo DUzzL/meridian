@@ -1,4 +1,4 @@
-//! Meridian's client queries, expressed through the fork's side-specific API.
+//! Meridian's client queries, expressed through Horizon's side-specific mod API.
 use mod_api::{BlockSprites, ClientHost, HudMode, LightLayer, Text};
 use std::path::PathBuf;
 
@@ -23,7 +23,6 @@ pub trait MeridianClient {
     fn meridian_key(&self, owner: &str, id: &str, default: &str) -> String;
     fn meridian_text_width(&self, text: &str) -> f32;
     fn meridian_block_sprites(&self, block: &str) -> Vec<Option<BlockSprites>>;
-    fn meridian_action_bar(&mut self, text: Text, animate: bool);
     fn config_dir(&self) -> std::io::Result<PathBuf>;
     fn weather(&self) -> (f32, f32);
     fn light(&self, pos: [i32; 3]) -> (u8, u8);
@@ -69,10 +68,6 @@ impl MeridianClient for dyn ClientHost + '_ {
     fn meridian_block_sprites(&self, block: &str) -> Vec<Option<BlockSprites>> {
         self.block_state_id(block)
             .map_or_else(|| vec![None], |state| self.block_sprites(&[state]))
-    }
-
-    fn meridian_action_bar(&mut self, text: Text, animate: bool) {
-        crate::bridge::action_bar(text, animate);
     }
 
     fn config_dir(&self) -> std::io::Result<PathBuf> {

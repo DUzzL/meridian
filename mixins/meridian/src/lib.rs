@@ -2,14 +2,15 @@
 //! game. It translates Horizon's hooks into [`HostEvent`]s, answers the
 //! core's [`MapHost`] questions and draws what the core lays out.
 //!
-//! Chunk events and chunk reads (`docs/HORIZON_API.md` E1/E2) come from the
-//! pinned native support module, which writes the mod-owned `bridge` queues.
-#![forbid(unsafe_code)]
+//! Everything goes through Horizon's public mod API: chunk events and reads
+//! come from its hooks and level reads (`bridge`), the maps' pictures are
+//! composed on the CPU and shown through the API's own image (`canvas`).
+#![deny(unsafe_code)]
 
+mod canvas;
 pub mod gpu;
 pub mod gpu_map;
 mod icons;
-pub mod terrain_sampler;
 pub use meridian_core as core;
 
 use std::collections::HashMap;
@@ -35,6 +36,10 @@ use meridian_host::{
     HostEvent, MapHost, PlayerState, ReadMode, Tint, WorldContext, WorldSource,
 };
 use mod_api::text::{TextClick, TextStyle};
+use mod_api::{
+    ClientChunkLoadEvent, ClientChunkUnloadEvent, ServerHost, ServerStartedEvent,
+    WorldLifecycleEvent,
+};
 use mod_api::{
     ClientChatReceivedEvent, ClientDisconnectingEvent, ClientHost, ClientLevelLoadEvent,
     ClientLevelUnloadEvent, ClientPacketEvent, ClientResourcesReloadedEvent, ClientStoppingEvent,
@@ -67,59 +72,62 @@ const BOOK_PLACES_TTL: Duration = Duration::from_secs(2);
 /// How long a radar's request for entities lasts unless renewed.
 const ENTITY_REQUEST_TTL: Duration = Duration::from_millis(250);
 
-/// Mean colours of the block textures, by texture file, and which file each
-/// sprite of Horizon's block atlas comes from.
+/// Texture files of the client's resources, read through the mod API
+/// (`ResourcesHost::resource`: the selected resource packs over the game's
+/// assets), and the mean colours of block textures, by texture name.
 #[derive(Default)]
 struct Textures {
-    files: std::collections::HashMap<(u32, u32), PathBuf>,
-    means: std::collections::HashMap<PathBuf, Option<u32>>,
-    indexed: bool,
+    bytes: HashMap<String, Option<std::sync::Arc<Vec<u8>>>>,
+    means: HashMap<String, Option<u32>>,
 }
 
 static TEXTURES: Mutex<Option<Textures>> = Mutex::new(None);
 
-impl Textures {
-    /// Maps every block texture file to its sprite once (`texture_sprites`).
-    fn index(&mut self, host: &dyn ClientHost) {
-        if self.indexed {
-            return;
-        }
-        self.indexed = true;
-        let Some(root) = bridge::resources_dir() else {
-            return;
-        };
-        let dir = root.join("assets/minecraft/textures/block");
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            return;
-        };
-        let files: Vec<PathBuf> = entries
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|x| x == "png"))
-            .collect();
-        let names: Vec<String> = files
-            .iter()
-            .filter_map(|p| {
-                p.file_stem()
-                    .map(|s| format!("minecraft:block/{}", s.to_string_lossy()))
-            })
-            .collect();
-        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-        for (sprite, file) in host.texture_sprites(&refs).into_iter().zip(files) {
-            if let Some(s) = sprite {
-                self.files.entry((s.array, s.layer)).or_insert(file);
-            }
-        }
-    }
+/// `minecraft:block/stone` or `entity/villager/villager` as the resource
+/// `minecraft:textures/block/stone.png`.
+fn texture_resource(texture: &str) -> Option<mod_api::Identifier> {
+    let (namespace, path) = texture.split_once(':').unwrap_or(("minecraft", texture));
+    mod_api::Identifier::parse(&format!("{namespace}:textures/{path}.png")).ok()
+}
 
-    fn mean(&mut self, sprite: (u32, u32)) -> Option<u32> {
-        let file = self.files.get(&sprite)?.clone();
-        *self.means.entry(file.clone()).or_insert_with(|| {
-            std::fs::read(&file)
-                .ok()
-                .and_then(|b| meridian_core::texture::mean_color(&b))
-        })
+/// The PNG bytes of `texture`, cached until the resources reload.
+fn texture_bytes(host: &dyn ClientHost, texture: &str) -> Option<std::sync::Arc<Vec<u8>>> {
+    if let Some(cached) = TEXTURES
+        .lock()
+        .get_or_insert_with(Textures::default)
+        .bytes
+        .get(texture)
+    {
+        return cached.clone();
     }
+    let read = texture_resource(texture)
+        .and_then(|id| host.resource(mod_api::PackType::ClientResources, &id))
+        .map(std::sync::Arc::new);
+    TEXTURES
+        .lock()
+        .get_or_insert_with(Textures::default)
+        .bytes
+        .insert(texture.to_owned(), read.clone());
+    read
+}
+
+/// The mean colour of block texture `texture` (`minecraft:block/stone`).
+fn texture_mean(host: &dyn ClientHost, texture: &str) -> Option<u32> {
+    if let Some(mean) = TEXTURES
+        .lock()
+        .get_or_insert_with(Textures::default)
+        .means
+        .get(texture)
+    {
+        return *mean;
+    }
+    let mean = texture_bytes(host, texture).and_then(|b| meridian_core::texture::mean_color(&b));
+    TEXTURES
+        .lock()
+        .get_or_insert_with(Textures::default)
+        .means
+        .insert(texture.to_owned(), mean);
+    mean
 }
 
 /// Whether numbers use a decimal comma here (the system's locale), as the
@@ -351,11 +359,53 @@ struct HorizonHost<'a> {
     dimension: Option<&'a str>,
 }
 
+/// Meridian's bulk data (maps, waypoints, seeds, exports): the folder the
+/// mod API gives a mod for it (`ClientHost::data_files`, `horizon-mod-data/
+/// <mod id>/` in the game folder). Written with `std::fs` from the map's own
+/// threads; the API's file service is for the game thread.
 fn data_dir(host: &dyn ClientHost) -> PathBuf {
-    host.instance_dir()
-        .join("horizon-mods")
-        .join(".horizon-mod-data")
-        .join(MOD_ID)
+    let dir = host.instance_dir().join("horizon-mod-data").join(MOD_ID);
+    static MIGRATED: std::sync::Once = std::sync::Once::new();
+    MIGRATED.call_once(|| migrate_data(&host.instance_dir(), &dir));
+    dir
+}
+
+/// Moves what earlier versions kept in the settings data folder
+/// (`horizon-mods/.horizon-mod-data/meridian`, which the game reads as one
+/// file per setting) into the bulk data folder, once. Nothing is replaced:
+/// an entry already in the new folder stays and the old one is left.
+fn migrate_data(game: &std::path::Path, to: &std::path::Path) {
+    let from = game.join("horizon-mods").join(".horizon-mod-data").join(MOD_ID);
+    let Ok(entries) = std::fs::read_dir(&from) else {
+        return;
+    };
+    if let Err(e) = std::fs::create_dir_all(to) {
+        log::warn!("meridian: cannot create {}: {e}", to.display());
+        return;
+    }
+    let (mut moved, mut kept) = (0, 0);
+    for entry in entries.flatten() {
+        let target = to.join(entry.file_name());
+        if target.exists() {
+            kept += 1;
+            continue;
+        }
+        match std::fs::rename(entry.path(), &target) {
+            Ok(()) => moved += 1,
+            Err(e) => {
+                kept += 1;
+                log::warn!("meridian: cannot move {}: {e}", entry.path().display());
+            }
+        }
+    }
+    if kept == 0 {
+        let _ = std::fs::remove_dir(&from);
+    }
+    log::info!(
+        "meridian: moved {moved} entries of the old data folder {} to {} ({kept} left)",
+        from.display(),
+        to.display()
+    );
 }
 
 fn config_dir(host: &dyn ClientHost) -> PathBuf {
@@ -454,15 +504,13 @@ impl MapHost for HorizonHost<'_> {
         let top = sprites.as_ref().and_then(|s| s.sides[1].first());
         let tint = top.map_or(Tint::None, |f| tint_of(f.tint));
         let tint = if look.fluid == 1 { Tint::Water } else { tint };
-        let sprite = top
-            .map(|f| f.sprite)
-            .or_else(|| sprites.as_ref().and_then(|s| s.particle));
-        let mean = sprite.and_then(|sp| {
-            let mut guard = TEXTURES.lock();
-            let textures = guard.get_or_insert_with(Textures::default);
-            textures.index(self.host);
-            textures.mean((sp.array, sp.layer))
+        // Without a top face (crossed plants), the texture named as the block.
+        let texture = top.map(|f| f.texture.clone()).or_else(|| {
+            let (namespace, name) = block.split_once(':').unwrap_or(("minecraft", block));
+            let name = name.split('[').next().unwrap_or(name);
+            Some(format!("{namespace}:block/{name}"))
         });
+        let mean = texture.and_then(|t| texture_mean(self.host, &t));
         // Without a texture, tinted blocks use a mid grey under their tint
         // and the rest their map colour.
         let texture_color = mean.unwrap_or(if tint == Tint::None {
@@ -838,16 +886,10 @@ impl Meridian {
             }
             let engine = MapEngine::new(config.current().clone(), data_dir(host));
             bridge::enable();
-            let _ = meridian_core::seedatlas::WORKER_START.set(|| {
-                bridge::lower_current_thread();
-            });
-            let _ = meridian_core::worker::THREAD_START.set(|| {
-                bridge::lower_current_thread();
-            });
             log::info!("meridian {VERSION}: settings in {}", store.path().display());
             let engine_read_only =
                 engine.read_only() || !meridian_core::persist::path_writable(store.path());
-            load_icons();
+            load_icons(host);
             State {
                 config,
                 store,
@@ -918,7 +960,17 @@ impl Meridian {
 
 /// Draws the core's operations into Horizon's HUD batch. Text at another
 /// scale than the GUI's goes through a pushed pose (`gui_paint`).
-fn paint(batch: &mut dyn DrawContext, ops: &[DrawOp]) {
+fn paint(host: &dyn ClientHost, batch: &mut dyn DrawContext, ops: &[DrawOp]) {
+    paint_with(batch, ops, &|texture| texture_size(host, texture));
+}
+
+/// [`paint`] with the texture sizes from `sizes` (`[width, height]` of a
+/// texture under `textures/`, none for a texture the resources lack).
+fn paint_with(
+    batch: &mut dyn DrawContext,
+    ops: &[DrawOp],
+    sizes: &dyn Fn(&str) -> Option<[i32; 2]>,
+) {
     use mod_api::GuiDraw;
     use mod_api::client::hud_layout::PoseOp;
     for op in ops {
@@ -927,7 +979,6 @@ fn paint(batch: &mut dyn DrawContext, ops: &[DrawOp]) {
             DrawOp::Quad { points, argb } => batch.quad(*points, *argb),
             DrawOp::NineSlice { sprite, rect, argb } => batch.gui_nine_slice(sprite, *rect, *argb),
             DrawOp::Icon { id, rect, dim } => {
-                load_icons();
                 let Some((_, info)) = icon(id) else { continue };
                 // Fitted into `rect` like `IconLayout` (longer side 18 at
                 // the default), each source pixel row as runs of fills
@@ -1017,7 +1068,7 @@ fn paint(batch: &mut dyn DrawContext, ops: &[DrawOp]) {
                 argb,
             } => {
                 // A missing texture (another resource pack) draws nothing.
-                let Some(tex) = texture_size(texture) else {
+                let Some(tex) = sizes(texture) else {
                     continue;
                 };
                 // `uv` is in texels of the vanilla texture, `base` wide; a
@@ -1441,6 +1492,7 @@ impl Meridian {
 #[mod_api::horizon_mod]
 impl Hooks for Meridian {
     fn screen_render_post(&self, host: &dyn ClientHost, event: &mut ScreenRenderPostEvent<'_>) {
+        bridge::set_gui_size(event.draw.size());
         if event.screen.id == "mod" {
             if self.map_open(host) {
                 self.draw_map(host, event.draw, false);
@@ -1463,6 +1515,7 @@ impl Hooks for Meridian {
         host: &dyn ClientHost,
         event: &mut ScreenMouseButtonPressedPreEvent<'_>,
     ) -> Flow {
+        let flow = (|| {
         if host.mod_screen() != Some(MOD_ID) || event.button > 1 {
             return Flow::Continue;
         }
@@ -1547,6 +1600,9 @@ impl Hooks for Meridian {
             ((), screen.click(at, right, env))
         });
         Flow::Cancel
+    })();
+        flush_clipboard(host);
+        flow
     }
 
     fn screen_mouse_button_released_pre(
@@ -1554,6 +1610,7 @@ impl Hooks for Meridian {
         host: &dyn ClientHost,
         event: &mut ScreenMouseButtonReleasedPreEvent<'_>,
     ) -> Flow {
+        let flow = (|| {
         if host.mod_screen() != Some(MOD_ID) {
             return Flow::Continue;
         }
@@ -1571,6 +1628,9 @@ impl Hooks for Meridian {
             self.map_input(host, |s, view, _| s.map.release(at, view.gui, view.unit));
         }
         Flow::Cancel
+    })();
+        flush_clipboard(host);
+        flow
     }
 
     fn screen_mouse_dragged_pre(
@@ -1624,6 +1684,7 @@ impl Hooks for Meridian {
         host: &dyn ClientHost,
         event: &mut ScreenKeyPressedPreEvent<'_>,
     ) -> Flow {
+        let flow = (|| {
         // Escape still closes the screen as the game does.
         if host.mod_screen() != Some(MOD_ID) || event.key == "key.keyboard.escape" {
             return Flow::Continue;
@@ -1654,6 +1715,9 @@ impl Hooks for Meridian {
             )
         });
         Flow::Cancel
+    })();
+        flush_clipboard(host);
+        flow
     }
 
     fn screen_key_released_pre(
@@ -1699,7 +1763,7 @@ impl Hooks for Meridian {
 
     fn gui_layer_pre(&self, host: &dyn ClientHost, _event: &mut GuiLayerPreEvent<'_>) -> Flow {
         // The world map covers the HUD, as an opaque screen would.
-        if host.mod_screen() == Some(MOD_ID) && (self.map_open(&*host) || self.map_behind(&*host)) {
+        if host.mod_screen() == Some(MOD_ID) && (self.map_open(host) || self.map_behind(host)) {
             Flow::Cancel
         } else {
             Flow::Continue
@@ -1748,7 +1812,49 @@ impl Hooks for Meridian {
         }
     }
 
+    fn client_chunk_load(&self, _host: &mut dyn ClientHost, event: &mut ClientChunkLoadEvent<'_>) {
+        bridge::chunk_loaded(event.dimension, event.chunk);
+    }
+
+    fn client_chunk_unload(
+        &self,
+        _host: &mut dyn ClientHost,
+        event: &mut ClientChunkUnloadEvent<'_>,
+    ) {
+        bridge::chunk_unloaded(event.dimension, event.chunk);
+    }
+
+    /// The single-player server opened its world: its folder name and seed
+    /// (the server thread; the client reads them from `server_state`).
+    fn server_started(&self, host: &mut dyn ServerHost, event: &mut ServerStartedEvent) {
+        if event.dedicated {
+            return;
+        }
+        let directory = host.world_dir();
+        let world = directory
+            .as_ref()
+            .and_then(|d| d.file_name())
+            .map(|n| n.to_string_lossy().into_owned());
+        let seed = host
+            .level("minecraft:overworld")
+            .and_then(|l| l.seed(&*host))
+            .map(|seed| (seed, directory.as_deref().is_some_and(large_biomes)));
+        server_state(world, seed);
+    }
+
+    fn world_lifecycle(&self, _host: &mut dyn ServerHost, event: &mut WorldLifecycleEvent<'_>) {
+        if matches!(
+            event.phase,
+            mod_api::WorldPhase::WorldCloseFinal | mod_api::WorldPhase::WorldOpenFailed
+        ) {
+            server_state(None, None);
+        }
+    }
+
     fn register(&self, r: &mut dyn mod_api::Registrar, _cx: &mod_api::RegistrationContext) {
+        // Every block's writes in the client's world mark their chunk for
+        // the map (the reference mod reads the renderer's own notice).
+        r.block_part_tag("horizon:class/block", BlockWrites);
         for binding in KEY_BINDINGS {
             r.register_key_mapping(
                 mod_api::KeyRegistration::new(binding.id, binding.default)
@@ -1762,6 +1868,7 @@ impl Hooks for Meridian {
         if event.action == mod_api::KeyAction::Repeat {
             return;
         }
+        bridge::key_event(event.key, event.action != mod_api::KeyAction::Release);
         if !host.playing() && (event.action != mod_api::KeyAction::Release) {
             return;
         }
@@ -1771,7 +1878,7 @@ impl Hooks for Meridian {
             event.action != mod_api::KeyAction::Release,
         );
         if let Some(text) = notice {
-            host.meridian_action_bar(Text::literal(text), false);
+            bridge::notice(text);
         }
         let (open, open_map) = self.with_state(&*host, |s| {
             (s.open_screen.take(), std::mem::take(&mut s.open_map))
@@ -1824,18 +1931,16 @@ impl Hooks for Meridian {
                 .trim()
                 .to_owned();
             let (reply, open) = self.on_seedatlas(&*host, &rest);
-            bridge::local_chat(
-                reply
-                    .into_iter()
-                    .map(|line| {
-                        if line.error {
-                            Text::literal(line.text).with_style(text_color(0xFF5555))
-                        } else {
-                            Text::literal(line.text)
-                        }
-                    })
-                    .collect(),
-            );
+            for line in reply {
+                let text = if line.error {
+                    Text::literal(line.text).with_style(text_color(0xFF5555))
+                } else {
+                    Text::literal(line.text)
+                };
+                if let Err(e) = host.chat_line(text) {
+                    log::warn!("meridian: chat line refused: {e:?}");
+                }
+            }
             if open && host.mod_screen_open(MOD_ID) {
                 self.with_state(&*host, |s| {
                     s.map_open = false;
@@ -1850,11 +1955,11 @@ impl Hooks for Meridian {
             return Flow::Continue;
         }
         let (reply, chat) = self.on_command(&*host, &args);
-        host.meridian_action_bar(Text::literal(reply), false);
+        bridge::notice(reply);
         if let Some(line) = chat
             && let Err(e) = host.send_chat(&line)
         {
-            host.meridian_action_bar(Text::literal(format!("Meridian: {e}")), false);
+            bridge::notice(format!("Meridian: {e}"));
         }
         Flow::Cancel
     }
@@ -1896,6 +2001,7 @@ impl Hooks for Meridian {
 
     fn client_level_load(&self, host: &mut dyn ClientHost, event: &mut ClientLevelLoadEvent<'_>) {
         let host: &dyn ClientHost = host;
+        bridge::level_changed();
         self.with_state(host, |s| {
             let dimension = event.dimension.to_owned();
             s.levels += 1;
@@ -1993,22 +2099,27 @@ impl Hooks for Meridian {
     fn render_frame_pre(&self, host: &mut dyn ClientHost, _event: &mut RenderFramePreEvent) {
         // A screen or lost focus can consume the event. Reconcile releases
         // from the physical state too, without inventing any new presses.
-        let enlarge = host.meridian_key(MOD_ID, "minimap.enlarge", "key.keyboard.z");
-        let faces = host.meridian_key(MOD_ID, "radar.faces", "key.keyboard.tab");
+        let enlarge = host.is_down(MOD_ID, "minimap.enlarge");
+        let faces = host.is_down(MOD_ID, "radar.faces");
         self.with_state(&*host, |s| {
-            if !bridge::key_held(&enlarge) {
+            if !enlarge {
                 s.controls.key(
                     "minimap.enlarge",
                     false,
                     &mut s.config.current_mut().minimap,
                 );
             }
-            if !bridge::key_held(&faces) {
+            if !faces {
                 s.faces_held = false;
             }
         });
+        // What the game shows changed since the last frame, read through the
+        // API; then the maps' picture for this frame.
+        bridge::frame(host);
+        let gui_scale = host.gui_scale().map_or(2.0, |s| s as f32);
+        canvas::compose_and_upload(host, gui_scale);
         if let Some(text) = EXPORT_NOTICE.lock().take() {
-            host.meridian_action_bar(Text::literal(text), false);
+            bridge::notice(text);
         }
         let pending = self.with_state(&*host, |s| std::mem::take(&mut s.pending));
         for p in pending {
@@ -2032,10 +2143,10 @@ impl Hooks for Meridian {
                         gpu_map::set_frame(None);
                     }
                 }
-                Pending::Notice(line) => host.meridian_action_bar(Text::literal(line), false),
+                Pending::Notice(line) => bridge::notice(line),
                 Pending::Chat(line) => {
                     if let Err(e) = host.send_chat(&line) {
-                        host.meridian_action_bar(Text::literal(format!("Meridian: {e}")), false);
+                        bridge::notice(format!("Meridian: {e}"));
                     }
                 }
             }
@@ -2178,6 +2289,14 @@ impl Hooks for Meridian {
 
     fn render_gui_post(&self, host: &dyn ClientHost, event: &mut RenderGuiPostEvent<'_>) {
         let host: &dyn ClientHost = host;
+        bridge::set_gui_size(event.draw.size());
+        self.draw_hud(host, event);
+        draw_notice(event.draw);
+    }
+}
+
+impl Meridian {
+    fn draw_hud(&self, host: &dyn ClientHost, event: &mut RenderGuiPostEvent<'_>) {
         let Some(client) = host.meridian_client_state() else {
             gpu::set_frame(None);
             return;
@@ -2187,7 +2306,7 @@ impl Hooks for Meridian {
             return;
         }
         let gui = client.gui_size;
-        let gui_scale = bridge::window_size().map_or(2.0, |w| w[1] as f32 / gui[1].max(1.0));
+        let gui_scale = host.gui_scale().map_or(2.0, |s| s as f32);
         self.with_state(host, |s| {
             if host.playing() {
                 // Alive again: the next death gets its own deathpoint.
@@ -2227,11 +2346,15 @@ impl Hooks for Meridian {
                     && !(settings.hide_under_screens && !host.playing()))
             {
                 minimap_ops(host, s, &player, gui, gui_scale, &mut ops);
+                // The map's picture first: the frame, marks and text go over it.
+                if let Some(rect) = gpu::FRAME.lock().as_ref().map(|f| f.rect) {
+                    canvas::draw_minimap(event.draw, rect);
+                }
             } else {
                 gpu::set_frame(None);
                 s.want_entities(false);
             }
-            paint(event.draw, &ops);
+            paint(host, event.draw, &ops);
         });
     }
 }
@@ -2262,7 +2385,7 @@ fn world_waypoints(
     let mark = 9.0 * u;
     for w in waypoints.visible(settings.all_sets) {
         let distance = w.distance(camera.position);
-        if !w.global && distance > settings.draw_distance(&dim) {
+        if !w.global && distance > settings.draw_distance(dim) {
             continue;
         }
         // An unknown height shows at eye level.
@@ -2407,7 +2530,7 @@ fn minimap_ops(
     s.want_entities(radar_on);
     if radar_on {
         let smooth = s.config.current().radar.smooth;
-        let entities = radar_entities(&mut s.face_cache, smooth);
+        let entities = radar_entities(host, &mut s.face_cache, smooth);
         let radar = radar_now(&s.config.current().radar, s.faces_held);
         ops.extend(radar::dots(
             &layout,
@@ -2505,6 +2628,30 @@ fn compose_map(s: &mut State, layout: &minimap::Layout, player: &PlayerState, gu
             );
         }
     });
+}
+
+/// Text to put on the clipboard: the game takes it only while it handles a
+/// key or mouse event, so the input hooks hand it over before they return.
+static CLIPBOARD: Mutex<Option<String>> = Mutex::new(None);
+
+fn flush_clipboard(host: &dyn ClientHost) {
+    if let Some(text) = CLIPBOARD.lock().take()
+        && !host.set_clipboard_text(&text)
+    {
+        log::warn!("meridian: the game did not take the clipboard text");
+    }
+}
+
+/// Meridian's notice over the hotbar, where vanilla shows its action bar
+/// (`Gui.renderOverlayMessage`: 68 pixels above the bottom, centred).
+fn draw_notice(draw: &mut dyn DrawContext) {
+    let Some((text, alpha)) = bridge::current_notice() else {
+        return;
+    };
+    let [w, h] = draw.size();
+    let width = draw.text_width(&text);
+    let a = ((alpha.clamp(0.0, 1.0) * 255.0) as u32).max(5) << 24;
+    draw.text(&text, [((w - width) / 2.0).round(), h - 68.0], a | 0xFF_FFFF, true);
 }
 
 /// "MeridianTest (auto)" / "overworld (auto)" for the screens' selectors.
@@ -2849,7 +2996,7 @@ impl Meridian {
             }
             tooltip(&mut ops, mouse, gui, &lines);
         }
-        paint(batch, &ops);
+        paint(host, batch, &ops);
     }
 }
 
@@ -2886,6 +3033,7 @@ impl Meridian {
 /// The bridge's entities as the radar's, their faces from `faces` (by kind,
 /// or skin for players; filled on first sight).
 fn radar_entities(
+    host: &dyn ClientHost,
     faces: &mut HashMap<String, Option<std::sync::Arc<radar::Face>>>,
     smooth: bool,
 ) -> Vec<radar::Entity> {
@@ -2910,7 +3058,7 @@ fn radar_entities(
                     Some(face) => face.clone(),
                     None => {
                         let face = radar::face_for(&e.kind, e.skin.as_deref())
-                            .filter(|f| texture_size(&f.texture).is_some())
+                            .filter(|f| texture_size(host, &f.texture).is_some())
                             .map(std::sync::Arc::new);
                         faces.insert(key.to_owned(), face.clone());
                         face
@@ -2936,25 +3084,22 @@ fn radar_now(
 
 /// A texture's size in texels, read once from its PNG header in the game's
 /// resources (`entity/zombie/zombie`); none when it is missing.
-fn texture_size(texture: &str) -> Option<[i32; 2]> {
+fn texture_size(host: &dyn ClientHost, texture: &str) -> Option<[i32; 2]> {
     static SIZES: Mutex<Option<HashMap<String, Option<[i32; 2]>>>> = Mutex::new(None);
-    let mut sizes = SIZES.lock();
-    let sizes = sizes.get_or_insert_with(HashMap::new);
-    if let Some(size) = sizes.get(texture) {
+    if let Some(size) = SIZES.lock().get_or_insert_with(HashMap::new).get(texture) {
         return *size;
     }
-    let root = bridge::resources_dir()?;
-    let path = root
-        .join("assets/minecraft/textures")
-        .join(format!("{texture}.png"));
-    let size = std::fs::File::open(path).ok().and_then(|f| {
-        let reader = png::Decoder::new(std::io::BufReader::new(f))
+    let size = texture_bytes(host, texture).and_then(|bytes| {
+        let reader = png::Decoder::new(std::io::Cursor::new(bytes.as_slice()))
             .read_info()
             .ok()?;
         let info = reader.info();
         Some([info.width as i32, info.height as i32])
     });
-    sizes.insert(texture.to_owned(), size);
+    SIZES
+        .lock()
+        .get_or_insert_with(HashMap::new)
+        .insert(texture.to_owned(), size);
     size
 }
 
@@ -3007,7 +3152,7 @@ impl Meridian {
         let gui = host
             .meridian_client_state()
             .map_or([0.0, 0.0], |c| c.gui_size);
-        let gui_scale = bridge::window_size().map_or(2.0, |w| w[1] as f32 / gui[1].max(1.0));
+        let gui_scale = host.gui_scale().map_or(2.0, |s| s as f32);
         MapView {
             gui,
             unit: minimap::unit(gui[1], gui_scale),
@@ -3121,6 +3266,9 @@ impl Meridian {
         if view.gui[0] <= 0.0 {
             return;
         }
+        // The terrain picture composed for the last layout; markers, labels
+        // and the toolbar are drawn over it.
+        canvas::draw_world_map(batch, view.gui);
         // Behind a menu the cursor stays off the map, so nothing reacts.
         let mouse = if behind { [-1.0, -1.0] } else { host.cursor() };
         let player = HorizonHost {
@@ -3232,7 +3380,7 @@ impl Meridian {
             // the markers.
             let sa_settings = s.config.current().seed_atlas.clone();
             let sa_dim = sa::dimension_of(&shown);
-            let gui_scale = bridge::window_size().map_or(2.0, |w| w[1] as f32 / gui[1].max(1.0));
+            let gui_scale = host.gui_scale().map_or(2.0, |s| s as f32);
             let (seed_above, seed_alpha) = sa::layer_pass(&sa_settings);
             let mut background = Vec::new();
             let mut icons = Vec::new();
@@ -3382,7 +3530,7 @@ impl Meridian {
                 s.hovered_marker = None;
                 // Structures belong to the seed map layer: off, they go too.
                 if sa_settings.structures && sa_settings.biome_layer {
-                    load_icons();
+                    load_icons(host);
                     // `MarkerSize.iconScale`: two blocks wide with the map,
                     // never below the sprite size and at most twice it, so
                     // icons neither vanish far out nor swell up close.
@@ -3538,7 +3686,7 @@ impl Meridian {
             s.want_entities(radar_on && shown == here);
             let smooth = s.config.current().radar.smooth;
             let entities = if radar_on && shown == here {
-                radar_entities(&mut s.face_cache, smooth)
+                radar_entities(host, &mut s.face_cache, smooth)
             } else {
                 Vec::new()
             };
@@ -3617,7 +3765,7 @@ impl Meridian {
             }
             ops
         });
-        paint(batch, &ops);
+        paint(host, batch, &ops);
     }
 }
 
@@ -3820,7 +3968,6 @@ impl State {
         self.notice = Some("Exporting the map...".to_owned());
         *EXPORT_NOTICE.lock() = Some("Exporting the map...".to_owned());
         std::thread::spawn(move || {
-            bridge::lower_current_thread();
             // Let the region saves just started land first.
             std::thread::sleep(Duration::from_millis(500));
             let text = match meridian_core::export::export_png(&regions, &out, &shading, 16384) {
@@ -3880,14 +4027,12 @@ static ICON_INDEX: std::sync::OnceLock<(HashMap<&'static str, usize>, Vec<icons:
 
 /// Builds the marker icons (Minecraft's textures need the game's resources,
 /// so this waits until they are known) and hands them to the renderer.
-fn load_icons() {
+fn load_icons(host: &dyn ClientHost) {
     if ICON_INDEX.get().is_some() {
         return;
     }
-    let Some(root) = bridge::resources_dir() else {
-        return;
-    };
-    let set = icons::load(Some(&root));
+    let read = |texture: &str| texture_bytes(host, texture).map(|b| b.as_ref().clone());
+    let set = icons::load(&read);
     let mut index = HashMap::new();
     let mut list = Vec::new();
     let mut gpu = Vec::new();
@@ -4024,7 +4169,7 @@ impl State {
             MENU_COPY_COORDINATES => {
                 // As the Fabric version copies them: Y only when known.
                 let y = m.y.map_or(String::new(), |y| format!(", Y: {y}"));
-                bridge::copy_to_clipboard(&format!("X: {}{y}, Z: {}", m.x, m.z));
+                *CLIPBOARD.lock() = Some(format!("X: {}{y}, Z: {}", m.x, m.z));
                 self.pending
                     .push(Pending::Notice("Coordinates copied".into()));
             }
@@ -4152,17 +4297,13 @@ impl State {
                     table,
                     fallback: meridian_core::seedatlas_look::VanillaLooks,
                 }));
+                // The Overworld's relief comes from the engine's height
+                // estimate (the API has no terrain generator for a seed);
+                // the Nether's caves are carved from the seed here.
                 self.seed_svc.set_terrain_sources(
-                    std::sync::Arc::new(|seed, large, ox, oz, step, w, h| {
-                        terrain_sampler::sample_overworld(seed, large, ox, oz, step, w, h, &|| true)
-                            .map(|g| meridian_core::seedatlas_look::SurfaceGrid {
-                                heights: g.heights,
-                                floors: g.floors,
-                                colors: g.colors,
-                            })
-                    }),
-                    std::sync::Arc::new(terrain_sampler::nether_cave_mask),
-                    std::sync::Arc::new(terrain_sampler::release_caches),
+                    None,
+                    std::sync::Arc::new(meridian_core::nether_caves::nether_cave_mask),
+                    std::sync::Arc::new(meridian_core::nether_caves::release_caches),
                 );
                 self.looks_ready = true;
             }
@@ -4300,7 +4441,6 @@ impl State {
             _ => Vec::new(),
         };
         std::thread::spawn(move || {
-            bridge::lower_current_thread();
             let tolerance = meridian_core::seedatlas_state::COMPLETED_TOLERANCE;
             let (found, name) = match kind {
                 NearestKind::Biome { id, name } => (
@@ -4367,7 +4507,37 @@ impl State {
     }
 }
 
-/// Called only from the integrated server's pinned lifecycle mixin.
+/// Whether the world in `directory` was made with the Large Biomes preset:
+/// its generator settings (`data/minecraft/world_gen_settings.dat`, gzipped
+/// NBT) name `minecraft:large_biomes` as the Overworld's biome parameters.
+fn large_biomes(directory: &std::path::Path) -> bool {
+    let path = directory.join("data/minecraft/world_gen_settings.dat");
+    let Ok(bytes) = std::fs::read(&path) else {
+        return false;
+    };
+    let text = meridian_core::codec::gunzip(&bytes).unwrap_or(bytes);
+    text.windows(b"large_biomes".len()).any(|w| w == b"large_biomes")
+}
+
+/// Hears every block write in the client's world (attached to every block,
+/// `horizon:class/block`) and marks its chunk for the map.
+struct BlockWrites;
+
+#[mod_api::horizon_part]
+impl mod_api::BlockPart for BlockWrites {
+    fn on_block_state_change(
+        &self,
+        level: mod_api::LevelSide,
+        event: &mut mod_api::OnBlockStateChangeEvent,
+    ) {
+        if let mod_api::LevelSide::Client(_) = level {
+            let p = event.pos;
+            bridge::block_changed([p.x, p.y, p.z]);
+        }
+    }
+}
+
+/// The single-player world's folder name and seed, as its server tells them.
 pub fn server_state(world: Option<String>, seed: Option<(i64, bool)>) {
     *SERVER_WORLD.lock() = world;
     *SERVER_SEED.lock() = seed;
@@ -4403,7 +4573,7 @@ fn draw_beam(draw: &mut dyn mod_api::WorldDrawContext, base: [f64; 3], height: f
 }
 
 #[cfg(test)]
-mod fork_drawing_tests {
+mod drawing_tests {
     use super::*;
     #[derive(Default)]
     struct Draw {
@@ -4448,7 +4618,7 @@ mod fork_drawing_tests {
             },
         ];
         let mut draw = Draw::default();
-        paint(&mut draw, &ops);
+        paint_with(&mut draw, &ops, &|_| None);
         assert_eq!(draw.text_colors, [0x80445566, 0xC0112233, 0xC0112233]);
         assert_eq!(draw.scaled_colors, [0x80445566]);
     }

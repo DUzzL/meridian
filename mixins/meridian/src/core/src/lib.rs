@@ -29,6 +29,7 @@ pub mod keybinds;
 pub mod minimap;
 pub mod minimap_image;
 pub mod nearest;
+pub mod nether_caves;
 pub mod persist;
 pub mod radar;
 pub mod region;

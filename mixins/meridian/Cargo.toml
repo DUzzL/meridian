@@ -9,9 +9,10 @@ license = "GPL-3.0-or-later"
 path = "src/lib.rs"
 
 [dependencies]
-# The launcher supplies this exact SDK. Registry dependencies are pinned in
-# this bundle's Cargo.lock and may not alter the SDK's dependency graph.
-horizon-mod-api = { git = "https://github.com/arismoko/horizon", rev = "afe471cf15df56439f23cd991d0d4b85563a14fc" }
+# The SDK of the build pinned in horizon-mod.toml; `cargo horizon-mod` fetches
+# it into .horizon/sdk/ (never committed or packed). Registry dependencies are
+# pinned in this bundle's Cargo.lock and may not alter the SDK's graph.
+horizon-mod-api = { path = ".horizon/sdk/api/crates/horizon-mod-api" }
 meridian-core = { path = "src/core" }
 meridian-host = { path = "src/host" }
 meridian-seedatlas = { path = "src/seedatlas" }

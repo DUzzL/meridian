@@ -588,3 +588,31 @@ mod tests {
         );
     }
 }
+
+/// Vanilla's map colours (`MapColor.col`, 0xRRGGBB) by `MapColor.id`; 0 is
+/// `MapColor.NONE`. The mod API names a block state's colour by its id.
+pub const MAP_COLORS: [u32; 62] = [
+    0, 8368696, 16247203, 13092807, 16711680, 10526975, 10987431, 31744, 16777215, 10791096,
+    9923917, 7368816, 4210943, 9402184, 16776437, 14188339, 11685080, 6724056, 15066419, 8375321,
+    15892389, 5000268, 10066329, 5013401, 8339378, 3361970, 6704179, 6717235, 10040115, 1644825,
+    16445005, 6085589, 4882687, 55610, 8476209, 7340544, 13742497, 10441252, 9787244, 7367818,
+    12223780, 6780213, 10505550, 3746083, 8874850, 5725276, 8014168, 4996700, 4993571, 5001770,
+    9321518, 2430480, 12398641, 9715553, 6035741, 1474182, 3837580, 5647422, 1356933, 6579300,
+    14200723, 8365974,
+];
+
+/// The colour of map colour `id` (0 for none or an unknown id).
+pub fn map_color(id: u8) -> u32 {
+    MAP_COLORS.get(usize::from(id)).copied().unwrap_or(0)
+}
+
+#[cfg(test)]
+mod map_color_tests {
+    #[test]
+    fn map_colors_match_vanilla_ids() {
+        assert_eq!(super::map_color(0), 0);
+        assert_eq!(super::map_color(1), 0x7FB238, "GRASS");
+        assert_eq!(super::map_color(12), 0x4040FF, "WATER");
+        assert_eq!(super::map_color(200), 0);
+    }
+}
