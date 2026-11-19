@@ -406,7 +406,8 @@ pub fn frame(host: &mut dyn ClientHost) {
         .map(|r| r.pos);
     let (want_entities, roof) = with(|s| {
         s.player_biome = biome;
-        if spawn.is_some() {
+        if spawn.is_some() && spawn != s.world_spawn {
+            log::info!("meridian: world spawn {:?}", spawn);
             s.world_spawn = spawn;
         }
         (s.want_entities, s.roof_radius)

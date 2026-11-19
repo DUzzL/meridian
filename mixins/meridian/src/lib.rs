@@ -11,6 +11,7 @@ mod canvas;
 pub mod gpu;
 pub mod gpu_map;
 mod icons;
+mod mod_log;
 pub use meridian_core as core;
 
 use std::collections::HashMap;
@@ -870,6 +871,7 @@ impl Meridian {
     fn with_state<R>(&self, host: &dyn ClientHost, f: impl FnOnce(&mut State) -> R) -> R {
         let mut guard = self.state.lock();
         let state = guard.get_or_insert_with(|| {
+            mod_log::start(&data_dir(host));
             // Claim both roots before any loader can quarantine a file or save defaults.
             meridian_core::persist::claim_data_dir(&data_dir(host));
             meridian_core::persist::claim_data_dir(&config_dir(host));
