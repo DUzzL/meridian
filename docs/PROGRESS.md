@@ -597,3 +597,13 @@ Das Audit (`docs/AUDIT_REPORT.md`, Commit `92c0fd5`) fand 6 hohe, 23 mittlere un
 - Radar: Items rot, Abdunklung nur darunter (gemessene Kurve), Punktgröße wie die Referenz, Farben je Klasse einstellbar.
 - Seed Atlas: keine Gateways auf der Hauptinsel; End und Nether im Look der erkundeten Karte, alle Detailstufen gleich hell. Fabric-Version angeglichen.
 - Messtests (von Hand): `cargo test -p meridian-core --release --test calibrate_look -- --ignored --nocapture`.
+
+## Nur noch die öffentliche Mod-API von Horizon (2026-11-19, D-046)
+
+- **Upstream:** Die Mod-API des Forks ist in `horizon-rust/horizon` gemerget. Meridian ist auf `f00125f` (Nightly 2026-11-19) gepinnt und nutzt nur noch die öffentliche API: keine Mixins, keine Support-Module, keine Spiel-Interna.
+- **Neu gebaut über die API:** Chunk-Ereignisse und Chunk-Lesen, Blockänderungen über einen Block-Part, Radar, Dachprüfung, Texturen über `resource()`, Seed und Weltordner aus `server_started`, Chat und Zwischenablage. Die Karten werden auf der CPU zusammengesetzt und über `mod_image` gezeigt.
+- **Seed Atlas:** Gelände der Overworld aus der Höhenschätzung der Engine; die Höhlenmaske des Nethers unverändert im Kern.
+- **Daten:** `horizon-mod-data/meridian`, alte Daten werden einmal verschoben; eigenes `meridian.log`.
+- **Tests:** Kern 276, Seed-Atlas-Parität, Adapter-Tests; Clippy sauber; Paket geprüft; nativer Build mit dem normalen Launcher 0.2.81 ohne Korrekturen.
+- **Im Spiel geprüft (macOS, Singleplayer):** Minimap, Höhlenmodus, Blockänderungen, Weltkarte mit Seed-Ebene, Nether, Befehle, Wegpunkte, Neustart, Migration; etwa 450 FPS mit offener Weltkarte. Einzelheiten: [HORIZON_PORT.md](HORIZON_PORT.md).
+- **Offen:** Test auf einem Server; auf Servern nur eine Karte pro Adresse, weil die API dem Client keinen Weltspawn gibt; `fits` meldet Builds mit geändertem `text::Text` noch als unpassend.

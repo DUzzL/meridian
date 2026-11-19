@@ -692,3 +692,40 @@ The user requested a fork port, testing and issue reports. Branch:
 
 The exact validation results and reported issues belong in `FORK_PORT.md`.
 Earlier decisions describe the upstream implementation and its history.
+
+## D-046: Only Horizon's public mod API, upstream (2026-11-19)
+
+The fork's mod API was merged into `horizon-rust/horizon` (#16941, 2026-11-16).
+The user asked for a complete move to the modding API and chose, after the
+trade-offs were laid out, the public API alone over keeping the native GPU
+renderer and terrain sampler: a mod without `[native.*]` tables or internals
+can be built by the launcher on later builds that keep what it uses, while a
+native table pins it to one exact build. Work lands on `main`.
+
+- **Pins:** `horizon-rust/horizon` `f00125f` (Nightly 2026-11-19, first SDK
+  after the merge); SDK by path (`.horizon/sdk`); registry lock started from
+  the game's lock (a fresh resolve moved `libc` against the game's graph).
+- **Chunk events and reads:** `client_chunk_load`/`unload` (single player
+  too), a block part on `horizon:class/block` for block writes, `LevelRef`
+  reads for the columns (about 40 µs a chunk, measured in a probe mod).
+- **Maps:** composed on the CPU and shown through `ClientHost::mod_image`;
+  the GPU shaders are ported. Measured: about 450 FPS with the world map open.
+  The world map is at most 1024 pixels a side (the slot's size), stretched on
+  larger windows; the minimap is composed at physical pixels.
+- **Seed Atlas:** the Overworld's relief from the engine's height estimate
+  (no API terrain for a seed); the Nether cave mask moved into the core as is.
+- **Textures** through `resource()` (resource packs included), not the game's
+  prepared folder.
+- **Data:** `horizon-mod-data/meridian` (the folder `data_files()` names);
+  the old settings data folder's entries are moved once.
+- **Replacements for missing client API:** notices drawn over the hotbar
+  (no client action bar), F3 followed from the key, Meridian's own log file
+  (the mod's `log` is a separate crate instance), the clipboard written inside
+  the input hooks.
+- **`fits`:** Meridian's own types and variants named like API records were
+  renamed; `GuiDraw::Text` remains (scaled text must be in the pose's batch).
+- **Known regression:** on servers, one map per address; the API gives a
+  client no world spawn (`HORIZON_PORT.md`, limits).
+
+`docs/FORK_PORT.md` became `docs/HORIZON_PORT.md`; the fork's SDK build
+script and launcher patches are removed.

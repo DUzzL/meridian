@@ -21,5 +21,8 @@ structure icons come from the Seed Atlas project.
 
 ## Horizon
 
-The Nether cave mask in `mixins/meridian/src/game_terrain_sampler.rs` follows
-Horizon's port of the vanilla cave carver (MIT, https://github.com/horizon-rust/horizon).
+The Nether cave mask in `mixins/meridian/src/core/src/nether_caves.rs` follows
+Horizon's port of the vanilla cave carver (MIT at the time it was ported,
+https://github.com/horizon-rust/horizon). The map colour table
+(`core/src/color.rs`) and the default player skins (`core/src/radar.rs`) are
+vanilla's values, as Horizon lists them.

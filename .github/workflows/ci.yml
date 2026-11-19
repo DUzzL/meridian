@@ -49,16 +49,20 @@ jobs:
         run: tools/vendor-seedatlas.sh --check
 
   adapter:
-    name: Fork API and package
+    name: Mod API adapter and package
     runs-on: ubuntu-latest
-    # Full native callback and in-game checks need the owner's prepared game.
+    # The launcher's native build and the game test need a prepared game.
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
-      - run: rustup toolchain install 1.99.1 --profile minimal && rustup default 1.99.1
+      - run: rustup toolchain install 1.99.1 --profile minimal --component clippy && rustup default 1.99.1
+      - name: Install cargo-horizon-mod at the pinned build
+        run: |
+          pin=$(python3 -c 'import tomllib; print(tomllib.load(open("mixins/meridian/horizon-mod.toml","rb"))["native"]["horizon"])')
+          cargo install --locked --git https://github.com/horizon-rust/horizon --rev "$pin" cargo-horizon-mod
       - run: tools/check-adapter.sh --all-targets
-      - name: Install the pinned fork package tool
-        run: cargo install --locked --git https://github.com/arismoko/horizon --rev afe471cf15df56439f23cd991d0d4b85563a14fc cargo-horizon-mod
+      - run: MERIDIAN_CARGO_COMMAND=clippy tools/check-adapter.sh --all-targets -- -D warnings
+      - run: MERIDIAN_CARGO_COMMAND=test tools/check-adapter.sh
       - name: Pack and validate the .hmod
         run: tools/pack-hmod.sh
       - uses: actions/upload-artifact@v4

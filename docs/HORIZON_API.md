@@ -1,7 +1,8 @@
-> Historical upstream audit (2026-11-06). The `port/arismoko-horizon` branch
-> targets the mod API fork; see [FORK_PORT.md](FORK_PORT.md) for its current
-> package, API mapping and validation. The upstream API details below remain
-> as the rationale for the original bridge.
+> Historical upstream audit (2026-11-06). Since 2026-11-19 Meridian uses only
+> Horizon's public mod API (the fork's API, merged upstream); see
+> [HORIZON_PORT.md](HORIZON_PORT.md) for the package, the API mapping, the
+> validation and the API's current limits. The details below remain as the
+> rationale for the original bridge.
 
 # Horizon: Client-Mod-API (Phase 0)
 

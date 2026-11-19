@@ -6,36 +6,29 @@ Meridian is an independent project. It is not affiliated with or endorsed by the
 
 ## Install
 
-This branch ports Meridian to the **arismoko/horizon mod API fork**. It uses the
-fork launcher and the flat `.hmod` format; the build pins are in
-`mixins/meridian/horizon-mod.toml`. See [the port validation record](docs/FORK_PORT.md)
-for the exact tested build and any outstanding limitations. The published macOS
-SDK and launcher currently need the local corrections recorded there before a
-native game can start; this branch is not yet an out-of-the-box macOS release.
+Meridian is a native Horizon mod that uses only Horizon's public mod API
+(no mixins, no game internals). It is built for the Horizon build pinned in
+`mixins/meridian/horizon-mod.toml` (currently Nightly 2026-11-19, `f00125f`);
+the launcher may also build it on later builds that keep the API items it
+uses (`cargo horizon-mod fits` tells). See [the port record](docs/HORIZON_PORT.md)
+for the tested build and the API's current limits.
 
 A built package is in [`dist/meridian-0.1.0.hmod`](dist/meridian-0.1.0.hmod)
-(SHA-256 in `dist/meridian-0.1.0.hmod.sha256`), for the fork at
-`afe471cf15df56439f23cd991d0d4b85563a14fc`. It holds the mod's source; the
-fork launcher compiles it into the game.
+(SHA-256 in `dist/meridian-0.1.0.hmod.sha256`). It holds the mod's source; the
+launcher compiles it against the game's published SDK.
 
-To build the package yourself, use the fork's `cargo-horizon-mod` tool:
-
-```bash
-tools/pack-hmod.sh
-```
-
-Install `meridian-0.1.0.hmod` in the instance's `horizon-mods/` folder,
-enable `mod.meridian:true` in `horizon-mods.txt`, and use **Build** on the fork
-launcher's Mods page. A native source mod must be compiled before it can run.
-From source, with the fork launcher on your PATH:
+Put `meridian-0.1.0.hmod` in the instance's `horizon-mods/` folder, turn it on
+on the launcher's Mods page and use **Build**. From the command line:
 
 ```bash
 horizon-launcher native-build mixins/meridian --instance "My Instance" --trust-native-code
 ```
 
-The game instance must use the exact Horizon revision the mod pins. A newer
-published SDK may require a local developer base until a matching game release
-ships; the validation record describes this case.
+To build the package yourself, with `cargo-horizon-mod` installed:
+
+```bash
+tools/pack-hmod.sh
+```
 
 ## Keys
 
@@ -79,7 +72,7 @@ The engine is the Seed Atlas engine itself, with the C interface the Fabric vers
 ## Coming from other map mods
 
 - Default keys and most options follow the common conventions of popular minimap and world map mods, so the keys you know work.
-- Waypoints, map data and settings are Meridian's own (`<instance>/horizon-mods/.horizon-mod-data/meridian`, settings in the game's config folder). Waypoints shared in chat in the usual text form get a clickable "[Add waypoint]" link that adds them as temporary waypoints (`/meridian waypoint shared` lists the last ones, `/meridian waypoint accept [n]` adds one).
+- Waypoints, map data and settings are Meridian's own (`<instance>/horizon-mod-data/meridian`, settings in the game's config folder; data of earlier versions is moved there once). Waypoints shared in chat in the usual text form get a clickable "[Add waypoint]" link that adds them as temporary waypoints (`/meridian waypoint shared` lists the last ones, `/meridian waypoint accept [n]` adds one).
 - Seed Atlas users: the commands, options, marker types and defaults match the Fabric version 2.0.
 
 ## Development
@@ -89,22 +82,23 @@ cargo test --workspace
 ```
 
 ```bash
-tools/check-adapter.sh
+tools/check-adapter.sh --all-targets
 ```
 
-The API check uses a clean source checkout at the exact fork pin (`HORIZON_DIR`
-can name one). It checks the public adapter, not the game-side native callbacks.
-The full native build checks those too. For an isolated launcher test, set
-`HORIZON_LAUNCHER` to the fork executable and use:
+The adapter check compiles `mixins/meridian` against the SDK of the pinned
+build (`mixins/meridian/.horizon/sdk`, fetched by `cargo horizon-mod`),
+without touching the bundle's lock; `MERIDIAN_CARGO_COMMAND=clippy` or `test`
+runs those instead. The launcher's native build stays the final check.
+For an isolated launcher, set `HORIZON_LAUNCHER` to its executable:
 
 ```bash
-tools/fork-launcher.sh install nightly
-tools/fork-launcher.sh prepare --minecraft "/path/to/your/Minecraft-or-Prism"
-tools/fork-launcher.sh native-build mixins/meridian --trust-native-code
+tools/launcher.sh install nightly-2026-11-19-f00125f
+tools/launcher.sh prepare --minecraft "/path/to/your/Minecraft-or-Prism"
+tools/launcher.sh native-build mixins/meridian --version nightly-2026-11-19-f00125f --trust-native-code
 ```
 
-This helper keeps all launcher settings, saves and logs under `target/fork-runtime`.
-Do not confuse an API check with a full native build or an in-game test.
+It keeps all launcher settings, saves and logs under `target/launcher-runtime`.
+Meridian writes its own log to `<instance>/horizon-mod-data/meridian/meridian.log`.
 
 `docs/` holds the feature list, key list, decisions and progress; `docs/SEEDATLAS_PORT.md` describes how the Seed Atlas engine is built in and tested.
 

@@ -13,7 +13,7 @@ the same, bit for bit, for every Minecraft version (1.1 to 26.3). Until
   `tables/`) and `seedatlas-sax/` (`seedatlas_sax.c`, `.h`), at the commit in
   `data/meridian/seedatlas_c/seedatlas_commit`.
 - The crate compiles a copy in `data/meridian/seedatlas_c/`, because the
-  fork launcher builds from the flat `.hmod` bundle alone.
+  launcher builds from the flat `.hmod` package alone.
   `tools/vendor-seedatlas.sh <checkout>` makes the copy from a clean Seed Atlas
   checkout and records its commit; `tools/vendor-seedatlas.sh --check` (CI)
   compares it with that commit on GitHub. Never edit
