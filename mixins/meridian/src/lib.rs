@@ -367,46 +367,63 @@ struct HorizonHost<'a> {
 fn data_dir(host: &dyn ClientHost) -> PathBuf {
     let dir = host.instance_dir().join("horizon-mod-data").join(MOD_ID);
     static MIGRATED: std::sync::Once = std::sync::Once::new();
-    MIGRATED.call_once(|| migrate_data(&host.instance_dir(), &dir));
+    MIGRATED.call_once(|| {
+        mod_log::start(&dir);
+        migrate_data(&host.instance_dir(), &dir);
+    });
     dir
 }
 
+/// What Meridian keeps at the top of its data folder: the only names
+/// [`migrate_data`] moves.
+const DATA_ENTRIES: [&str; 4] = ["worlds", "exports", "seeds.toml", "completed.json"];
+
 /// Moves what earlier versions kept in the settings data folder
 /// (`horizon-mods/.horizon-mod-data/meridian`, which the game reads as one
-/// file per setting) into the bulk data folder, once. Nothing is replaced:
-/// an entry already in the new folder stays and the old one is left.
+/// file per setting) into the bulk data folder, once. Only Meridian's own
+/// entries move, and nothing is replaced: an entry already in the new folder
+/// stays and the old one is left. The old folder's empty lock file goes, and
+/// the folder with it when nothing else is left.
 fn migrate_data(game: &std::path::Path, to: &std::path::Path) {
     let from = game.join("horizon-mods").join(".horizon-mod-data").join(MOD_ID);
-    let Ok(entries) = std::fs::read_dir(&from) else {
+    if !from.is_dir() {
         return;
-    };
+    }
     if let Err(e) = std::fs::create_dir_all(to) {
         log::warn!("meridian: cannot create {}: {e}", to.display());
         return;
     }
     let (mut moved, mut kept) = (0, 0);
-    for entry in entries.flatten() {
-        let target = to.join(entry.file_name());
-        if target.exists() {
+    for name in DATA_ENTRIES {
+        let (old, new) = (from.join(name), to.join(name));
+        if !old.exists() {
+            continue;
+        }
+        if new.exists() {
             kept += 1;
             continue;
         }
-        match std::fs::rename(entry.path(), &target) {
+        match std::fs::rename(&old, &new) {
             Ok(()) => moved += 1,
             Err(e) => {
                 kept += 1;
-                log::warn!("meridian: cannot move {}: {e}", entry.path().display());
+                log::warn!("meridian: cannot move {}: {e}", old.display());
             }
         }
     }
-    if kept == 0 {
-        let _ = std::fs::remove_dir(&from);
+    let lock = from.join("meridian.lock");
+    if std::fs::metadata(&lock).is_ok_and(|m| m.is_file() && m.len() == 0) {
+        let _ = std::fs::remove_file(&lock);
     }
-    log::info!(
-        "meridian: moved {moved} entries of the old data folder {} to {} ({kept} left)",
-        from.display(),
-        to.display()
-    );
+    // Removes the folder only when empty (other entries are not Meridian's).
+    let _ = std::fs::remove_dir(&from);
+    if moved + kept > 0 {
+        log::info!(
+            "meridian: moved {moved} entries of the old data folder {} to {} ({kept} left)",
+            from.display(),
+            to.display()
+        );
+    }
 }
 
 fn config_dir(host: &dyn ClientHost) -> PathBuf {
@@ -871,7 +888,6 @@ impl Meridian {
     fn with_state<R>(&self, host: &dyn ClientHost, f: impl FnOnce(&mut State) -> R) -> R {
         let mut guard = self.state.lock();
         let state = guard.get_or_insert_with(|| {
-            mod_log::start(&data_dir(host));
             // Claim both roots before any loader can quarantine a file or save defaults.
             meridian_core::persist::claim_data_dir(&data_dir(host));
             meridian_core::persist::claim_data_dir(&config_dir(host));
@@ -1143,7 +1159,7 @@ fn paint_with(
                         // A pose pushed in one `gui_paint` ends with that
                         // call, so the text goes in the same batch. `fits`
                         // reads this variant as building the API's `Text`
-                        // record (docs/HORIZON_PORT.md).
+                        // record, even under another name (docs/HORIZON_PORT.md).
                         GuiDraw::Text {
                             text: Text::literal(text.clone()),
                             x: 0,
@@ -2100,6 +2116,7 @@ impl Hooks for Meridian {
         _event: &mut ClientResourcesReloadedEvent,
     ) {
         bridge::clear_looks();
+        canvas::invalidate();
         *TEXTURES.lock() = None;
         self.with_state(&*host, |s| s.face_cache.clear());
         self.send(host, HostEvent::ResourcesReloaded);
@@ -4630,5 +4647,37 @@ mod drawing_tests {
         paint_with(&mut draw, &ops, &|_| None);
         assert_eq!(draw.text_colors, [0x80445566, 0xC0112233, 0xC0112233]);
         assert_eq!(draw.scaled_colors, [0x80445566]);
+    }
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+
+    #[test]
+    fn migration_moves_only_meridians_entries_and_replaces_nothing() {
+        let root = std::env::temp_dir().join(format!("meridian-migrate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let old = root.join("horizon-mods/.horizon-mod-data").join(MOD_ID);
+        let new = root.join("horizon-mod-data").join(MOD_ID);
+        std::fs::create_dir_all(old.join("worlds/w")).unwrap();
+        std::fs::create_dir_all(old.join("exports")).unwrap();
+        std::fs::write(old.join("seeds.toml"), "old").unwrap();
+        std::fs::write(old.join("meridian.lock"), "").unwrap();
+        // A file the game keeps there (a setting) is not Meridian's.
+        std::fs::write(old.join("some_setting"), "1").unwrap();
+        std::fs::create_dir_all(new.join("exports")).unwrap();
+        std::fs::write(new.join("seeds.toml"), "new").unwrap();
+
+        migrate_data(&root, &new);
+
+        assert!(new.join("worlds/w").is_dir(), "moved");
+        assert!(!old.join("worlds").exists());
+        assert_eq!(std::fs::read_to_string(new.join("seeds.toml")).unwrap(), "new");
+        assert_eq!(std::fs::read_to_string(old.join("seeds.toml")).unwrap(), "old");
+        assert!(old.join("exports").is_dir(), "an entry already there is left");
+        assert!(!old.join("meridian.lock").exists(), "the empty lock goes");
+        assert!(old.join("some_setting").is_file(), "the rest stays");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

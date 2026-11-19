@@ -15,11 +15,15 @@ was merged into `horizon-rust/horizon` on 2026-11-16. The fork port
   and has **no** `[native.*]` table: no mixins, support modules or internals.
 - `Cargo.toml` names the SDK by path, `.horizon/sdk/api/crates/horizon-mod-api`,
   which `cargo horizon-mod` fetches and checks (never committed or packed).
-- `Cargo.lock` is the registry lock the launcher consumes. It starts from the
-  game's lock at the pin, so the mod's registry packages (`png`, `log`,
-  `parking_lot`, `chrono` and their dependencies) keep the game's versions;
-  a lock resolved fresh by `native-lock --update-lock` picked `libc 0.2.191`
-  and the build refused it against the game's graph.
+- `Cargo.lock` is the registry lock the launcher consumes: only the 71
+  registry packages reachable from Meridian's own crates, each at the version
+  and checksum of the game's lock at the pin (`tools/mod-lock.py` writes it).
+  The launcher refuses a lock that pins a game package differently from the
+  game's graph: a fresh `native-lock --update-lock` took `libc 0.2.191`
+  against the game's `0.2.190`, and a copy of the whole game lock would break
+  on any of its ~600 packages the game moves (11 moved between the fork pin
+  of 2026-11-13 and this one). With the minimal lock only Meridian's own
+  dependencies matter; it built against both `f00125f` and `dd67b76`.
 - `icon.png` (512 x 512) is the launcher's mod list icon; the package also
   carries `uses.json`, the list `fits` reads.
 
@@ -80,9 +84,11 @@ player, driven with `horizon-ctl` and screenshots):
 - Nether: dimension change, the Seed Atlas layer with the carved floors.
 - `/seedatlas status` (seed detected from the world), `/meridian waypoint add`,
   `export`, `set list`; notices drawn over the hotbar.
-- Restart: map data and waypoints persist; a file in the old data folder
-  (`horizon-mods/.horizon-mod-data/meridian`) is moved to the new one and the
-  old folder is removed; `meridian.log` is written.
+- Restart: map data and waypoints persist; `meridian.log` is written. Data
+  of earlier versions in `horizon-mods/.horizon-mod-data/meridian` moves
+  once: only Meridian's own entries (`worlds`, `exports`, `seeds.toml`,
+  `completed.json`), never replacing one, with the old empty lock file; other
+  files there (the game's settings store) stay (unit test).
 
 Not tested: a remote server (the dedicated server needs the player's EULA
 consent), resource pack reload, the End, structure markers.
@@ -123,6 +129,10 @@ consent), resource pack reload, the End, structure markers.
     a build that changes `text::Text` is reported as not fitting
     (nightly-2026-11-18 is, against the pin). Other API-named types and
     variants of Meridian's own were renamed for the scan.
+11. **Registry dependencies.** Meridian's registry crates (`serde`, `toml`,
+    `flate2`, `png`, `chrono`, `parking_lot`, `log`, `cc` and theirs) are also
+    in the game's graph. A build that moves one of them refuses the lock until
+    `tools/mod-lock.py` is run for it, whatever `fits` says.
 
 ## Reproduce
 
@@ -131,6 +141,7 @@ cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
 tools/check-adapter.sh --all-targets
 MERIDIAN_CARGO_COMMAND=clippy tools/check-adapter.sh --all-targets -- -D warnings
+tools/mod-lock.py          # after a pin or dependency change
 tools/pack-hmod.sh
 (cd mixins/meridian && cargo horizon-mod fits ../../target/meridian-0.1.0.hmod)
 ```

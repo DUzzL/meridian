@@ -123,6 +123,15 @@ pub fn compose_and_upload(host: &mut dyn ClientHost, gui_scale: f32) {
     }
 }
 
+/// Forgets what was uploaded: a resource reload packs the HUD atlas anew,
+/// with the slot empty, so the next frame uploads the picture again.
+pub fn invalidate() {
+    with(|c| {
+        c.shown = None;
+        c.signature = 0;
+    });
+}
+
 /// Draws the minimap's picture into `rect` (GUI pixels), if it is the one
 /// uploaded.
 pub fn draw_minimap(draw: &mut dyn DrawContext, rect: [f32; 4]) {

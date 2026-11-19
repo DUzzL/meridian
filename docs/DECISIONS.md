@@ -703,8 +703,10 @@ can be built by the launcher on later builds that keep what it uses, while a
 native table pins it to one exact build. Work lands on `main`.
 
 - **Pins:** `horizon-rust/horizon` `f00125f` (Nightly 2026-11-19, first SDK
-  after the merge); SDK by path (`.horizon/sdk`); registry lock started from
-  the game's lock (a fresh resolve moved `libc` against the game's graph).
+  after the merge); SDK by path (`.horizon/sdk`). The registry lock holds only
+  Meridian's own dependency tree at the game's versions (`tools/mod-lock.py`):
+  a fresh resolve moved `libc` against the game's graph, and a copy of the
+  whole game lock would break whenever the game moves any package.
 - **Chunk events and reads:** `client_chunk_load`/`unload` (single player
   too), a block part on `horizon:class/block` for block writes, `LevelRef`
   reads for the columns (about 40 µs a chunk, measured in a probe mod).

@@ -1587,9 +1587,9 @@ pub fn options() -> Vec<Opt> {
         ),
         toggle!("Chunk Grid", MapOverlay, minimap.chunk_grid),
         toggle!("Slime Chunks", MapOverlay, minimap.slime_chunks),
-        toggle!("Light MapOverlay", MapOverlay, minimap.light_overlay),
+        toggle!("Light Overlay", MapOverlay, minimap.light_overlay),
         Opt {
-            label: "Light MapOverlay Min",
+            label: "Light Overlay Min",
             group: MapOverlay,
             value: |s| format!("{}", s.minimap.light_overlay_range[0]),
             step: |s, b| {
@@ -1598,7 +1598,7 @@ pub fn options() -> Vec<Opt> {
             },
         },
         Opt {
-            label: "Light MapOverlay Max",
+            label: "Light Overlay Max",
             group: MapOverlay,
             value: |s| format!("{}", s.minimap.light_overlay_range[1]),
             step: |s, b| {
@@ -1890,11 +1890,7 @@ fn seed_atlas_options() -> Vec<Opt> {
                 s.seed_atlas.biome_opacity = ((next * 255 + 50) / 100) as u8;
             },
         },
-        toggle!(
-            "MapOverlay explored",
-            SeedAtlas,
-            seed_atlas.overlay_explored
-        ),
+        toggle!("Overlay explored", SeedAtlas, seed_atlas.overlay_explored),
         toggle!("Biome highlighting", SeedAtlas, seed_atlas.biome_highlight),
         toggle!("Structures", SeedAtlas, seed_atlas.structures),
         Opt {
@@ -2483,7 +2479,7 @@ mod tests {
         let mut s = Settings::default();
         assert_eq!((find("Completed").value)(&s), "100%");
         assert_eq!((find("Marker size").value)(&s), "150%");
-        assert_eq!((find("MapOverlay explored").value)(&s), "OFF");
+        assert_eq!((find("Overlay explored").value)(&s), "OFF");
         assert_eq!((find("Biome highlighting").value)(&s), "OFF");
         assert_eq!((find("World").value)(&s), "Normal, Auto (26.3)");
 
