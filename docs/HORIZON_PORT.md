@@ -7,8 +7,13 @@ was merged into `horizon-rust/horizon` on 2026-11-16. The fork port
 ## Pins and package
 
 - Game and SDK: `horizon-rust/horizon` at
-  `f00125f61f794aaa3d4e950d301f353b35b6ee3d` (Nightly 2026-11-19, Mod SDK
-  `sdk-f00125f61f…`, package format 6, content API `0.2`).
+  `f1bb66f353cf67f2aa4665293fc75c8d91186fc7` (Nightly 2026-11-22, Mod SDK
+  `sdk-f1bb66f353…`, package format 6, content API `0.2`). The port was made
+  and played on `f00125f` (Nightly 2026-11-19); the launcher left Meridian
+  out of an instance that had moved to 2026-11-22 (limit 10), so the pin
+  moved: the mod API only gained profiling items between the two, the
+  adapter compiles, its tests and clippy pass, and the registry lock is
+  unchanged.
 - Tools: Horizon launcher 0.2.81 (stock release, no local corrections);
   `cargo-horizon-mod` built from the pinned source.
 - `horizon-mod.toml` keeps the `[native]` pins (`game`, `horizon`, `mixins`)
@@ -130,7 +135,10 @@ consent), resource pack reload, the End, structure markers.
     `GuiDraw::Text { .. }` (scaled text; a pose ends with its `gui_paint`
     call, so the text must be in the same batch) as building `text::Text`;
     a build that changes `text::Text` is reported as not fitting
-    (nightly-2026-11-18 is, against the pin). Other API-named types and
+    (nightly-2026-11-18 was against `f00125f`, and the launcher left
+    Meridian out of nightly-2026-11-22 for it: "the type text::Text can no
+    longer be built with a literal"). The scan reads any `Path::Name { … }`
+    as every API struct named `Name`, an API enum's variant included. Other API-named types and
     variants of Meridian's own were renamed for the scan.
 11. **Registry dependencies.** Meridian's registry crates (`serde`, `toml`,
     `flate2`, `png`, `chrono`, `parking_lot`, `log`, `cc` and theirs) are also
@@ -153,10 +161,10 @@ tools/pack-hmod.sh
 `target/launcher-runtime` (override with `MERIDIAN_TEST_HOME`):
 
 ```sh
-HORIZON_LAUNCHER=/path/to/horizon-launcher tools/launcher.sh install nightly-2026-11-19-f00125f
+HORIZON_LAUNCHER=/path/to/horizon-launcher tools/launcher.sh install nightly-2026-11-22-f1bb66f
 HORIZON_LAUNCHER=/path/to/horizon-launcher tools/launcher.sh prepare --minecraft "/path/to/Minecraft-or-Prism"
 HORIZON_LAUNCHER=/path/to/horizon-launcher tools/launcher.sh native-build mixins/meridian \
-  --version nightly-2026-11-19-f00125f --trust-native-code
+  --version nightly-2026-11-22-f1bb66f --trust-native-code
 ```
 
 A signed Nightly plays only with a signed-in account. The game test used the

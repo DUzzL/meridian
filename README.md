@@ -8,7 +8,7 @@ Meridian is an independent project. It is not affiliated with or endorsed by the
 
 Meridian is a native Horizon mod that uses only Horizon's public mod API
 (no mixins, no game internals). It is built for the Horizon build pinned in
-`mixins/meridian/horizon-mod.toml` (currently Nightly 2026-11-19, `f00125f`);
+`mixins/meridian/horizon-mod.toml` (currently Nightly 2026-11-22, `f1bb66f`);
 the launcher may also build it on later builds that keep the API items it
 uses (`cargo horizon-mod fits` tells). See [the port record](docs/HORIZON_PORT.md)
 for the tested build and the API's current limits.
@@ -98,9 +98,9 @@ runs those instead. The launcher's native build stays the final check.
 For an isolated launcher, set `HORIZON_LAUNCHER` to its executable:
 
 ```bash
-tools/launcher.sh install nightly-2026-11-19-f00125f
+tools/launcher.sh install nightly-2026-11-22-f1bb66f
 tools/launcher.sh prepare --minecraft "/path/to/your/Minecraft-or-Prism"
-tools/launcher.sh native-build mixins/meridian --version nightly-2026-11-19-f00125f --trust-native-code
+tools/launcher.sh native-build mixins/meridian --version nightly-2026-11-22-f1bb66f --trust-native-code
 ```
 
 It keeps all launcher settings, saves and logs under `target/launcher-runtime`.
