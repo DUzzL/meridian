@@ -17,12 +17,18 @@ A built package is in [`dist/meridian-0.1.0.hmod`](dist/meridian-0.1.0.hmod)
 (SHA-256 in `dist/meridian-0.1.0.hmod.sha256`). It holds the mod's source; the
 launcher compiles it against the game's published SDK.
 
-Put `meridian-0.1.0.hmod` in the instance's `horizon-mods/` folder, turn it on
-on the launcher's Mods page and use **Build**. From the command line:
+Copy it into the instance's game folder as `horizon-native-mods/meridian.hmod`,
+add the line `mod.meridian:true` to `horizon-mods.txt` beside `options.txt`
+(or turn it on on the launcher's Mods page) and use **Build**. From the
+command line:
 
 ```bash
-horizon-launcher native-build mixins/meridian --instance "My Instance" --trust-native-code
+horizon-launcher native-build --instance my-instance --trust-native-code
 ```
+
+`native-build mixins/meridian` compiles the source folder into the
+instance's build without installing the package, so the Mods page does not
+list it.
 
 To build the package yourself, with `cargo-horizon-mod` installed:
 
