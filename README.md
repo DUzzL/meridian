@@ -1,6 +1,6 @@
 # Meridian
 
-A minimap, world map and waypoint mod for [Horizon](https://github.com/arismoko/horizon) (Minecraft 26.3 in Rust), with [Seed Atlas](https://github.com/DUzzL/Seed-Atlas) built in: biomes, terrain and structures of a world from its seed.
+A minimap, world map and waypoint mod for [Horizon](https://github.com/horizon-rust/horizon) (Minecraft 26.3 in Rust), with [Seed Atlas](https://github.com/DUzzL/Seed-Atlas) built in: biomes, terrain and structures of a world from its seed.
 
 Meridian is an independent project. It is not affiliated with or endorsed by the authors of other map mods.
 
